@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "rawdog"
+version = "0.1.0"
+description = "RAW photo managing tool that can fetch, copy, and audit your RAW libraries."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "LicenseRef-RAWDOG-Source-License"
+license-files = ["LICENSE", "NOTICE"]
+authors = [
+  { name = "Nicholas Corrieri", email = "github@innonotion.com" }
+]
+maintainers = [
+  { name = "InnoNotion LLC" }
+]
+keywords = ["raw", "photography", "archive", "backup", "audit", "cli"]
+dependencies = [
+  "platformdirs>=4.0",
+  "pydantic>=2.0",
+  "rich>=13.0",
+  "typer>=0.12",
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest>=8.0",
+]
+
+[project.scripts]
+rawdog = "rawdog.cli:app"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"

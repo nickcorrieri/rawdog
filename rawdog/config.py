@@ -1,0 +1,55 @@
+# Author: Nicholas Corrieri
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from platformdirs import user_config_dir, user_data_dir
+
+from rawdog.models import OrganizationMode, RawdogConfig
+
+APP_NAME = "rawdog"
+
+
+def default_config_path() -> Path:
+    return Path(user_config_dir(APP_NAME, appauthor=False)) / "config.json"
+
+
+def default_database_path() -> Path:
+    return Path(user_data_dir(APP_NAME, appauthor=False)) / "rawdog.sqlite"
+
+
+def load_config(config_path: Path | None = None) -> RawdogConfig:
+    path = config_path or default_config_path()
+    with path.open("r", encoding="utf-8") as handle:
+        data = json.load(handle)
+    return RawdogConfig.model_validate(data)
+
+
+def save_config(config: RawdogConfig, config_path: Path | None = None) -> Path:
+    path = config_path or default_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = config.model_dump(mode="json")
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+        handle.write("\n")
+    return path
+
+
+def build_config(
+    organization_mode: OrganizationMode,
+    working_root: Path,
+    archive_root: Path,
+    database_path: Path | None = None,
+    date_folder_template: str = "YYYY/YYYY-MM",
+    project_folder_template: str = "YYYY/PROJECT",
+) -> RawdogConfig:
+    return RawdogConfig(
+        organization_mode=organization_mode,
+        working_root=working_root.expanduser().resolve(),
+        archive_root=archive_root.expanduser().resolve(),
+        database_path=(database_path or default_database_path()).expanduser(),
+        date_folder_template=date_folder_template,
+        project_folder_template=project_folder_template,
+    )
