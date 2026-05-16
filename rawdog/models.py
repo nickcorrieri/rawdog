@@ -21,6 +21,17 @@ class DenLayoutMode(StrEnum):
     PROJECT = "project"
 
 
+class DenTransferAction(StrEnum):
+    COPY = "copy"
+    MOVE = "move"
+
+
+class PlanStepKind(StrEnum):
+    SNIFF = "sniff"
+    SCORE = "score"
+    DEN = "den"
+
+
 class RawdogConfig(BaseModel):
     organization_mode: OrganizationMode
     working_root: Path | None = None
@@ -83,6 +94,7 @@ class ConsolidationWorkflowCreate(BaseModel):
     source_root: Path
     destination_root: Path
     layout_mode: DenLayoutMode = DenLayoutMode.PRESERVE
+    transfer_action: DenTransferAction = DenTransferAction.COPY
     folder_template: str | None = None
     project_id: int | None = None
     notes: str | None = None
@@ -94,6 +106,7 @@ class ConsolidationWorkflow(BaseModel):
     source_root: Path
     destination_root: Path
     layout_mode: DenLayoutMode
+    transfer_action: DenTransferAction = DenTransferAction.COPY
     folder_template: str | None = None
     project_id: int | None = None
     created_at: datetime
@@ -101,6 +114,48 @@ class ConsolidationWorkflow(BaseModel):
     last_planned_at: datetime | None = None
     last_committed_at: datetime | None = None
     notes: str | None = None
+
+
+class PlanQueueCreate(BaseModel):
+    name: str = Field(min_length=1)
+    notes: str | None = None
+
+
+class PlanQueue(BaseModel):
+    queue_id: int
+    name: str
+    created_at: datetime
+    updated_at: datetime
+    status: str
+    notes: str | None = None
+
+
+class PlanQueueStepCreate(BaseModel):
+    queue_id: int
+    step_order: int
+    step_kind: PlanStepKind
+    source_root: Path | None = None
+    destination_root: Path | None = None
+    layout_mode: DenLayoutMode | None = None
+    transfer_action: DenTransferAction | None = None
+    folder_template: str | None = None
+    project_name: str | None = None
+
+
+class PlanQueueStep(BaseModel):
+    step_id: int
+    queue_id: int
+    step_order: int
+    step_kind: PlanStepKind
+    source_root: Path | None = None
+    destination_root: Path | None = None
+    layout_mode: DenLayoutMode | None = None
+    transfer_action: DenTransferAction | None = None
+    folder_template: str | None = None
+    project_name: str | None = None
+    status: str
+    created_at: datetime
+    updated_at: datetime
 
 
 class SessionCandidate(BaseModel):

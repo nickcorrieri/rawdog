@@ -35,6 +35,11 @@ dependencies = [
   "typer>=0.12",
 ]
 
+[project.urls]
+Homepage = "https://github.com/nickcorrieri/rawdog"
+Repository = "https://github.com/nickcorrieri/rawdog"
+Issues = "https://github.com/nickcorrieri/rawdog/issues"
+
 [project.optional-dependencies]
 test = [
   "pytest>=8.0",

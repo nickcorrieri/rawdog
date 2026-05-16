@@ -7,6 +7,7 @@ import pytest
 from rawdog.safety import (
     SafetyError,
     ensure_archive_destination,
+    ensure_consolidation_roots,
     ensure_distinct_roots,
     ensure_import_roots,
     reject_dangerous_arguments,
@@ -42,3 +43,20 @@ def test_import_destination_cannot_be_inside_source(tmp_path: Path) -> None:
 
     with pytest.raises(SafetyError):
         ensure_import_roots(source, destination)
+
+
+def test_consolidation_allows_destination_as_source_parent(tmp_path: Path) -> None:
+    destination = tmp_path / "archive"
+    source = destination / "OldMess"
+    source.mkdir(parents=True)
+
+    ensure_consolidation_roots(source, destination)
+
+
+def test_consolidation_destination_cannot_be_inside_source(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    destination = source / "archive"
+    source.mkdir()
+
+    with pytest.raises(SafetyError):
+        ensure_consolidation_roots(source, destination)

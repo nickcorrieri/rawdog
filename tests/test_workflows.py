@@ -3,7 +3,7 @@
 from pathlib import Path
 
 from rawdog.db import initialize, session
-from rawdog.models import ConsolidationWorkflowCreate, DenLayoutMode
+from rawdog.models import ConsolidationWorkflowCreate, DenLayoutMode, DenTransferAction
 from rawdog.workflows import create_or_update_workflow, get_workflow_by_name, list_workflows
 
 
@@ -19,6 +19,7 @@ def test_create_and_list_consolidation_workflow(tmp_path: Path) -> None:
                 source_root=tmp_path / "old",
                 destination_root=tmp_path / "archive",
                 layout_mode=DenLayoutMode.PRESERVE,
+                transfer_action=DenTransferAction.COPY,
             ),
         )
 
@@ -29,4 +30,5 @@ def test_create_and_list_consolidation_workflow(tmp_path: Path) -> None:
     assert loaded is not None
     assert loaded.workflow_id == workflow.workflow_id
     assert loaded.layout_mode == DenLayoutMode.PRESERVE
+    assert loaded.transfer_action == DenTransferAction.COPY
     assert workflows[0].name == "old_drive_cleanup"

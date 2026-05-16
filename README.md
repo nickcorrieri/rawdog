@@ -9,6 +9,9 @@ archive permanently to external storage, verify copies, and generate reports.
 RAWDOG is not sync software, cloud backup software, a DAM, a Lightroom
 replacement, or aggressive dedupe tooling.
 
+Current status: pre-alpha CLI scaffold. The safety model, project/profile
+memory, den planning, and queue structure are being built first.
+
 ## Core Rule
 
 ```text
@@ -88,6 +91,12 @@ rawdog verify
 rawdog profiles create
 rawdog profiles list
 rawdog workflows list
+rawdog queue create
+rawdog queue add-sniff
+rawdog queue add-score
+rawdog queue add-den
+rawdog queue show
+rawdog queue run
 ```
 
 ## Cleanup Consolidation
@@ -101,6 +110,41 @@ rawdog sniff /Volumes/OldDrive
 rawdog score /Volumes/OldDrive
 rawdog den /Volumes/OldDrive --dest /Volumes/Archive
 rawdog den /Volumes/OldDrive --dest /Volumes/Archive --commit
+```
+
+Two consolidation workflows are supported:
+
+- External drive to destination drive: audit the source and copy into the destination.
+- Same-drive cleanup: audit an old folder on the destination drive, then copy
+  or move into the RAWDOG structure.
+
+Use `--action copy` for cross-drive consolidation. Use `--action move` only for
+same-drive cleanup when you intentionally want the old folder contents relocated
+after reviewing the queued plan.
+
+## Safe Plan Queues
+
+Long jobs can be queued as safe plans, previewed, and then committed with an
+explicit confirmation. Queues are for operations such as:
+
+- audit/inspect
+- score
+- copy
+- same-filesystem move of unique files with no overwrite
+
+Destructive cleanup is never queued. RAWDOG must not queue deletion, mismatch
+cleanup, thumbnail cleanup, overwrite, rename, or automatic dedupe reduction.
+No queued operation may silently resolve collisions.
+
+```bash
+rawdog queue create old_drive_cleanup
+rawdog queue add-sniff old_drive_cleanup /Volumes/OldDrive
+rawdog queue add-score old_drive_cleanup /Volumes/OldDrive
+rawdog queue add-den old_drive_cleanup /Volumes/OldDrive --dest /Volumes/Archive --action copy
+rawdog queue add-sniff old_drive_cleanup /Volumes/Archive
+rawdog queue show old_drive_cleanup
+rawdog queue run old_drive_cleanup
+rawdog queue run old_drive_cleanup --commit
 ```
 
 `den` preserves existing source folder structure by default, which helps when an
@@ -120,6 +164,18 @@ rawdog workflows list
 
 `den` is append-only. It is not sync, cleanup, or dedupe deletion.
 
+For same-drive cleanup, queue or run move only when the source folder and
+destination root are on the same filesystem:
+
+```bash
+rawdog queue add-den same_drive_cleanup /Volumes/Archive/OldMess \
+  --dest /Volumes/Archive \
+  --action move
+rawdog queue run same_drive_cleanup --commit
+```
+
+Move still refuses overwrites and collisions.
+
 ## Development
 
 RAWDOG targets Python 3.12+.
@@ -127,6 +183,26 @@ RAWDOG targets Python 3.12+.
 ```bash
 python -m pytest
 ```
+
+## Packaging
+
+RAWDOG is structured as a normal Python CLI package with a `pyproject.toml`
+entry point:
+
+```text
+rawdog = "rawdog.cli:app"
+```
+
+Install from a local checkout during development with:
+
+```bash
+python -m pip install -e ".[test]"
+```
+
+Homebrew packaging prep lives in [docs/HOMEBREW.md](docs/HOMEBREW.md) and
+[packaging/homebrew/rawdog.rb.template](packaging/homebrew/rawdog.rb.template).
+The formula needs release tarball URLs, checksums, and Python dependency
+resources before it should be published to a tap.
 
 ## License
 

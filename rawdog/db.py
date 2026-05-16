@@ -7,7 +7,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 6
 
 
 def connect(database_path: Path) -> sqlite3.Connection:
@@ -86,6 +86,7 @@ def migrate(connection: sqlite3.Connection) -> None:
             source_root TEXT NOT NULL,
             destination_root TEXT NOT NULL,
             layout_mode TEXT NOT NULL,
+            transfer_action TEXT NOT NULL DEFAULT 'copy',
             folder_template TEXT,
             project_id INTEGER REFERENCES projects(project_id),
             created_at TEXT NOT NULL,
@@ -93,6 +94,32 @@ def migrate(connection: sqlite3.Connection) -> None:
             last_planned_at TEXT,
             last_committed_at TEXT,
             notes TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS plan_queues (
+            queue_id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'planned',
+            notes TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS plan_queue_steps (
+            step_id INTEGER PRIMARY KEY,
+            queue_id INTEGER NOT NULL REFERENCES plan_queues(queue_id) ON DELETE CASCADE,
+            step_order INTEGER NOT NULL,
+            step_kind TEXT NOT NULL,
+            source_root TEXT,
+            destination_root TEXT,
+            layout_mode TEXT,
+            transfer_action TEXT,
+            folder_template TEXT,
+            project_name TEXT,
+            status TEXT NOT NULL DEFAULT 'planned',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(queue_id, step_order)
         );
 
         CREATE TABLE IF NOT EXISTS files (
@@ -138,7 +165,7 @@ def migrate(connection: sqlite3.Connection) -> None:
         );
 
         INSERT INTO schema_meta(key, value)
-        VALUES ('schema_version', '4')
+        VALUES ('schema_version', '6')
         ON CONFLICT(key) DO UPDATE SET value = excluded.value;
         """
     )
@@ -153,6 +180,12 @@ def migrate(connection: sqlite3.Connection) -> None:
         table="import_profiles",
         column="project_id",
         definition="INTEGER REFERENCES projects(project_id)",
+    )
+    _add_column_if_missing(
+        connection,
+        table="consolidation_workflows",
+        column="transfer_action",
+        definition="TEXT NOT NULL DEFAULT 'copy'",
     )
     _add_column_if_missing(
         connection,

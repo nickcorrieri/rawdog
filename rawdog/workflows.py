@@ -6,7 +6,12 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-from rawdog.models import ConsolidationWorkflow, ConsolidationWorkflowCreate, DenLayoutMode
+from rawdog.models import (
+    ConsolidationWorkflow,
+    ConsolidationWorkflowCreate,
+    DenLayoutMode,
+    DenTransferAction,
+)
 
 
 def _now() -> str:
@@ -21,14 +26,15 @@ def create_or_update_workflow(
     connection.execute(
         """
         INSERT INTO consolidation_workflows (
-            name, source_root, destination_root, layout_mode, folder_template,
+            name, source_root, destination_root, layout_mode, transfer_action, folder_template,
             project_id, created_at, updated_at, notes
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(name) DO UPDATE SET
             source_root = excluded.source_root,
             destination_root = excluded.destination_root,
             layout_mode = excluded.layout_mode,
+            transfer_action = excluded.transfer_action,
             folder_template = excluded.folder_template,
             project_id = excluded.project_id,
             updated_at = excluded.updated_at,
@@ -39,6 +45,7 @@ def create_or_update_workflow(
             str(payload.source_root),
             str(payload.destination_root),
             payload.layout_mode.value,
+            payload.transfer_action.value,
             payload.folder_template,
             payload.project_id,
             now,
@@ -95,6 +102,7 @@ def row_to_workflow(row: sqlite3.Row) -> ConsolidationWorkflow:
         source_root=Path(row["source_root"]),
         destination_root=Path(row["destination_root"]),
         layout_mode=DenLayoutMode(row["layout_mode"]),
+        transfer_action=DenTransferAction(row["transfer_action"] or "copy"),
         folder_template=row["folder_template"],
         project_id=row["project_id"],
         created_at=datetime.fromisoformat(row["created_at"]),

@@ -113,6 +113,29 @@ structure.
 Consolidation workflows are tracked in SQLite so old-drive cleanups can be
 planned, resumed, and reviewed without retyping source/destination roots.
 
+`den` supports two transfer workflows:
+
+- Cross-drive consolidation: copy from a messy source drive into a destination drive.
+- Same-drive consolidation: copy or move from an old messy folder into a RAWDOG
+  destination folder on the same drive.
+
+Move is opt-in, same-filesystem only, and still requires reviewing the queued
+plan before execution.
+
+## Safe Plan Queues
+
+RAWDOG can queue multi-step safe plans for long-running jobs, such as:
+
+```text
+audit -> copy -> audit -> copy
+```
+
+Queued steps may inspect, score, copy, or move unique files on the same
+filesystem with no overwrite. Destructive actions are never queueable. Cleanup
+of thumbnails, mismatch resolution, deletion, overwrite, rename, and automatic
+dedupe reduction must require a separate explicit interactive command and must
+not run independently from a queue.
+
 New projects collect name, optional client, optional tags, optional location,
 and optional notes.
 
@@ -207,6 +230,12 @@ Initial CLI commands:
 - `rawdog profiles create`
 - `rawdog profiles list`
 - `rawdog workflows list`
+- `rawdog queue create`
+- `rawdog queue add-sniff`
+- `rawdog queue add-score`
+- `rawdog queue add-den`
+- `rawdog queue show`
+- `rawdog queue run`
 
 ## Incremental Build Order
 

@@ -7,10 +7,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from rawdog.copier import append_only_copy
+from rawdog.copier import append_only_copy, append_only_move
 from rawdog.datefolders import normalize_date_folder_parts
 from rawdog.inventory import InventoryItem, earliest_raw_capture_time, scan_raw_files
-from rawdog.models import DenLayoutMode
+from rawdog.models import DenLayoutMode, DenTransferAction
 from rawdog.planner import default_date_only_destination, default_project_destination
 
 
@@ -28,6 +28,7 @@ class DenPlan:
     destination_root: Path
     destination_folder: Path
     rows: list[DenPlanRow]
+    transfer_action: DenTransferAction = DenTransferAction.COPY
 
     @property
     def files_to_copy(self) -> int:
@@ -36,6 +37,14 @@ class DenPlan:
     @property
     def bytes_to_copy(self) -> int:
         return sum(row.size_bytes for row in self.rows if row.status == "plan_copy")
+
+    @property
+    def files_to_transfer(self) -> int:
+        return self.files_to_copy
+
+    @property
+    def bytes_to_transfer(self) -> int:
+        return self.bytes_to_copy
 
 
 @dataclass(frozen=True)
@@ -54,13 +63,14 @@ def build_den_plan(
     *,
     project_name: str | None = None,
     layout_mode: DenLayoutMode = DenLayoutMode.PRESERVE,
+    transfer_action: DenTransferAction = DenTransferAction.COPY,
     folder_template: str = "YYYY/YYYY-MM",
 ) -> DenPlan:
     source_root = source_root.expanduser().resolve()
     destination_root = destination_root.expanduser()
     items = scan_raw_files(source_root)
     earliest = earliest_raw_capture_time(source_root) or datetime.now(timezone.utc)
-    if layout_mode == DenLayoutMode.PRESERVE:
+    if layout_mode in {DenLayoutMode.PRESERVE, DenLayoutMode.PRESERVE_DATES}:
         destination_folder = destination_root
     elif layout_mode == DenLayoutMode.PROJECT or project_name:
         destination_folder = default_project_destination(
@@ -86,6 +96,7 @@ def build_den_plan(
         destination_root=destination_root,
         destination_folder=destination_folder,
         rows=rows,
+        transfer_action=transfer_action,
     )
 
 
@@ -95,7 +106,11 @@ def execute_den_plan(plan: DenPlan) -> list[DenPlanRow]:
         if row.status != "plan_copy":
             executed.append(row)
             continue
-        status = append_only_copy(row.source_path, row.destination_path, plan.destination_root)
+        status = (
+            append_only_move(row.source_path, row.destination_path, plan.destination_root)
+            if plan.transfer_action == DenTransferAction.MOVE
+            else append_only_copy(row.source_path, row.destination_path, plan.destination_root)
+        )
         executed.append(
             DenPlanRow(
                 source_path=row.source_path,

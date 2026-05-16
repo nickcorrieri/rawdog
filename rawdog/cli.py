@@ -24,8 +24,12 @@ from rawdog.memory import (
 from rawdog.models import (
     ConsolidationWorkflowCreate,
     DenLayoutMode,
+    DenTransferAction,
     ImportProfileCreate,
     OrganizationMode,
+    PlanQueueCreate,
+    PlanQueueStepCreate,
+    PlanStepKind,
     ProjectCreate,
     RawdogConfig,
 )
@@ -38,11 +42,20 @@ from rawdog.profiles import (
     touch_profile,
 )
 from rawdog.projects import ProjectError, create_project, get_project_by_name, list_projects
+from rawdog.queue import (
+    add_queue_step,
+    create_or_update_queue,
+    get_queue_by_name,
+    list_queue_steps,
+    list_queues,
+)
 from rawdog.safety import (
     SafetyError,
+    ensure_consolidation_roots,
     ensure_distinct_roots,
     ensure_existing_directory,
     ensure_import_roots,
+    ensure_same_filesystem,
     reject_dangerous_arguments,
 )
 from rawdog.workflows import (
@@ -124,8 +137,9 @@ def _show_home_menu() -> None:
     table.add_row("2", "Fetch from card/folder", "rawdog fetch")
     table.add_row("3", "Archive edited project", "rawdog breed")
     table.add_row("4", "Consolidate old drive/folder", "rawdog den")
-    table.add_row("5", "Inspect or score a folder", "rawdog sniff / rawdog score")
-    table.add_row("6", "List saved memory", "rawdog projects/profiles/workflows list")
+    table.add_row("5", "Queue a longer safe job", "rawdog queue create")
+    table.add_row("6", "Inspect or score a folder", "rawdog sniff / rawdog score")
+    table.add_row("7", "List saved memory", "rawdog projects/profiles/workflows/queue list")
     table.add_row("0", "Show full help", "rawdog --help")
     console.print(table)
     console.print(
@@ -134,7 +148,7 @@ def _show_home_menu() -> None:
     )
     choice = Prompt.ask(
         "[bold yellow on black]CHOOSE AN OPTION[/]",
-        choices=["0", "1", "2", "3", "4", "5", "6"],
+        choices=["0", "1", "2", "3", "4", "5", "6", "7"],
         default="0",
         console=console,
     )
@@ -152,8 +166,21 @@ def _show_home_menu() -> None:
             "rawdog score /Volumes/OldDrive",
             "rawdog den /Volumes/OldDrive --dest /Volumes/Archive --layout preserve-dates",
         ],
-        "5": ["rawdog sniff /Volumes/OldDrive", "rawdog score /Volumes/OldDrive"],
-        "6": ["rawdog projects list", "rawdog profiles list", "rawdog workflows list"],
+        "5": [
+            "rawdog queue create old_drive_cleanup",
+            "rawdog queue add-sniff old_drive_cleanup /Volumes/OldDrive",
+            "rawdog queue add-score old_drive_cleanup /Volumes/OldDrive",
+            "rawdog queue add-den old_drive_cleanup /Volumes/OldDrive --dest /Volumes/Archive",
+            "rawdog queue show old_drive_cleanup",
+            "rawdog queue run old_drive_cleanup --commit",
+        ],
+        "6": ["rawdog sniff /Volumes/OldDrive", "rawdog score /Volumes/OldDrive"],
+        "7": [
+            "rawdog projects list",
+            "rawdog profiles list",
+            "rawdog workflows list",
+            "rawdog queue list",
+        ],
         "0": ["rawdog --help"],
     }
     console.print(Panel("\n".join(suggestions[choice]), title="Next Command", border_style="yellow"))
@@ -421,8 +448,9 @@ def den(
     project_name: str | None = typer.Option(None, "--project", help="Optional project folder name."),
     workflow_name: str | None = typer.Option(None, "--workflow", "-w", help="Save or reuse workflow name."),
     layout: DenLayoutMode = typer.Option(DenLayoutMode.PRESERVE, "--layout", help="Destination layout."),
+    action: DenTransferAction = typer.Option(DenTransferAction.COPY, "--action", help="copy or move."),
     template: str | None = typer.Option(None, "--template", help="Folder template override."),
-    dry_run: bool = typer.Option(True, "--dry-run/--commit", help="Preview before copying."),
+    dry_run: bool = typer.Option(True, "--dry-run/--commit", help="Preview before execution."),
 ) -> None:
     """Consolidate a messy RAW source into a RAWDOG folder structure."""
     _, config = _load_or_exit()
@@ -440,10 +468,16 @@ def den(
     try:
         ensure_existing_directory(source_root, "source")
         ensure_existing_directory(destination_root, "destination")
-        ensure_import_roots(source_root, destination_root)
+        ensure_consolidation_roots(source_root, destination_root)
     except SafetyError as exc:
         raise typer.BadParameter(str(exc)) from exc
     effective_layout = loaded_workflow.layout_mode if loaded_workflow and not source else layout
+    effective_action = loaded_workflow.transfer_action if loaded_workflow and not source else action
+    if effective_action == DenTransferAction.MOVE:
+        try:
+            ensure_same_filesystem(source_root, destination_root)
+        except SafetyError as exc:
+            raise typer.BadParameter(str(exc)) from exc
     effective_template = template or (loaded_workflow.folder_template if loaded_workflow else None)
     effective_template = effective_template or (
         config.project_folder_template
@@ -455,9 +489,10 @@ def den(
         destination_root,
         project_name=project_name,
         layout_mode=effective_layout,
+        transfer_action=effective_action,
         folder_template=effective_template,
     )
-    if workflow_name and not dry_run:
+    if workflow_name:
         with session(config.database_path) as connection:
             workflow = create_or_update_workflow(
                 connection,
@@ -466,12 +501,11 @@ def den(
                     source_root=source_root,
                     destination_root=destination_root,
                     layout_mode=effective_layout,
+                    transfer_action=effective_action,
                     folder_template=effective_template,
                 ),
             )
             mark_workflow_planned(connection, workflow.workflow_id)
-    elif workflow_name:
-        console.print(f"Workflow would be saved on commit: {workflow_name}")
     summary = summarize_by_year(plan.rows)
     table = Table(title="RAWDOG Den Plan")
     table.add_column("Destination")
@@ -480,9 +514,9 @@ def den(
     table.add_column("Mode")
     table.add_row(
         str(plan.destination_folder),
-        str(plan.files_to_copy),
-        f"{plan.bytes_to_copy / 1_000_000_000:.2f}",
-        f"{effective_layout.value} / {'dry-run' if dry_run else 'commit'}",
+        str(plan.files_to_transfer),
+        f"{plan.bytes_to_transfer / 1_000_000_000:.2f}",
+        f"{effective_layout.value} / {effective_action.value} / {'dry-run' if dry_run else 'commit'}",
     )
     console.print(table)
     if effective_layout == DenLayoutMode.PRESERVE:
@@ -507,16 +541,24 @@ def den(
     console.print(f"Skipped existing: {skipped}")
     console.print(f"Collisions needing review: {collisions}")
     if dry_run:
-        console.print("No files copied. Re-run with --commit after reviewing the plan.")
+        console.print("Plan queued for review. Re-run with --commit to execute after reviewing.")
+        return
+    confirmed = Prompt.ask(
+        "[bold red on black]Execute this den plan? Type yes[/]",
+        default="no",
+        console=console,
+    )
+    if confirmed.lower() != "yes":
+        console.print("Plan not executed.")
         return
     executed = execute_den_plan(plan)
-    copied = sum(1 for row in executed if row.status == "copied")
+    transferred = sum(1 for row in executed if row.status in {"copied", "moved"})
     if workflow_name:
         with session(config.database_path) as connection:
             workflow = get_workflow_by_name(connection, workflow_name)
             if workflow:
                 mark_workflow_committed(connection, workflow.workflow_id)
-    console.print(f"Copied: {copied}")
+    console.print(f"Transferred: {transferred}")
 
 
 @app.command()
@@ -579,6 +621,9 @@ app.add_typer(profiles_app, name="profiles")
 
 workflows_app = typer.Typer(help="Manage reusable RAWDOG consolidation workflows.")
 app.add_typer(workflows_app, name="workflows")
+
+queue_app = typer.Typer(help="Queue safe audit/copy/move plans.")
+app.add_typer(queue_app, name="queue")
 
 
 @projects_app.command("create")
@@ -690,6 +735,7 @@ def workflow_list() -> None:
     table.add_column("Source")
     table.add_column("Destination")
     table.add_column("Layout")
+    table.add_column("Action")
     table.add_column("Last Commit")
     for workflow in workflows:
         table.add_row(
@@ -698,9 +744,263 @@ def workflow_list() -> None:
             str(workflow.source_root),
             str(workflow.destination_root),
             workflow.layout_mode.value,
+            workflow.transfer_action.value,
             workflow.last_committed_at.isoformat() if workflow.last_committed_at else "",
         )
     console.print(table)
+
+
+@queue_app.command("create")
+def queue_create(name: str = typer.Argument(...), notes: str | None = typer.Option(None, "--notes")) -> None:
+    """Create or update a safe plan queue."""
+    _, config = _load_or_exit()
+    with session(config.database_path) as connection:
+        queue = create_or_update_queue(connection, PlanQueueCreate(name=name, notes=notes))
+    console.print(f"Queued plan #{queue.queue_id}: {queue.name}")
+
+
+@queue_app.command("add-den")
+def queue_add_den(
+    name: str = typer.Argument(...),
+    source: Path = typer.Argument(...),
+    destination: Path = typer.Option(..., "--dest", "-d"),
+    layout: DenLayoutMode = typer.Option(DenLayoutMode.PRESERVE, "--layout"),
+    action: DenTransferAction = typer.Option(DenTransferAction.COPY, "--action"),
+    project_name: str | None = typer.Option(None, "--project"),
+    template: str | None = typer.Option(None, "--template"),
+) -> None:
+    """Add a safe den step to a queue."""
+    _, config = _load_or_exit()
+    source_root = parse_user_path(str(source))
+    destination_root = parse_user_path(str(destination))
+    try:
+        ensure_existing_directory(source_root, "source")
+        ensure_existing_directory(destination_root, "destination")
+        ensure_consolidation_roots(source_root, destination_root)
+        if action == DenTransferAction.MOVE:
+            ensure_same_filesystem(source_root, destination_root)
+    except SafetyError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    with session(config.database_path) as connection:
+        queue = get_queue_by_name(connection, name) or create_or_update_queue(
+            connection,
+            PlanQueueCreate(name=name),
+        )
+        next_order = len(list_queue_steps(connection, queue.queue_id)) + 1
+        step = add_queue_step(
+            connection,
+            PlanQueueStepCreate(
+                queue_id=queue.queue_id,
+                step_order=next_order,
+                step_kind=PlanStepKind.DEN,
+                source_root=source_root,
+                destination_root=destination_root,
+                layout_mode=layout,
+                transfer_action=action,
+                folder_template=template,
+                project_name=project_name,
+            ),
+        )
+    console.print(f"Added queue step #{step.step_order}: den {action.value}")
+
+
+@queue_app.command("add-sniff")
+def queue_add_sniff(name: str = typer.Argument(...), root: Path = typer.Argument(...)) -> None:
+    """Add a read-only sniff step to a queue."""
+    _add_read_only_queue_step(name, root, PlanStepKind.SNIFF)
+
+
+@queue_app.command("add-score")
+def queue_add_score(name: str = typer.Argument(...), root: Path = typer.Argument(...)) -> None:
+    """Add a read-only score step to a queue."""
+    _add_read_only_queue_step(name, root, PlanStepKind.SCORE)
+
+
+def _add_read_only_queue_step(name: str, root: Path, step_kind: PlanStepKind) -> None:
+    _, config = _load_or_exit()
+    source_root = parse_user_path(str(root))
+    try:
+        ensure_existing_directory(source_root, "source")
+    except SafetyError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    with session(config.database_path) as connection:
+        queue = get_queue_by_name(connection, name) or create_or_update_queue(
+            connection,
+            PlanQueueCreate(name=name),
+        )
+        next_order = len(list_queue_steps(connection, queue.queue_id)) + 1
+        step = add_queue_step(
+            connection,
+            PlanQueueStepCreate(
+                queue_id=queue.queue_id,
+                step_order=next_order,
+                step_kind=step_kind,
+                source_root=source_root,
+            ),
+        )
+    console.print(f"Added queue step #{step.step_order}: {step_kind.value}")
+
+
+@queue_app.command("list")
+def queue_list() -> None:
+    """List safe plan queues."""
+    _, config = _load_or_exit()
+    with session(config.database_path) as connection:
+        queues = list_queues(connection)
+    table = Table(title="RAWDOG Plan Queues")
+    table.add_column("ID")
+    table.add_column("Name")
+    table.add_column("Status")
+    table.add_column("Updated")
+    for queue in queues:
+        table.add_row(str(queue.queue_id), queue.name, queue.status, queue.updated_at.isoformat())
+    console.print(table)
+
+
+@queue_app.command("show")
+def queue_show(name: str = typer.Argument(...)) -> None:
+    """Show queued safe steps."""
+    _, config = _load_or_exit()
+    with session(config.database_path) as connection:
+        queue = get_queue_by_name(connection, name)
+        if not queue:
+            raise typer.BadParameter(f"Unknown queue: {name}")
+        steps = list_queue_steps(connection, queue.queue_id)
+    table = Table(title=f"RAWDOG Queue: {queue.name}")
+    table.add_column("#")
+    table.add_column("Kind")
+    table.add_column("Action")
+    table.add_column("Source")
+    table.add_column("Destination")
+    for step in steps:
+        table.add_row(
+            str(step.step_order),
+            step.step_kind.value,
+            step.transfer_action.value if step.transfer_action else "",
+            str(step.source_root or ""),
+            str(step.destination_root or ""),
+        )
+    console.print(table)
+
+
+@queue_app.command("run")
+def queue_run(
+    name: str = typer.Argument(...),
+    dry_run: bool = typer.Option(True, "--dry-run/--commit", help="Preview the queue before execution."),
+) -> None:
+    """Preview or execute queued safe steps in order."""
+    _, config = _load_or_exit()
+    with session(config.database_path) as connection:
+        queue = get_queue_by_name(connection, name)
+        if not queue:
+            raise typer.BadParameter(f"Unknown queue: {name}")
+        steps = list_queue_steps(connection, queue.queue_id)
+    if not steps:
+        raise typer.BadParameter(f"Queue has no steps: {name}")
+
+    total_files = 0
+    total_bytes = 0
+    runnable_steps = []
+    for step in steps:
+        if not step.source_root:
+            raise typer.BadParameter(f"Queue step #{step.step_order} is missing a source.")
+        try:
+            ensure_existing_directory(step.source_root, "source")
+            if step.step_kind == PlanStepKind.DEN:
+                if not step.destination_root:
+                    raise typer.BadParameter(
+                        f"Queue step #{step.step_order} is missing a destination."
+                    )
+                ensure_existing_directory(step.destination_root, "destination")
+                ensure_consolidation_roots(step.source_root, step.destination_root)
+                if step.transfer_action == DenTransferAction.MOVE:
+                    ensure_same_filesystem(step.source_root, step.destination_root)
+        except SafetyError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        if step.step_kind == PlanStepKind.SNIFF:
+            items = scan_raw_files(step.source_root)
+            runnable_steps.append((step, items))
+        elif step.step_kind == PlanStepKind.SCORE:
+            result = score_items(scan_raw_files(step.source_root))
+            runnable_steps.append((step, result))
+        elif step.step_kind == PlanStepKind.DEN:
+            layout_mode = step.layout_mode or DenLayoutMode.PRESERVE
+            transfer_action = step.transfer_action or DenTransferAction.COPY
+            folder_template = step.folder_template or (
+                config.project_folder_template
+                if layout_mode == DenLayoutMode.PROJECT or step.project_name
+                else config.date_folder_template
+            )
+            plan = build_den_plan(
+                step.source_root,
+                step.destination_root,
+                project_name=step.project_name,
+                layout_mode=layout_mode,
+                transfer_action=transfer_action,
+                folder_template=folder_template,
+            )
+            runnable_steps.append((step, plan))
+            total_files += plan.files_to_transfer
+            total_bytes += plan.bytes_to_transfer
+        else:
+            raise typer.BadParameter(f"Queue step #{step.step_order} is not safe: {step.step_kind.value}")
+
+    table = Table(title=f"RAWDOG Queue Run: {queue.name}")
+    table.add_column("#")
+    table.add_column("Kind")
+    table.add_column("Action")
+    table.add_column("Source")
+    table.add_column("Destination")
+    table.add_column("Files", justify="right")
+    table.add_column("GB", justify="right")
+    for step, result in runnable_steps:
+        if step.step_kind == PlanStepKind.DEN:
+            files = result.files_to_transfer
+            gb = result.bytes_to_transfer / 1_000_000_000
+            destination_text = str(result.destination_folder)
+            action_text = result.transfer_action.value
+        elif step.step_kind == PlanStepKind.SNIFF:
+            files = len(result)
+            gb = sum(item.size_bytes for item in result) / 1_000_000_000
+            destination_text = ""
+            action_text = "read-only"
+        else:
+            files = result.file_count
+            gb = result.total_bytes / 1_000_000_000
+            destination_text = ""
+            action_text = f"read-only score {result.score}"
+        table.add_row(
+            str(step.step_order),
+            step.step_kind.value,
+            action_text,
+            str(step.source_root),
+            destination_text,
+            str(files),
+            f"{gb:.2f}",
+        )
+    console.print(table)
+    console.print(
+        f"Total queued transfer: {total_files} files / {total_bytes / 1_000_000_000:.2f} GB"
+    )
+    if dry_run:
+        console.print("Dry run only. Read-only steps were evaluated; transfer steps were not executed.")
+        return
+
+    confirmed = Prompt.ask(
+        "[bold red on black]Execute this safe queue? Type yes[/]",
+        default="no",
+        console=console,
+    )
+    if confirmed.lower() != "yes":
+        console.print("Queue not executed.")
+        return
+    transferred = 0
+    for step, result in runnable_steps:
+        if step.step_kind != PlanStepKind.DEN:
+            continue
+        executed = execute_den_plan(result)
+        transferred += sum(1 for row in executed if row.status in {"copied", "moved"})
+    console.print(f"Transferred: {transferred}")
 
 
 if __name__ == "__main__":

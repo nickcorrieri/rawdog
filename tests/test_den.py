@@ -4,7 +4,7 @@ from pathlib import Path
 
 from rawdog.den import build_den_plan, score_items, summarize_by_year
 from rawdog.inventory import scan_raw_files
-from rawdog.models import DenLayoutMode
+from rawdog.models import DenLayoutMode, DenTransferAction
 
 
 def test_build_den_plan_for_date_destination(tmp_path: Path) -> None:
@@ -19,7 +19,23 @@ def test_build_den_plan_for_date_destination(tmp_path: Path) -> None:
 
     assert plan.files_to_copy == 1
     assert plan.bytes_to_copy == 3
+    assert plan.files_to_transfer == 1
+    assert plan.bytes_to_transfer == 3
     assert plan.rows[0].destination_path.name == "IMG_0001.CR3"
+
+
+def test_build_den_plan_can_plan_move(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "archive"
+    raw = source / "IMG_0001.CR3"
+    source.mkdir()
+    destination.mkdir()
+    raw.write_bytes(b"raw")
+
+    plan = build_den_plan(source, destination, transfer_action=DenTransferAction.MOVE)
+
+    assert plan.transfer_action == DenTransferAction.MOVE
+    assert plan.files_to_transfer == 1
 
 
 def test_den_preserves_source_structure_by_default(tmp_path: Path) -> None:

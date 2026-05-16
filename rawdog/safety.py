@@ -59,6 +59,22 @@ def ensure_import_roots(source_root: Path, destination_root: Path) -> None:
         raise SafetyError("destination cannot be inside source")
 
 
+def ensure_consolidation_roots(source_root: Path, destination_root: Path) -> None:
+    source = source_root.expanduser().resolve()
+    destination = destination_root.expanduser().resolve()
+    if source == destination:
+        raise SafetyError("source and destination must be different paths")
+    if source in destination.parents:
+        raise SafetyError("destination cannot be inside source")
+
+
+def ensure_same_filesystem(source: Path, destination_root: Path) -> None:
+    source_device = source.expanduser().resolve().stat().st_dev
+    destination_device = destination_root.expanduser().resolve().stat().st_dev
+    if source_device != destination_device:
+        raise SafetyError("move is only allowed when source and destination are on the same filesystem")
+
+
 def ensure_archive_destination(destination: Path, archive_root: Path) -> None:
     destination_resolved = destination.expanduser().resolve()
     archive_resolved = archive_root.expanduser().resolve()
