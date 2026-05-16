@@ -70,11 +70,23 @@ ARCHIVE/YYYY/YYYY-MM/
 Project-oriented layouts default to:
 
 ```text
-WORKING/YYYY/PROJECT/
-ARCHIVE/YYYY/PROJECT/
+WORKING/YYYY/YYYYMMDD_PROJECT/
+ARCHIVE/YYYY/YYYYMMDD_PROJECT/
 ```
 
 Both modes support configurable folder templates.
+
+Users are not forced into a local working-library setup. RAWDOG supports import
+profiles for local-to-external, external-to-external, SD-card-to-external, and
+custom folder workflows. A profile records source root, destination root,
+organization mode, and folder template so recurring shoots can reuse the last
+known setup while one-off imports can override it. `rawdog fetch --profile last`
+reuses the most recently used profile.
+
+Commands are preview-first. `fetch` and `breed` do not mutate project/profile
+memory, destination manifests, or archive files unless the operator explicitly
+uses `--commit`. Source and destination roots must be distinct, and destination
+roots cannot be nested inside source roots.
 
 ## Project Workflows
 
@@ -83,9 +95,36 @@ Both modes support configurable folder templates.
 - Existing project
 - New project
 - Date-only import
+- Existing import profile
+- New import profile
+- Custom source/destination paths per import
 
 New projects collect name, optional client, optional tags, optional location,
 and optional notes.
+
+When a project name is supplied during import, RAWDOG saves the project and the
+source/destination pair as reusable memory. The default project folder is:
+
+```text
+{destination}/YYYY/YYYYMMDD_PROJECT
+```
+
+`YYYYMMDD` comes from the earliest RAW file in the project source. `PROJECT` is
+the normalized project folder name.
+
+RAWDOG memory has two layers:
+
+- Canonical local memory in RAWDOG's SQLite database.
+- Portable destination memory in `{destination_project_or_date_folder}/.rawdog/project.json`.
+
+Destination memory is written under the destination project/date folder so an
+external-volume workflow can carry project context with the drive. It is a
+manifest, not a sync database, and it is never used to delete, rename, overwrite,
+or auto-clean archive files.
+
+Date-only imports also get destination memory. In that case the destination
+folder is the configured date group, such as `{destination}/YYYY/YYYY-MM/` or
+`{destination}/YYYY/MM/`, and `project_name` is null.
 
 RAWDOG may suggest likely projects based on date proximity, card identity,
 timestamps, camera body, folder structure, and recent imports. It must never
@@ -98,6 +137,33 @@ session splits from large time gaps. The operator may rename sessions, merge
 sessions, ignore splits, or assign sessions to existing projects.
 
 Multiple shoots on one card are a normal case, not an edge case.
+
+## Lightroom / Editor Workflow
+
+RAWDOG does not sync Lightroom, watch Lightroom catalogs, or propagate
+Lightroom rejects/deletes into archive storage. Lightroom, Capture One, and
+similar tools are treated as working-library editors.
+
+The intended flow is:
+
+1. `rawdog fetch` imports RAWs into a working project/date folder.
+2. The photographer edits, rejects, rates, exports, or deletes local working
+   files in Lightroom or another editor.
+3. `rawdog breed` archives the intentional current project state to one or more
+   append-only destinations.
+4. `rawdog sniff` / `rawdog report` can later report differences, but reports
+   never become cleanup actions.
+
+If Lightroom deletes a local working file before `breed`, RAWDOG does not copy
+that file in that breed run. If the file already exists in an archive, RAWDOG
+does not delete it from the archive.
+
+`breed` can be run against multiple archive destinations over time, for example:
+
+```bash
+rawdog breed --project Wedding_Smith --dest /Volumes/WD_BLACK
+rawdog breed --project Wedding_Smith --dest /Volumes/Backup_2
+```
 
 ## Storage
 
@@ -119,6 +185,8 @@ Initial CLI commands:
 - `rawdog status`
 - `rawdog report`
 - `rawdog verify`
+- `rawdog profiles create`
+- `rawdog profiles list`
 
 ## Incremental Build Order
 

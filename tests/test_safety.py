@@ -8,6 +8,7 @@ from rawdog.safety import (
     SafetyError,
     ensure_archive_destination,
     ensure_distinct_roots,
+    ensure_import_roots,
     reject_dangerous_arguments,
 )
 
@@ -15,6 +16,11 @@ from rawdog.safety import (
 def test_rejects_destructive_arguments() -> None:
     with pytest.raises(SafetyError):
         reject_dangerous_arguments(["breed", "--delete"])
+
+
+def test_rejects_destructive_arguments_with_values() -> None:
+    with pytest.raises(SafetyError):
+        reject_dangerous_arguments(["breed", "--delete=true"])
 
 
 def test_distinct_roots_required(tmp_path: Path) -> None:
@@ -27,3 +33,12 @@ def test_archive_destination_must_be_inside_archive_root(tmp_path: Path) -> None
     outside = tmp_path / "outside" / "file.nef"
     with pytest.raises(SafetyError):
         ensure_archive_destination(outside, archive)
+
+
+def test_import_destination_cannot_be_inside_source(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    destination = source / "working"
+    source.mkdir()
+
+    with pytest.raises(SafetyError):
+        ensure_import_roots(source, destination)

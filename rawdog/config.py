@@ -39,16 +39,16 @@ def save_config(config: RawdogConfig, config_path: Path | None = None) -> Path:
 
 def build_config(
     organization_mode: OrganizationMode,
-    working_root: Path,
-    archive_root: Path,
+    working_root: Path | None = None,
+    archive_root: Path | None = None,
     database_path: Path | None = None,
     date_folder_template: str = "YYYY/YYYY-MM",
-    project_folder_template: str = "YYYY/PROJECT",
+    project_folder_template: str = "YYYY/YYYYMMDD_PROJECT",
 ) -> RawdogConfig:
     return RawdogConfig(
         organization_mode=organization_mode,
-        working_root=working_root.expanduser().resolve(),
-        archive_root=archive_root.expanduser().resolve(),
+        working_root=working_root.expanduser().resolve() if working_root else None,
+        archive_root=archive_root.expanduser().resolve() if archive_root else None,
         database_path=(database_path or default_database_path()).expanduser(),
         date_folder_template=date_folder_template,
         project_folder_template=project_folder_template,

@@ -29,7 +29,7 @@ def append_only_copy(source: Path, destination: Path, archive_root: Path, dry_ru
     destination.parent.mkdir(parents=True, exist_ok=True)
     partial = destination.with_name(destination.name + ".partial")
     if partial.exists():
-        partial.unlink()
+        return "skipped_existing_partial"
     shutil.copy2(source, partial)
     os.rename(partial, destination)
     return "copied"

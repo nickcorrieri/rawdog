@@ -27,4 +27,5 @@ def test_create_and_list_project(tmp_path: Path) -> None:
 
     assert project.project_id == projects[0].project_id
     assert projects[0].name == "Wedding_Smith"
+    assert projects[0].folder_slug == "Wedding_Smith"
     assert projects[0].tags == ["wedding", "client"]

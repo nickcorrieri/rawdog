@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
-from rawdog.metadata import is_raw_file
+from rawdog.metadata import capture_time_fallback, is_raw_file
 
 
 @dataclass(frozen=True)
@@ -32,3 +33,10 @@ def scan_raw_files(root: Path) -> list[InventoryItem]:
             )
         )
     return items
+
+
+def earliest_raw_capture_time(root: Path) -> datetime | None:
+    items = scan_raw_files(root)
+    if not items:
+        return None
+    return min(capture_time_fallback(item.path) for item in items)

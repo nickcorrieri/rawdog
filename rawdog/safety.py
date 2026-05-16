@@ -22,7 +22,12 @@ FORBIDDEN_ARGUMENTS = {
 
 def reject_dangerous_arguments(argv: list[str] | None = None) -> None:
     args = argv if argv is not None else sys.argv[1:]
-    found = sorted(FORBIDDEN_ARGUMENTS.intersection(args))
+    found = sorted(
+        arg
+        for arg in args
+        if arg in FORBIDDEN_ARGUMENTS
+        or any(arg.startswith(f"{forbidden}=") for forbidden in FORBIDDEN_ARGUMENTS)
+    )
     if found:
         joined = ", ".join(found)
         raise SafetyError(f"RAWDOG does not support destructive arguments: {joined}")
@@ -33,6 +38,25 @@ def ensure_distinct_roots(working_root: Path, archive_root: Path) -> None:
     archive = archive_root.expanduser().resolve()
     if working == archive:
         raise SafetyError("working_root and archive_root must be different paths")
+
+
+def ensure_existing_directory(path: Path, label: str) -> None:
+    resolved = path.expanduser()
+    if not resolved.exists():
+        raise SafetyError(f"{label} does not exist: {path}")
+    if not resolved.is_dir():
+        raise SafetyError(f"{label} must be a directory: {path}")
+
+
+def ensure_import_roots(source_root: Path, destination_root: Path) -> None:
+    source = source_root.expanduser().resolve()
+    destination = destination_root.expanduser().resolve()
+    if source == destination:
+        raise SafetyError("source and destination must be different paths")
+    if destination in source.parents:
+        raise SafetyError("destination cannot be an ancestor of source")
+    if source in destination.parents:
+        raise SafetyError("destination cannot be inside source")
 
 
 def ensure_archive_destination(destination: Path, archive_root: Path) -> None:
