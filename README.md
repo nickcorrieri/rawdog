@@ -72,17 +72,53 @@ archive destinations.
 
 ## Commands
 
+Run `rawdog` with no arguments to open the colored workflow chooser. Use
+`rawdog --help` for the full command reference.
+
 ```bash
 rawdog init
 rawdog fetch
 rawdog breed
+rawdog den
 rawdog sniff
+rawdog score
 rawdog status
 rawdog report
 rawdog verify
 rawdog profiles create
 rawdog profiles list
+rawdog workflows list
 ```
+
+## Cleanup Consolidation
+
+For old folders or drives that need to be gathered into a RAWDOG structure, use
+`den`. It scans RAW files, builds a copy estimate, skips already-present
+same-name/same-size files, and reports collisions for review.
+
+```bash
+rawdog sniff /Volumes/OldDrive
+rawdog score /Volumes/OldDrive
+rawdog den /Volumes/OldDrive --dest /Volumes/Archive
+rawdog den /Volumes/OldDrive --dest /Volumes/Archive --commit
+```
+
+`den` preserves existing source folder structure by default, which helps when an
+old drive already has useful names or partial date/project discipline. Use
+`--layout preserve-dates` to preserve the structure but normalize date-like
+folders such as `MMDDYYYY`, `MM.DD.YYYY`, `YYYYMMDD`, or `YYYY.MM.DD` into
+`YYYYMMDD`. Use `--layout date` or `--layout project` when you want RAWDOG to
+place everything under a generated date or project folder.
+
+Saved consolidation workflows can be reused:
+
+```bash
+rawdog den /Volumes/OldDrive --dest /Volumes/Archive --workflow old_drive --commit
+rawdog den --workflow old_drive
+rawdog workflows list
+```
+
+`den` is append-only. It is not sync, cleanup, or dedupe deletion.
 
 ## Development
 

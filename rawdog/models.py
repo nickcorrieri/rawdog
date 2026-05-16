@@ -14,6 +14,13 @@ class OrganizationMode(StrEnum):
     PROJECT = "project"
 
 
+class DenLayoutMode(StrEnum):
+    PRESERVE = "preserve"
+    PRESERVE_DATES = "preserve-dates"
+    DATE = "date"
+    PROJECT = "project"
+
+
 class RawdogConfig(BaseModel):
     organization_mode: OrganizationMode
     working_root: Path | None = None
@@ -68,6 +75,31 @@ class ImportProfile(BaseModel):
     created_at: datetime
     updated_at: datetime
     last_used_at: datetime | None = None
+    notes: str | None = None
+
+
+class ConsolidationWorkflowCreate(BaseModel):
+    name: str = Field(min_length=1)
+    source_root: Path
+    destination_root: Path
+    layout_mode: DenLayoutMode = DenLayoutMode.PRESERVE
+    folder_template: str | None = None
+    project_id: int | None = None
+    notes: str | None = None
+
+
+class ConsolidationWorkflow(BaseModel):
+    workflow_id: int
+    name: str
+    source_root: Path
+    destination_root: Path
+    layout_mode: DenLayoutMode
+    folder_template: str | None = None
+    project_id: int | None = None
+    created_at: datetime
+    updated_at: datetime
+    last_planned_at: datetime | None = None
+    last_committed_at: datetime | None = None
     notes: str | None = None
 
 

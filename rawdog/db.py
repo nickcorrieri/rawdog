@@ -7,7 +7,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def connect(database_path: Path) -> sqlite3.Connection:
@@ -80,6 +80,21 @@ def migrate(connection: sqlite3.Connection) -> None:
             notes TEXT
         );
 
+        CREATE TABLE IF NOT EXISTS consolidation_workflows (
+            workflow_id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            source_root TEXT NOT NULL,
+            destination_root TEXT NOT NULL,
+            layout_mode TEXT NOT NULL,
+            folder_template TEXT,
+            project_id INTEGER REFERENCES projects(project_id),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            last_planned_at TEXT,
+            last_committed_at TEXT,
+            notes TEXT
+        );
+
         CREATE TABLE IF NOT EXISTS files (
             file_id INTEGER PRIMARY KEY,
             absolute_path TEXT NOT NULL UNIQUE,
@@ -123,7 +138,7 @@ def migrate(connection: sqlite3.Connection) -> None:
         );
 
         INSERT INTO schema_meta(key, value)
-        VALUES ('schema_version', '3')
+        VALUES ('schema_version', '4')
         ON CONFLICT(key) DO UPDATE SET value = excluded.value;
         """
     )

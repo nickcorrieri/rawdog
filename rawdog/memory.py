@@ -9,7 +9,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from rawdog.models import OrganizationMode
-from rawdog.planner import render_folder_template, slug_folder_name
+from rawdog.planner import default_date_only_destination, slug_folder_name
 
 
 class DestinationMemory(BaseModel):
@@ -39,14 +39,6 @@ def date_only_project_name(year: int, month: int | None = None) -> str:
     if month is None:
         return f"{year:04d}"
     return f"{year:04d}-{month:02d}"
-
-
-def default_date_only_destination(
-    destination_root: Path,
-    captured_at: datetime,
-    template: str = "YYYY/YYYY-MM",
-) -> Path:
-    return destination_root / render_folder_template(template, captured_at)
 
 
 def build_destination_memory(

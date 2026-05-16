@@ -7,19 +7,29 @@ from pathlib import Path
 
 import typer
 from rich.console import Console
+from rich.panel import Panel
+from rich.prompt import Prompt
 from rich.table import Table
+from rich.text import Text
 
 from rawdog.config import build_config, default_config_path, load_config, save_config
 from rawdog.db import initialize, session
+from rawdog.den import build_den_plan, execute_den_plan, score_items, summarize_by_year
 from rawdog.drives import parse_user_path, standard_path_choices
-from rawdog.inventory import earliest_raw_capture_time
+from rawdog.inventory import earliest_raw_capture_time, scan_raw_files
 from rawdog.memory import (
     build_destination_memory,
-    default_date_only_destination,
     write_destination_memory,
 )
-from rawdog.models import ImportProfileCreate, OrganizationMode, ProjectCreate, RawdogConfig
-from rawdog.planner import default_project_destination
+from rawdog.models import (
+    ConsolidationWorkflowCreate,
+    DenLayoutMode,
+    ImportProfileCreate,
+    OrganizationMode,
+    ProjectCreate,
+    RawdogConfig,
+)
+from rawdog.planner import default_date_only_destination, default_project_destination
 from rawdog.profiles import (
     create_or_update_profile,
     get_last_profile,
@@ -35,13 +45,27 @@ from rawdog.safety import (
     ensure_import_roots,
     reject_dangerous_arguments,
 )
+from rawdog.workflows import (
+    create_or_update_workflow,
+    get_workflow_by_name,
+    list_workflows,
+    mark_workflow_committed,
+    mark_workflow_planned,
+)
 
 app = typer.Typer(
     name="rawdog",
     help="RAW photo managing tool that can fetch, copy, and audit your RAW libraries.",
-    no_args_is_help=True,
+    no_args_is_help=False,
 )
-console = Console()
+console = Console(force_terminal=True, color_system="standard")
+
+
+STYLE_TITLE = "bold green on black"
+STYLE_ACTION = "bold yellow on black"
+STYLE_SAFE = "bold green on black"
+STYLE_WARN = "bold red on black"
+STYLE_PATH = "bold cyan on black"
 
 
 def _load_or_exit() -> tuple[Path, RawdogConfig]:
@@ -67,12 +91,72 @@ def _choose_path(label: str) -> Path:
         raise typer.BadParameter("Invalid path selection.") from exc
 
 
-@app.callback()
-def main() -> None:
+@app.callback(invoke_without_command=True)
+def main(ctx: typer.Context) -> None:
     try:
         reject_dangerous_arguments()
     except SafetyError as exc:
         raise typer.BadParameter(str(exc)) from exc
+    if ctx.invoked_subcommand is None:
+        _show_home_menu()
+        raise typer.Exit()
+
+
+def _show_home_menu() -> None:
+    banner = Text()
+    banner.append("RAWDOG\n", style=STYLE_TITLE)
+    banner.append(
+        "RAW photo managing tool that can fetch, copy, and audit your RAW libraries.",
+        style="green on black",
+    )
+    console.print(Panel(banner, border_style="green", style="on black"))
+
+    table = Table(
+        title="Choose A Workflow",
+        title_style=STYLE_ACTION,
+        border_style="green",
+        style="on black",
+    )
+    table.add_column("Option", style=STYLE_ACTION, justify="right")
+    table.add_column("Workflow", style=STYLE_SAFE)
+    table.add_column("Command", style=STYLE_PATH)
+    table.add_row("1", "First setup", "rawdog init")
+    table.add_row("2", "Fetch from card/folder", "rawdog fetch")
+    table.add_row("3", "Archive edited project", "rawdog breed")
+    table.add_row("4", "Consolidate old drive/folder", "rawdog den")
+    table.add_row("5", "Inspect or score a folder", "rawdog sniff / rawdog score")
+    table.add_row("6", "List saved memory", "rawdog projects/profiles/workflows list")
+    table.add_row("0", "Show full help", "rawdog --help")
+    console.print(table)
+    console.print(
+        "[bold red on black]Preview-first:[/] fetch, breed, and den do not write archive files "
+        "unless you use [bold yellow on black]--commit[/]."
+    )
+    choice = Prompt.ask(
+        "[bold yellow on black]CHOOSE AN OPTION[/]",
+        choices=["0", "1", "2", "3", "4", "5", "6"],
+        default="0",
+        console=console,
+    )
+    suggestions = {
+        "1": ["rawdog init"],
+        "2": [
+            "rawdog fetch /Volumes/CARD --destination ~/Pictures/RAWDOG --project Wedding_Smith",
+            "rawdog fetch --profile last",
+        ],
+        "3": [
+            "rawdog breed --project Wedding_Smith --source ~/Pictures/RAWDOG/2026/20260516_Wedding_Smith --dest /Volumes/Archive",
+        ],
+        "4": [
+            "rawdog sniff /Volumes/OldDrive",
+            "rawdog score /Volumes/OldDrive",
+            "rawdog den /Volumes/OldDrive --dest /Volumes/Archive --layout preserve-dates",
+        ],
+        "5": ["rawdog sniff /Volumes/OldDrive", "rawdog score /Volumes/OldDrive"],
+        "6": ["rawdog projects list", "rawdog profiles list", "rawdog workflows list"],
+        "0": ["rawdog --help"],
+    }
+    console.print(Panel("\n".join(suggestions[choice]), title="Next Command", border_style="yellow"))
 
 
 @app.command()
@@ -254,7 +338,7 @@ def fetch(
         console.print(f"Destination memory planned: {memory_path}")
     console.print(f"Session detection: {'on' if detect_sessions else 'off'}")
     console.print(f"Dry run: {'yes' if dry_run else 'no'}")
-    console.print("Project selection and copy planning will run here in the next increment.")
+    console.print("No files copied. Re-run with --commit after reviewing the plan.")
 
 
 @app.command()
@@ -280,11 +364,159 @@ def breed(
 
 
 @app.command()
-def sniff() -> None:
-    """Inspect RAWDOG library state and prepare report data."""
+def sniff(roots: list[Path] | None = typer.Argument(None, help="Folders or volumes to inspect.")) -> None:
+    """Inspect folders or configured RAWDOG roots."""
     _, config = _load_or_exit()
-    console.print(f"Sniff will inspect working root: {config.working_root or 'profile/import specific'}")
-    console.print(f"Sniff will inspect archive root: {config.archive_root or 'profile/import specific'}")
+    sniff_roots = roots or [root for root in [config.working_root, config.archive_root] if root]
+    if not sniff_roots:
+        raise typer.BadParameter("No roots provided and no default roots are configured.")
+    table = Table(title="RAWDOG Sniff")
+    table.add_column("Root")
+    table.add_column("RAW files", justify="right")
+    table.add_column("GB", justify="right")
+    table.add_column("Earliest", justify="right")
+    for root in sniff_roots:
+        try:
+            ensure_existing_directory(root, "root")
+        except SafetyError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        items = scan_raw_files(root)
+        total_bytes = sum(item.size_bytes for item in items)
+        earliest = earliest_raw_capture_time(root)
+        table.add_row(
+            str(root),
+            str(len(items)),
+            f"{total_bytes / 1_000_000_000:.2f}",
+            earliest.isoformat() if earliest else "",
+        )
+    console.print(table)
+
+
+@app.command()
+def score(root: Path = typer.Argument(..., help="Folder or volume to score.")) -> None:
+    """Score a RAW library source for consolidation readiness."""
+    try:
+        ensure_existing_directory(root, "root")
+    except SafetyError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    items = scan_raw_files(root)
+    result = score_items(items)
+    table = Table(title="RAWDOG Score")
+    table.add_column("Metric")
+    table.add_column("Value", justify="right")
+    table.add_row("Score", str(result.score))
+    table.add_row("RAW files", str(result.file_count))
+    table.add_row("GB", f"{result.total_bytes / 1_000_000_000:.2f}")
+    table.add_row("Duplicate names", str(result.duplicate_names))
+    table.add_row("Years", str(result.year_count))
+    console.print(table)
+    for note in result.notes:
+        console.print(f"- {note}")
+
+
+@app.command()
+def den(
+    source: Path | None = typer.Argument(None, help="Messy source folder or volume to consolidate."),
+    destination: Path | None = typer.Option(None, "--dest", "-d", help="Destination root."),
+    project_name: str | None = typer.Option(None, "--project", help="Optional project folder name."),
+    workflow_name: str | None = typer.Option(None, "--workflow", "-w", help="Save or reuse workflow name."),
+    layout: DenLayoutMode = typer.Option(DenLayoutMode.PRESERVE, "--layout", help="Destination layout."),
+    template: str | None = typer.Option(None, "--template", help="Folder template override."),
+    dry_run: bool = typer.Option(True, "--dry-run/--commit", help="Preview before copying."),
+) -> None:
+    """Consolidate a messy RAW source into a RAWDOG folder structure."""
+    _, config = _load_or_exit()
+    loaded_workflow = None
+    with session(config.database_path) as connection:
+        if workflow_name:
+            loaded_workflow = get_workflow_by_name(connection, workflow_name)
+
+    source_value = source or (loaded_workflow.source_root if loaded_workflow else None)
+    destination_value = destination or (loaded_workflow.destination_root if loaded_workflow else None)
+    if source_value is None or destination_value is None:
+        raise typer.BadParameter("--workflow with saved paths, or source and --dest, are required.")
+    source_root = parse_user_path(str(source_value))
+    destination_root = parse_user_path(str(destination_value))
+    try:
+        ensure_existing_directory(source_root, "source")
+        ensure_existing_directory(destination_root, "destination")
+        ensure_import_roots(source_root, destination_root)
+    except SafetyError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    effective_layout = loaded_workflow.layout_mode if loaded_workflow and not source else layout
+    effective_template = template or (loaded_workflow.folder_template if loaded_workflow else None)
+    effective_template = effective_template or (
+        config.project_folder_template
+        if effective_layout == DenLayoutMode.PROJECT or project_name
+        else config.date_folder_template
+    )
+    plan = build_den_plan(
+        source_root,
+        destination_root,
+        project_name=project_name,
+        layout_mode=effective_layout,
+        folder_template=effective_template,
+    )
+    if workflow_name and not dry_run:
+        with session(config.database_path) as connection:
+            workflow = create_or_update_workflow(
+                connection,
+                ConsolidationWorkflowCreate(
+                    name=workflow_name,
+                    source_root=source_root,
+                    destination_root=destination_root,
+                    layout_mode=effective_layout,
+                    folder_template=effective_template,
+                ),
+            )
+            mark_workflow_planned(connection, workflow.workflow_id)
+    elif workflow_name:
+        console.print(f"Workflow would be saved on commit: {workflow_name}")
+    summary = summarize_by_year(plan.rows)
+    table = Table(title="RAWDOG Den Plan")
+    table.add_column("Destination")
+    table.add_column("Files", justify="right")
+    table.add_column("GB", justify="right")
+    table.add_column("Mode")
+    table.add_row(
+        str(plan.destination_folder),
+        str(plan.files_to_copy),
+        f"{plan.bytes_to_copy / 1_000_000_000:.2f}",
+        f"{effective_layout.value} / {'dry-run' if dry_run else 'commit'}",
+    )
+    console.print(table)
+    if effective_layout == DenLayoutMode.PRESERVE:
+        console.print(
+            "Tip: use --layout preserve-dates to normalize date-like folders "
+            "such as MMDDYYYY or YYYY.MM.DD to YYYYMMDD."
+        )
+    if summary:
+        year_table = Table(title="Copy Estimate")
+        year_table.add_column("Year")
+        year_table.add_column("Files", justify="right")
+        year_table.add_column("GB", justify="right")
+        for row in summary:
+            year_table.add_row(
+                str(row["year"]),
+                str(row["files_to_copy"]),
+                str(row["estimated_gb"]),
+            )
+        console.print(year_table)
+    skipped = sum(1 for row in plan.rows if row.status.startswith("skip"))
+    collisions = sum(1 for row in plan.rows if row.status == "collision")
+    console.print(f"Skipped existing: {skipped}")
+    console.print(f"Collisions needing review: {collisions}")
+    if dry_run:
+        console.print("No files copied. Re-run with --commit after reviewing the plan.")
+        return
+    executed = execute_den_plan(plan)
+    copied = sum(1 for row in executed if row.status == "copied")
+    if workflow_name:
+        with session(config.database_path) as connection:
+            workflow = get_workflow_by_name(connection, workflow_name)
+            if workflow:
+                mark_workflow_committed(connection, workflow.workflow_id)
+    console.print(f"Copied: {copied}")
 
 
 @app.command()
@@ -344,6 +576,9 @@ app.add_typer(projects_app, name="projects")
 
 profiles_app = typer.Typer(help="Manage reusable RAWDOG import profiles.")
 app.add_typer(profiles_app, name="profiles")
+
+workflows_app = typer.Typer(help="Manage reusable RAWDOG consolidation workflows.")
+app.add_typer(workflows_app, name="workflows")
 
 
 @projects_app.command("create")
@@ -439,6 +674,31 @@ def profile_list() -> None:
             str(profile.source_root),
             str(profile.destination_root),
             profile.folder_template,
+        )
+    console.print(table)
+
+
+@workflows_app.command("list")
+def workflow_list() -> None:
+    """List reusable consolidation workflows."""
+    _, config = _load_or_exit()
+    with session(config.database_path) as connection:
+        workflows = list_workflows(connection)
+    table = Table(title="RAWDOG Consolidation Workflows")
+    table.add_column("ID")
+    table.add_column("Name")
+    table.add_column("Source")
+    table.add_column("Destination")
+    table.add_column("Layout")
+    table.add_column("Last Commit")
+    for workflow in workflows:
+        table.add_row(
+            str(workflow.workflow_id),
+            workflow.name,
+            str(workflow.source_root),
+            str(workflow.destination_root),
+            workflow.layout_mode.value,
+            workflow.last_committed_at.isoformat() if workflow.last_committed_at else "",
         )
     console.print(table)
 

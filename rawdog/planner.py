@@ -66,6 +66,14 @@ def default_project_destination(
     return destination_root / render_folder_template(template, earliest_capture_at, _Project())
 
 
+def default_date_only_destination(
+    destination_root: Path,
+    captured_at: datetime,
+    template: str = "YYYY/YYYY-MM",
+) -> Path:
+    return destination_root / render_folder_template(template, captured_at)
+
+
 def plan_append_only_copy(source_path: Path, destination_path: Path) -> PlannedCopy | None:
     if destination_path.exists():
         source_stat = source_path.stat()

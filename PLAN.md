@@ -99,6 +99,20 @@ roots cannot be nested inside source roots.
 - New import profile
 - Custom source/destination paths per import
 
+`rawdog den` supports old-library consolidation. It is the RAWDOG version of
+"clean up this old mess into the new structure": inspect a source, estimate the
+copy queue, skip existing same-name/same-size files, surface collisions, and
+copy append-only only when explicitly committed. `den` preserves existing source
+folder structure by default so useful custom folder names and partial
+date/project discipline survive consolidation. `preserve-dates` keeps the
+structure but normalizes date-like folders such as `MMDDYYYY`, `MM.DD.YYYY`,
+`YYYYMMDD`, or `YYYY.MM.DD` into `YYYYMMDD` moving forward. Optional `date` and
+`project` layouts are available when the operator wants RAWDOG to impose a new
+structure.
+
+Consolidation workflows are tracked in SQLite so old-drive cleanups can be
+planned, resumed, and reviewed without retyping source/destination roots.
+
 New projects collect name, optional client, optional tags, optional location,
 and optional notes.
 
@@ -176,17 +190,23 @@ coexist.
 
 ## CLI
 
+Running `rawdog` with no arguments opens a colored terminal workflow chooser.
+`rawdog --help` remains the full command reference.
+
 Initial CLI commands:
 
 - `rawdog init`
 - `rawdog fetch`
 - `rawdog breed`
+- `rawdog den`
 - `rawdog sniff`
+- `rawdog score`
 - `rawdog status`
 - `rawdog report`
 - `rawdog verify`
 - `rawdog profiles create`
 - `rawdog profiles list`
+- `rawdog workflows list`
 
 ## Incremental Build Order
 
