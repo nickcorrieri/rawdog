@@ -2,9 +2,14 @@ RAWDOG
 
 RAW photo managing tool that can fetch, copy, and audit your RAW libraries.
 
+Copyright 2026 InnoNotion LLC
+
 Author: Nicholas Corrieri
 GitHub: @nickcorrieri
 Owner: InnoNotion LLC
 
-The source attribution line "Author: Nicholas Corrieri" must remain in source
-copies or substantial source portions under the RAWDOG Source License.
+Licensed under the Apache License, Version 2.0.
+
+The source attribution line "Author: Nicholas Corrieri" is part of RAWDOG's
+source-form attribution notice and must remain in source copies or substantial
+source portions under the Apache License, Version 2.0 notice requirements.

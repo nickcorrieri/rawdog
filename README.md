@@ -44,8 +44,8 @@ python -m pytest
 
 ## License
 
-RAWDOG source may be reused under the terms in [LICENSE](LICENSE). Use is also
-subject to [TERMS.md](TERMS.md).
+RAWDOG source is licensed under the [Apache License 2.0](LICENSE). Operational
+use is also covered by [TERMS.md](TERMS.md).
 
 Author: Nicholas Corrieri  
 GitHub: @nickcorrieri  
@@ -56,3 +56,5 @@ Reuse must preserve the source attribution:
 ```text
 Author: Nicholas Corrieri
 ```
+
+The attribution notice is also recorded in [NOTICE](NOTICE).

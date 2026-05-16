@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "RAW photo managing tool that can fetch, copy, and audit your RAW libraries."
 readme = "README.md"
 requires-python = ">=3.12"
-license = "LicenseRef-RAWDOG-Source-License"
+license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
 authors = [
   { name = "Nicholas Corrieri", email = "github@innonotion.com" }
@@ -17,6 +17,17 @@ maintainers = [
   { name = "InnoNotion LLC" }
 ]
 keywords = ["raw", "photography", "archive", "backup", "audit", "cli"]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Environment :: Console",
+  "Intended Audience :: End Users/Desktop",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Multimedia :: Graphics",
+  "Topic :: System :: Archiving",
+]
 dependencies = [
   "platformdirs>=4.0",
   "pydantic>=2.0",
