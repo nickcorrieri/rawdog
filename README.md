@@ -97,6 +97,9 @@ rawdog queue add-score
 rawdog queue add-den
 rawdog queue show
 rawdog queue run
+rawdog plans list
+rawdog plans show
+rawdog plans resume
 ```
 
 ## Cleanup Consolidation
@@ -125,7 +128,16 @@ after reviewing the queued plan.
 ## Safe Plan Queues
 
 Long jobs can be queued as safe plans, previewed, and then committed with an
-explicit confirmation. Queues are for operations such as:
+explicit confirmation. Before any copy or move executes, RAWDOG writes a
+persisted execution plan to SQLite. The plan records:
+
+- what RAWDOG is doing
+- what RAWDOG is doing it to
+- what should be where when done
+- execution status
+- post-audit status
+
+Queues are for operations such as:
 
 - audit/inspect
 - score
@@ -145,6 +157,9 @@ rawdog queue add-sniff old_drive_cleanup /Volumes/Archive
 rawdog queue show old_drive_cleanup
 rawdog queue run old_drive_cleanup
 rawdog queue run old_drive_cleanup --commit
+rawdog plans list
+rawdog plans show 1
+rawdog plans resume 1
 ```
 
 `den` preserves existing source folder structure by default, which helps when an
@@ -175,6 +190,10 @@ rawdog queue run same_drive_cleanup --commit
 ```
 
 Move still refuses overwrites and collisions.
+
+If RAWDOG is interrupted, rerun `rawdog plans list`, inspect the latest started
+or incomplete plan, then resume it explicitly with `rawdog plans resume PLAN_ID`.
+Rows already copied, moved, skipped, or held for review are not blindly repeated.
 
 ## Development
 

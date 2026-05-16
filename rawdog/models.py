@@ -32,6 +32,14 @@ class PlanStepKind(StrEnum):
     DEN = "den"
 
 
+class ExecutionPlanStatus(StrEnum):
+    PLANNED = "planned"
+    STARTED = "started"
+    DONE = "done"
+    NEEDS_REVIEW = "needs_review"
+    FAILED = "failed"
+
+
 class RawdogConfig(BaseModel):
     organization_mode: OrganizationMode
     working_root: Path | None = None
@@ -156,6 +164,58 @@ class PlanQueueStep(BaseModel):
     status: str
     created_at: datetime
     updated_at: datetime
+
+
+class ExecutionPlanCreate(BaseModel):
+    plan_kind: str
+    what: str
+    subject: str
+    expected_result: str
+    execution_summary: str = ""
+    post_audit_summary: str = ""
+    source_root: Path | None = None
+    destination_root: Path | None = None
+    queue_id: int | None = None
+
+
+class ExecutionPlan(BaseModel):
+    plan_id: int
+    plan_kind: str
+    status: ExecutionPlanStatus
+    what: str
+    subject: str
+    expected_result: str
+    execution_summary: str
+    post_audit_summary: str
+    source_root: Path | None = None
+    destination_root: Path | None = None
+    queue_id: int | None = None
+    created_at: datetime
+    updated_at: datetime
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+
+
+class ExecutionPlanRowCreate(BaseModel):
+    source_path: Path
+    destination_path: Path
+    size_bytes: int
+    transfer_action: DenTransferAction
+    status: str
+
+
+class ExecutionPlanRow(BaseModel):
+    row_id: int
+    plan_id: int
+    source_path: Path
+    destination_path: Path
+    size_bytes: int
+    transfer_action: DenTransferAction
+    status: str
+    audit_status: str | None = None
+    executed_at: datetime | None = None
+    audited_at: datetime | None = None
+    error: str | None = None
 
 
 class SessionCandidate(BaseModel):

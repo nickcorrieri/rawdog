@@ -136,6 +136,19 @@ of thumbnails, mismatch resolution, deletion, overwrite, rename, and automatic
 dedupe reduction must require a separate explicit interactive command and must
 not run independently from a queue.
 
+Every copy or move execution starts by writing a durable execution plan to
+SQLite. The plan records:
+
+- what RAWDOG is doing
+- what RAWDOG is doing it to
+- what should be where when done
+- execution progress
+- post-execution audit status
+
+If execution is interrupted, RAWDOG can inspect the latest plans and resume an
+incomplete plan from the persisted row statuses. Execution is row-based: copied,
+moved, skipped, collision, failed, and audited rows are marked individually.
+
 New projects collect name, optional client, optional tags, optional location,
 and optional notes.
 
@@ -236,6 +249,9 @@ Initial CLI commands:
 - `rawdog queue add-den`
 - `rawdog queue show`
 - `rawdog queue run`
+- `rawdog plans list`
+- `rawdog plans show`
+- `rawdog plans resume`
 
 ## Incremental Build Order
 

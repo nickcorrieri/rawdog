@@ -14,8 +14,19 @@ from rich.text import Text
 
 from rawdog.config import build_config, default_config_path, load_config, save_config
 from rawdog.db import initialize, session
-from rawdog.den import build_den_plan, execute_den_plan, score_items, summarize_by_year
+from rawdog.den import DenPlan, build_den_plan, score_items, summarize_by_year
 from rawdog.drives import parse_user_path, standard_path_choices
+from rawdog.execution import (
+    add_execution_plan_rows,
+    create_execution_plan,
+    get_execution_plan,
+    get_latest_execution_plan,
+    list_execution_plan_rows,
+    list_execution_plans,
+    mark_execution_plan_finished,
+    mark_execution_plan_started,
+    update_execution_plan_row,
+)
 from rawdog.inventory import earliest_raw_capture_time, scan_raw_files
 from rawdog.memory import (
     build_destination_memory,
@@ -25,6 +36,11 @@ from rawdog.models import (
     ConsolidationWorkflowCreate,
     DenLayoutMode,
     DenTransferAction,
+    ExecutionPlan,
+    ExecutionPlanCreate,
+    ExecutionPlanRow,
+    ExecutionPlanRowCreate,
+    ExecutionPlanStatus,
     ImportProfileCreate,
     OrganizationMode,
     PlanQueueCreate,
@@ -34,6 +50,7 @@ from rawdog.models import (
     RawdogConfig,
 )
 from rawdog.planner import default_date_only_destination, default_project_destination
+from rawdog.copier import append_only_copy, append_only_move
 from rawdog.profiles import (
     create_or_update_profile,
     get_last_profile,
@@ -139,13 +156,24 @@ def _show_home_menu() -> None:
     table.add_row("4", "Consolidate old drive/folder", "rawdog den")
     table.add_row("5", "Queue a longer safe job", "rawdog queue create")
     table.add_row("6", "Inspect or score a folder", "rawdog sniff / rawdog score")
-    table.add_row("7", "List saved memory", "rawdog projects/profiles/workflows/queue list")
+    table.add_row("7", "Check saved memory and plans", "rawdog plans list")
     table.add_row("0", "Show full help", "rawdog --help")
     console.print(table)
     console.print(
         "[bold red on black]Preview-first:[/] fetch, breed, and den do not write archive files "
         "unless you use [bold yellow on black]--commit[/]."
     )
+    try:
+        _, config = _load_or_exit()
+        with session(config.database_path) as connection:
+            latest_plan = get_latest_execution_plan(connection)
+        if latest_plan:
+            console.print(
+                "[bold yellow on black]Last plan:[/] "
+                f"#{latest_plan.plan_id} {latest_plan.status.value} - {latest_plan.what}"
+            )
+    except typer.BadParameter:
+        pass
     choice = Prompt.ask(
         "[bold yellow on black]CHOOSE AN OPTION[/]",
         choices=["0", "1", "2", "3", "4", "5", "6", "7"],
@@ -180,6 +208,7 @@ def _show_home_menu() -> None:
             "rawdog profiles list",
             "rawdog workflows list",
             "rawdog queue list",
+            "rawdog plans list",
         ],
         "0": ["rawdog --help"],
     }
@@ -441,6 +470,166 @@ def score(root: Path = typer.Argument(..., help="Folder or volume to score.")) -
         console.print(f"- {note}")
 
 
+def _persist_den_execution_plan(
+    config: RawdogConfig,
+    plan: DenPlan,
+    *,
+    queue_id: int | None = None,
+) -> ExecutionPlan:
+    skipped = sum(1 for row in plan.rows if row.status.startswith("skip"))
+    collisions = sum(1 for row in plan.rows if row.status == "collision")
+    what = f"{plan.transfer_action.value} RAW files into a RAWDOG destination"
+    subject = f"{plan.source_root} -> {plan.destination_root}"
+    expected = (
+        f"{plan.files_to_transfer} files should be at {plan.destination_folder}; "
+        f"{skipped} already-present files skipped; {collisions} collisions held for review."
+    )
+    with session(config.database_path) as connection:
+        execution_plan = create_execution_plan(
+            connection,
+            ExecutionPlanCreate(
+                plan_kind="den",
+                what=what,
+                subject=subject,
+                expected_result=expected,
+                execution_summary="Not started.",
+                post_audit_summary="Not audited.",
+                source_root=plan.source_root,
+                destination_root=plan.destination_root,
+                queue_id=queue_id,
+            ),
+        )
+        add_execution_plan_rows(
+            connection,
+            execution_plan.plan_id,
+            [
+                ExecutionPlanRowCreate(
+                    source_path=row.source_path,
+                    destination_path=row.destination_path,
+                    size_bytes=row.size_bytes,
+                    transfer_action=plan.transfer_action,
+                    status=row.status,
+                )
+                for row in plan.rows
+            ],
+        )
+    return execution_plan
+
+
+def _print_execution_plan_start(plan: ExecutionPlan) -> None:
+    body = "\n".join(
+        [
+            f"[bold green on black]What we're doing:[/] {plan.what}",
+            f"[bold cyan on black]What we're doing it to:[/] {plan.subject}",
+            f"[bold yellow on black]What should be where when done:[/] {plan.expected_result}",
+            f"[bold green on black]Execution:[/] {plan.execution_summary}",
+            f"[bold yellow on black]Post audit:[/] {plan.post_audit_summary}",
+        ]
+    )
+    console.print(Panel(body, title=f"RAWDOG Plan #{plan.plan_id}", border_style="green"))
+
+
+def _audit_execution_row(row: ExecutionPlanRow, status: str) -> str:
+    if status in {"copied", "moved", "skipped_existing_same_name_size"}:
+        if not row.destination_path.exists():
+            return "destination_missing"
+        if row.destination_path.stat().st_size != row.size_bytes:
+            return "size_mismatch"
+        return "destination_verified"
+    if status == "skipped_collision" or row.status == "collision":
+        return "needs_collision_review"
+    if status == "skipped_existing_partial":
+        return "needs_partial_review"
+    if row.status.startswith("skip"):
+        return "not_applicable"
+    return "not_audited"
+
+
+def _execute_persisted_plan(config: RawdogConfig, plan_id: int) -> ExecutionPlan:
+    with session(config.database_path) as connection:
+        plan = get_execution_plan(connection, plan_id)
+        if plan is None:
+            raise typer.BadParameter(f"Unknown plan: {plan_id}")
+        rows = list_execution_plan_rows(connection, plan_id)
+        mark_execution_plan_started(connection, plan_id)
+
+    transferred = 0
+    skipped = 0
+    review = 0
+    failed = 0
+    for row in rows:
+        if row.status not in {"plan_copy", "planned", "failed"}:
+            audit_status = _audit_execution_row(row, row.status)
+            if audit_status.startswith("needs") or audit_status.endswith("missing"):
+                review += 1
+            if row.status.startswith("skip"):
+                skipped += 1
+            with session(config.database_path) as connection:
+                update_execution_plan_row(
+                    connection,
+                    row.row_id,
+                    status=row.status,
+                    audit_status=audit_status,
+                )
+            continue
+        try:
+            if plan.destination_root is None:
+                raise SafetyError("execution plan is missing destination root")
+            status = (
+                append_only_move(row.source_path, row.destination_path, plan.destination_root)
+                if row.transfer_action == DenTransferAction.MOVE
+                else append_only_copy(row.source_path, row.destination_path, plan.destination_root)
+            )
+            audit_status = _audit_execution_row(row, status)
+            if status in {"copied", "moved"}:
+                transferred += 1
+            elif status.startswith("skipped"):
+                skipped += 1
+            if audit_status.startswith("needs") or audit_status.endswith("missing"):
+                review += 1
+            with session(config.database_path) as connection:
+                update_execution_plan_row(
+                    connection,
+                    row.row_id,
+                    status=status,
+                    audit_status=audit_status,
+                )
+        except Exception as exc:
+            failed += 1
+            with session(config.database_path) as connection:
+                update_execution_plan_row(
+                    connection,
+                    row.row_id,
+                    status="failed",
+                    audit_status="not_audited",
+                    error=str(exc),
+                )
+
+    final_status = ExecutionPlanStatus.DONE
+    if failed:
+        final_status = ExecutionPlanStatus.FAILED
+    elif review:
+        final_status = ExecutionPlanStatus.NEEDS_REVIEW
+    execution_summary = f"Transferred {transferred}; skipped {skipped}; failed {failed}."
+    post_audit_summary = (
+        f"Destination audit complete. Review items: {review}."
+        if not failed
+        else f"Destination audit incomplete. Failed rows: {failed}; review items: {review}."
+    )
+    with session(config.database_path) as connection:
+        mark_execution_plan_finished(
+            connection,
+            plan_id,
+            final_status,
+            execution_summary,
+            post_audit_summary,
+        )
+        finished = get_execution_plan(connection, plan_id)
+    if finished is None:
+        raise typer.BadParameter(f"Unknown plan: {plan_id}")
+    return finished
+
+
 @app.command()
 def den(
     source: Path | None = typer.Argument(None, help="Messy source folder or volume to consolidate."),
@@ -506,6 +695,8 @@ def den(
                 ),
             )
             mark_workflow_planned(connection, workflow.workflow_id)
+    execution_plan = _persist_den_execution_plan(config, plan)
+    _print_execution_plan_start(execution_plan)
     summary = summarize_by_year(plan.rows)
     table = Table(title="RAWDOG Den Plan")
     table.add_column("Destination")
@@ -541,7 +732,10 @@ def den(
     console.print(f"Skipped existing: {skipped}")
     console.print(f"Collisions needing review: {collisions}")
     if dry_run:
-        console.print("Plan queued for review. Re-run with --commit to execute after reviewing.")
+        console.print(
+            f"Plan #{execution_plan.plan_id} written to the database. "
+            "Re-run with --commit to execute after reviewing."
+        )
         return
     confirmed = Prompt.ask(
         "[bold red on black]Execute this den plan? Type yes[/]",
@@ -551,14 +745,13 @@ def den(
     if confirmed.lower() != "yes":
         console.print("Plan not executed.")
         return
-    executed = execute_den_plan(plan)
-    transferred = sum(1 for row in executed if row.status in {"copied", "moved"})
+    finished_plan = _execute_persisted_plan(config, execution_plan.plan_id)
     if workflow_name:
         with session(config.database_path) as connection:
             workflow = get_workflow_by_name(connection, workflow_name)
             if workflow:
                 mark_workflow_committed(connection, workflow.workflow_id)
-    console.print(f"Transferred: {transferred}")
+    _print_execution_plan_start(finished_plan)
 
 
 @app.command()
@@ -575,9 +768,24 @@ def status() -> None:
     with session(config.database_path) as connection:
         projects = list_projects(connection)
         profiles = list_profiles(connection)
+        latest_plans = list_execution_plans(connection, limit=3)
     table.add_row("Projects", str(len(projects)))
     table.add_row("Profiles", str(len(profiles)))
     console.print(table)
+    if latest_plans:
+        plan_table = Table(title="Recent Execution Plans")
+        plan_table.add_column("ID")
+        plan_table.add_column("Status")
+        plan_table.add_column("What")
+        plan_table.add_column("Updated")
+        for plan in latest_plans:
+            plan_table.add_row(
+                str(plan.plan_id),
+                plan.status.value,
+                plan.what,
+                plan.updated_at.isoformat(),
+            )
+        console.print(plan_table)
 
 
 @app.command()
@@ -624,6 +832,9 @@ app.add_typer(workflows_app, name="workflows")
 
 queue_app = typer.Typer(help="Queue safe audit/copy/move plans.")
 app.add_typer(queue_app, name="queue")
+
+plans_app = typer.Typer(help="Inspect and resume persisted execution plans.")
+app.add_typer(plans_app, name="plans")
 
 
 @projects_app.command("create")
@@ -748,6 +959,76 @@ def workflow_list() -> None:
             workflow.last_committed_at.isoformat() if workflow.last_committed_at else "",
         )
     console.print(table)
+
+
+@plans_app.command("list")
+def plans_list(limit: int = typer.Option(10, "--limit", min=1, max=50)) -> None:
+    """List recent persisted execution plans."""
+    _, config = _load_or_exit()
+    with session(config.database_path) as connection:
+        plans = list_execution_plans(connection, limit=limit)
+    table = Table(title="RAWDOG Execution Plans")
+    table.add_column("ID")
+    table.add_column("Status")
+    table.add_column("Kind")
+    table.add_column("What")
+    table.add_column("Updated")
+    for plan in plans:
+        table.add_row(
+            str(plan.plan_id),
+            plan.status.value,
+            plan.plan_kind,
+            plan.what,
+            plan.updated_at.isoformat(),
+        )
+    console.print(table)
+
+
+@plans_app.command("show")
+def plans_show(plan_id: int = typer.Argument(...)) -> None:
+    """Show one persisted execution plan and its row summary."""
+    _, config = _load_or_exit()
+    with session(config.database_path) as connection:
+        plan = get_execution_plan(connection, plan_id)
+        if plan is None:
+            raise typer.BadParameter(f"Unknown plan: {plan_id}")
+        rows = list_execution_plan_rows(connection, plan_id)
+    _print_execution_plan_start(plan)
+    table = Table(title=f"Plan #{plan.plan_id} Rows")
+    table.add_column("Status")
+    table.add_column("Audit")
+    table.add_column("Files", justify="right")
+    counts: dict[tuple[str, str], int] = {}
+    for row in rows:
+        key = (row.status, row.audit_status or "")
+        counts[key] = counts.get(key, 0) + 1
+    for (status, audit_status), count in sorted(counts.items()):
+        table.add_row(status, audit_status, str(count))
+    console.print(table)
+
+
+@plans_app.command("resume")
+def plans_resume(plan_id: int = typer.Argument(...)) -> None:
+    """Resume a persisted copy/move execution plan."""
+    _, config = _load_or_exit()
+    with session(config.database_path) as connection:
+        plan = get_execution_plan(connection, plan_id)
+        if plan is None:
+            raise typer.BadParameter(f"Unknown plan: {plan_id}")
+    _print_execution_plan_start(plan)
+    if plan.status == ExecutionPlanStatus.DONE:
+        console.print("Plan is already done.")
+        return
+    confirmed = Prompt.ask(
+        "[bold red on black]Resume this execution plan? Type yes[/]",
+        default="no",
+        console=console,
+    )
+    if confirmed.lower() != "yes":
+        console.print("Plan not resumed.")
+        return
+    finished = _execute_persisted_plan(config, plan_id)
+    _print_execution_plan_start(finished)
 
 
 @queue_app.command("create")
@@ -982,8 +1263,19 @@ def queue_run(
     console.print(
         f"Total queued transfer: {total_files} files / {total_bytes / 1_000_000_000:.2f} GB"
     )
+    execution_plans = [
+        _persist_den_execution_plan(config, result, queue_id=queue.queue_id)
+        for step, result in runnable_steps
+        if step.step_kind == PlanStepKind.DEN
+    ]
+    for execution_plan in execution_plans:
+        _print_execution_plan_start(execution_plan)
     if dry_run:
-        console.print("Dry run only. Read-only steps were evaluated; transfer steps were not executed.")
+        plan_ids = ", ".join(str(plan.plan_id) for plan in execution_plans) or "none"
+        console.print(
+            "Dry run only. Read-only steps were evaluated; transfer steps were not executed. "
+            f"Persisted execution plans: {plan_ids}."
+        )
         return
 
     confirmed = Prompt.ask(
@@ -994,13 +1286,9 @@ def queue_run(
     if confirmed.lower() != "yes":
         console.print("Queue not executed.")
         return
-    transferred = 0
-    for step, result in runnable_steps:
-        if step.step_kind != PlanStepKind.DEN:
-            continue
-        executed = execute_den_plan(result)
-        transferred += sum(1 for row in executed if row.status in {"copied", "moved"})
-    console.print(f"Transferred: {transferred}")
+    for execution_plan in execution_plans:
+        finished_plan = _execute_persisted_plan(config, execution_plan.plan_id)
+        _print_execution_plan_start(finished_plan)
 
 
 if __name__ == "__main__":

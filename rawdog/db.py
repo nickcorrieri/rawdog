@@ -7,7 +7,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 def connect(database_path: Path) -> sqlite3.Connection:
@@ -122,6 +122,38 @@ def migrate(connection: sqlite3.Connection) -> None:
             UNIQUE(queue_id, step_order)
         );
 
+        CREATE TABLE IF NOT EXISTS execution_plans (
+            plan_id INTEGER PRIMARY KEY,
+            plan_kind TEXT NOT NULL,
+            status TEXT NOT NULL,
+            what TEXT NOT NULL,
+            subject TEXT NOT NULL,
+            expected_result TEXT NOT NULL,
+            execution_summary TEXT NOT NULL DEFAULT '',
+            post_audit_summary TEXT NOT NULL DEFAULT '',
+            source_root TEXT,
+            destination_root TEXT,
+            queue_id INTEGER REFERENCES plan_queues(queue_id),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            started_at TEXT,
+            completed_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS execution_plan_rows (
+            row_id INTEGER PRIMARY KEY,
+            plan_id INTEGER NOT NULL REFERENCES execution_plans(plan_id) ON DELETE CASCADE,
+            source_path TEXT NOT NULL,
+            destination_path TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL,
+            transfer_action TEXT NOT NULL,
+            status TEXT NOT NULL,
+            audit_status TEXT,
+            executed_at TEXT,
+            audited_at TEXT,
+            error TEXT
+        );
+
         CREATE TABLE IF NOT EXISTS files (
             file_id INTEGER PRIMARY KEY,
             absolute_path TEXT NOT NULL UNIQUE,
@@ -165,7 +197,7 @@ def migrate(connection: sqlite3.Connection) -> None:
         );
 
         INSERT INTO schema_meta(key, value)
-        VALUES ('schema_version', '6')
+        VALUES ('schema_version', '7')
         ON CONFLICT(key) DO UPDATE SET value = excluded.value;
         """
     )
