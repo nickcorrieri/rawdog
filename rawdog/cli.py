@@ -49,8 +49,8 @@ from rawdog.models import (
     ProjectCreate,
     RawdogConfig,
 )
-from rawdog.planner import default_date_only_destination, default_project_destination
 from rawdog.copier import append_only_copy, append_only_move
+from rawdog.planner import default_date_only_destination, default_project_destination
 from rawdog.profiles import (
     create_or_update_profile,
     get_last_profile,
@@ -292,6 +292,7 @@ def fetch(
     destination_root = parse_user_path(str(destination_root))
     try:
         ensure_existing_directory(source_root, "source")
+        ensure_existing_directory(destination_root, "destination")
         ensure_import_roots(source_root, destination_root)
     except SafetyError as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -390,7 +391,7 @@ def fetch(
             earliest_capture_at=earliest_capture_at,
             profile_name=profile_name or profile,
         )
-        memory_path = write_destination_memory(memory, dry_run=True)
+        memory_path = write_destination_memory(memory, dry_run=dry_run)
         console.print(f"Destination memory planned: {memory_path}")
     console.print(f"Session detection: {'on' if detect_sessions else 'off'}")
     console.print(f"Dry run: {'yes' if dry_run else 'no'}")
@@ -407,14 +408,35 @@ def breed(
 ) -> None:
     """Archive the working library to permanent storage without sync semantics."""
     _, config = _load_or_exit()
+    loaded_profile = None
+    if profile:
+        with session(config.database_path) as connection:
+            loaded_profile = get_profile_by_name(connection, profile)
+        if not loaded_profile:
+            raise typer.BadParameter(f"Unknown profile: {profile}")
+    resolved_source = source or (
+        loaded_profile.source_root if loaded_profile else config.working_root
+    )
+    resolved_destinations = (
+        destinations
+        or ([loaded_profile.destination_root] if loaded_profile else None)
+        or ([config.archive_root] if config.archive_root else [])
+    )
+    try:
+        if resolved_source:
+            ensure_existing_directory(resolved_source, "source")
+        for destination in resolved_destinations:
+            ensure_existing_directory(destination, "destination")
+    except SafetyError as exc:
+        raise typer.BadParameter(str(exc)) from exc
     console.print("Breed is append-only. It never deletes destination files.")
     console.print(f"Project: {project_name or 'not specified'}")
-    console.print(f"Source: {source or config.working_root or 'profile/import specific'}")
-    if destinations:
-        for destination in destinations:
+    console.print(f"Source: {resolved_source or 'profile/import specific'}")
+    if resolved_destinations:
+        for destination in resolved_destinations:
             console.print(f"Archive destination: {destination}")
     else:
-        console.print(f"Archive destination: {config.archive_root or 'profile/import specific'}")
+        console.print("Archive destination: profile/import specific")
     console.print(f"Profile: {profile or 'not specified'}")
     console.print(f"Dry run: {'yes' if dry_run else 'no'}")
 
@@ -1224,7 +1246,9 @@ def queue_run(
             total_files += plan.files_to_transfer
             total_bytes += plan.bytes_to_transfer
         else:
-            raise typer.BadParameter(f"Queue step #{step.step_order} is not safe: {step.step_kind.value}")
+            raise typer.BadParameter(
+                f"Queue step #{step.step_order} is not safe: {step.step_kind.value}"
+            )
 
     table = Table(title=f"RAWDOG Queue Run: {queue.name}")
     table.add_column("#")

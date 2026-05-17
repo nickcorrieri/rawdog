@@ -88,6 +88,8 @@ rawdog score
 rawdog status
 rawdog report
 rawdog verify
+rawdog projects create
+rawdog projects list
 rawdog profiles create
 rawdog profiles list
 rawdog workflows list
@@ -194,6 +196,14 @@ Move still refuses overwrites and collisions.
 If RAWDOG is interrupted, rerun `rawdog plans list`, inspect the latest started
 or incomplete plan, then resume it explicitly with `rawdog plans resume PLAN_ID`.
 Rows already copied, moved, skipped, or held for review are not blindly repeated.
+
+`.partial` files are temporary transfer artifacts created only under the
+destination root during copy. They are not original RAW files, are ignored during
+source inventory, and are never merged into archive state. A stale `.partial`
+blocks that destination row and requires review; RAWDOG does not auto-delete
+pre-existing `.partial` files. If RAWDOG creates a `.partial` during the current
+copy attempt and that copy fails, it removes that current-run artifact before
+raising the error.
 
 ## Development
 

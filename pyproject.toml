@@ -22,7 +22,7 @@ classifiers = [
   "Environment :: Console",
   "Intended Audience :: End Users/Desktop",
   "License :: OSI Approved :: Apache Software License",
-  "Operating System :: OS Independent",
+  "Operating System :: MacOS",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.12",
   "Topic :: Multimedia :: Graphics",
@@ -54,3 +54,7 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "N"]
+ignore = ["E501"]

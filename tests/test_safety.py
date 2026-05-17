@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from rawdog.db import connect
 from rawdog.safety import (
     SafetyError,
     ensure_archive_destination,
@@ -60,3 +61,14 @@ def test_consolidation_destination_cannot_be_inside_source(tmp_path: Path) -> No
 
     with pytest.raises(SafetyError):
         ensure_consolidation_roots(source, destination)
+
+
+def test_migration_helper_rejects_unsafe_identifiers(tmp_path: Path) -> None:
+    connection = connect(tmp_path / "rawdog.sqlite")
+    try:
+        with pytest.raises(ValueError):
+            from rawdog.db import _add_column_if_missing
+
+            _add_column_if_missing(connection, "projects;drop", "bad", "TEXT")
+    finally:
+        connection.close()

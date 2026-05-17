@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -237,9 +238,16 @@ def _add_column_if_missing(
     column: str,
     definition: str,
 ) -> None:
+    _validate_sql_identifier(table)
+    _validate_sql_identifier(column)
     columns = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}
     if column not in columns:
         connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def _validate_sql_identifier(value: str) -> None:
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value):
+        raise ValueError(f"unsafe SQL identifier: {value}")
 
 
 def initialize(database_path: Path) -> None:

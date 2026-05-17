@@ -81,7 +81,10 @@ def add_execution_plan_rows(
 
 
 def get_execution_plan(connection: sqlite3.Connection, plan_id: int) -> ExecutionPlan | None:
-    row = connection.execute("SELECT * FROM execution_plans WHERE plan_id = ?", (plan_id,)).fetchone()
+    row = connection.execute(
+        "SELECT * FROM execution_plans WHERE plan_id = ?",
+        (plan_id,),
+    ).fetchone()
     return row_to_plan(row) if row else None
 
 
@@ -100,7 +103,10 @@ def list_execution_plans(connection: sqlite3.Connection, limit: int = 10) -> lis
     return [row_to_plan(row) for row in rows]
 
 
-def list_execution_plan_rows(connection: sqlite3.Connection, plan_id: int) -> list[ExecutionPlanRow]:
+def list_execution_plan_rows(
+    connection: sqlite3.Connection,
+    plan_id: int,
+) -> list[ExecutionPlanRow]:
     rows = connection.execute(
         "SELECT * FROM execution_plan_rows WHERE plan_id = ? ORDER BY row_id ASC",
         (plan_id,),

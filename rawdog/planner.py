@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-import re
 
 from rawdog.models import Project
 
@@ -26,16 +26,20 @@ def render_folder_template(
     template: str,
     captured_at: datetime,
     project: Project | None = None,
+    project_name: str | None = None,
 ) -> Path:
-    project_name = slug_folder_name(project.name if project else "Date_Only")
-    client_name = slug_folder_name(project.client_name if project and project.client_name else "No_Client")
+    resolved_project_name = project.name if project else project_name
+    project_slug = slug_folder_name(resolved_project_name or "Date_Only")
+    client_name = slug_folder_name(
+        project.client_name if project and project.client_name else "No_Client"
+    )
     replacements = {
         "YYYY": f"{captured_at.year:04d}",
         "YYYYMMDD": captured_at.strftime("%Y%m%d"),
         "YYYY-MM-DD": captured_at.strftime("%Y-%m-%d"),
         "YYYY-MM": captured_at.strftime("%Y-%m"),
         "MM-Month": captured_at.strftime("%m-%B"),
-        "PROJECT": project_name,
+        "PROJECT": project_slug,
         "CLIENT": client_name,
     }
     rendered = template
@@ -49,7 +53,7 @@ def render_folder_template(
 
 def slug_folder_name(value: str) -> str:
     normalized = re.sub(r"[^A-Za-z0-9._-]+", "_", value.strip())
-    normalized = re.sub(r"_+", "_", normalized).strip("._-")
+    normalized = re.sub(r"([_.-])\1+", r"\1", normalized).strip("._-")
     return normalized or "Untitled"
 
 
@@ -59,11 +63,11 @@ def default_project_destination(
     earliest_capture_at: datetime,
     template: str = "YYYY/YYYYMMDD_PROJECT",
 ) -> Path:
-    class _Project:
-        name = project_name
-        client_name = None
-
-    return destination_root / render_folder_template(template, earliest_capture_at, _Project())
+    return destination_root / render_folder_template(
+        template,
+        earliest_capture_at,
+        project_name=project_name,
+    )
 
 
 def default_date_only_destination(
@@ -80,5 +84,9 @@ def plan_append_only_copy(source_path: Path, destination_path: Path) -> PlannedC
         destination_stat = destination_path.stat()
         if source_stat.st_size == destination_stat.st_size:
             return None
-        return None
+        return PlannedCopy(
+            source_path=source_path,
+            destination_path=destination_path,
+            reason="collision_size_mismatch",
+        )
     return PlannedCopy(source_path=source_path, destination_path=destination_path, reason="missing")
