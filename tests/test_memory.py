@@ -1,14 +1,14 @@
 # Author: Nicholas Corrieri
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from rawdog.memory import (
     build_destination_memory,
-    default_date_only_destination,
     memory_file_for_destination,
     write_destination_memory,
 )
 from rawdog.models import OrganizationMode
+from rawdog.planner import default_date_only_destination
 
 
 def test_memory_file_lives_inside_destination_folder(tmp_path) -> None:
@@ -18,13 +18,13 @@ def test_memory_file_lives_inside_destination_folder(tmp_path) -> None:
 
 
 def test_date_only_destination_uses_year_month(tmp_path) -> None:
-    captured_at = datetime(2026, 5, 16, tzinfo=timezone.utc)
+    captured_at = datetime(2026, 5, 16, tzinfo=UTC)
 
     assert default_date_only_destination(tmp_path, captured_at) == tmp_path / "2026" / "2026-05"
 
 
 def test_date_only_destination_respects_template(tmp_path) -> None:
-    captured_at = datetime(2026, 5, 16, tzinfo=timezone.utc)
+    captured_at = datetime(2026, 5, 16, tzinfo=UTC)
 
     assert default_date_only_destination(tmp_path, captured_at, "YYYY/MM") == tmp_path / "2026" / "05"
 

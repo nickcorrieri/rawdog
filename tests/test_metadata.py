@@ -1,6 +1,6 @@
 # Author: Nicholas Corrieri
 
-from datetime import timezone
+from datetime import UTC
 from pathlib import Path
 
 from rawdog.metadata import capture_time_fallback
@@ -12,4 +12,4 @@ def test_capture_time_fallback_is_utc_aware(tmp_path: Path) -> None:
 
     captured_at = capture_time_fallback(raw)
 
-    assert captured_at.tzinfo == timezone.utc
+    assert captured_at.tzinfo == UTC

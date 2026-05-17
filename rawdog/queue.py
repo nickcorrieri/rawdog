@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from rawdog.models import (
@@ -20,7 +20,7 @@ SAFE_STEP_KINDS = {PlanStepKind.SNIFF, PlanStepKind.SCORE, PlanStepKind.DEN}
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def create_or_update_queue(connection: sqlite3.Connection, payload: PlanQueueCreate) -> PlanQueue:

@@ -1,6 +1,8 @@
 # Author: Nicholas Corrieri
 
+import os
 import shutil
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -32,6 +34,37 @@ def test_append_only_copy_success_removes_partial(tmp_path: Path) -> None:
     assert status == "copied"
     assert destination.read_bytes() == b"raw"
     assert not destination.with_name(destination.name + ".partial").exists()
+
+
+def test_append_only_copy_timestamps_new_date_folders(tmp_path: Path) -> None:
+    source = tmp_path / "source.CR3"
+    archive = tmp_path / "archive"
+    destination = archive / "2025" / "202501" / "source.CR3"
+    source.write_bytes(b"raw")
+    archive.mkdir()
+
+    status = append_only_copy(source, destination, archive)
+
+    assert status == "copied"
+    expected = int(datetime(2025, 1, 1, 0, 0, 1).timestamp())
+    assert int((archive / "2025").stat().st_mtime) == expected
+    assert int((archive / "2025" / "202501").stat().st_mtime) == expected
+
+
+def test_append_only_copy_does_not_retimestamp_existing_date_folder(tmp_path: Path) -> None:
+    source = tmp_path / "source.CR3"
+    archive = tmp_path / "archive"
+    existing = archive / "2025"
+    destination = existing / "202501" / "source.CR3"
+    source.write_bytes(b"raw")
+    existing.mkdir(parents=True)
+    original_timestamp = datetime(2024, 1, 1, 0, 0, 1).timestamp()
+    os.utime(existing, (original_timestamp, original_timestamp))
+
+    status = append_only_copy(source, destination, archive)
+
+    assert status == "copied"
+    assert int(existing.stat().st_mtime) != int(datetime(2025, 1, 1, 0, 0, 1).timestamp())
 
 
 def test_append_only_copy_skips_same_name_and_size(tmp_path: Path) -> None:

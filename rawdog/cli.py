@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import typer
@@ -13,6 +13,7 @@ from rich.table import Table
 from rich.text import Text
 
 from rawdog.config import build_config, default_config_path, load_config, save_config
+from rawdog.copier import append_only_copy, append_only_move
 from rawdog.db import initialize, session
 from rawdog.den import DenPlan, build_den_plan, score_items, summarize_by_year
 from rawdog.drives import parse_user_path, standard_path_choices
@@ -52,7 +53,6 @@ from rawdog.models import (
     ProjectCreate,
     RawdogConfig,
 )
-from rawdog.copier import append_only_copy, append_only_move
 from rawdog.planner import default_date_only_destination, default_project_destination
 from rawdog.profiles import (
     create_or_update_profile,
@@ -484,7 +484,7 @@ def fetch(
             destination_root,
             preview_project_name,
             earliest_capture_at
-            or (project.created_at if project else datetime.now(timezone.utc)),
+            or (project.created_at if project else datetime.now(UTC)),
             (project.preferred_folder_template if project else None) or effective_template,
         )
         console.print(f"Project: {preview_project_name}")

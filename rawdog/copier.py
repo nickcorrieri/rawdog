@@ -7,11 +7,8 @@ import shutil
 from pathlib import Path
 
 from rawdog.compare import same_name_and_size
+from rawdog.datefolders import date_folder_timestamp
 from rawdog.safety import ensure_archive_destination, ensure_no_overwrite, ensure_same_filesystem
-
-
-class CopySkipped(RuntimeError):
-    pass
 
 
 def append_only_copy(
@@ -30,13 +27,14 @@ def append_only_copy(
         return "planned"
 
     ensure_no_overwrite(destination)
-    destination.parent.mkdir(parents=True, exist_ok=True)
+    created_dirs = _create_destination_parent(destination, archive_root)
     partial = destination.with_name(destination.name + ".partial")
     if partial.exists():
         return "skipped_existing_partial"
     try:
         shutil.copy2(source, partial)
         os.rename(partial, destination)
+        _timestamp_created_date_dirs(created_dirs)
     except Exception:
         if partial.exists():
             partial.unlink()
@@ -61,6 +59,29 @@ def append_only_move(
         return "planned_move"
 
     ensure_no_overwrite(destination)
-    destination.parent.mkdir(parents=True, exist_ok=True)
+    created_dirs = _create_destination_parent(destination, destination_root)
     os.rename(source, destination)
+    _timestamp_created_date_dirs(created_dirs)
     return "moved"
+
+
+def _create_destination_parent(destination: Path, archive_root: Path) -> list[Path]:
+    archive_resolved = archive_root.expanduser().resolve()
+    parent = destination.parent.expanduser()
+    created_dirs: list[Path] = []
+    current = parent
+    while not current.exists():
+        created_dirs.append(current)
+        if current == archive_resolved:
+            break
+        current = current.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    return list(reversed(created_dirs))
+
+
+def _timestamp_created_date_dirs(created_dirs: list[Path]) -> None:
+    for directory in created_dirs:
+        timestamp = date_folder_timestamp(directory.name)
+        if timestamp is None:
+            continue
+        os.utime(directory, (timestamp, timestamp))

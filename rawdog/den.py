@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from rawdog.copier import append_only_copy, append_only_move
@@ -75,7 +75,7 @@ def build_den_plan(
     destination_root = destination_root.expanduser().resolve()
     excluded_roots = [path.expanduser().resolve() for path in (exclude_roots or [])]
     items = scan_raw_files(source_root, exclude_roots=excluded_roots, limit=limit)
-    earliest = min((capture_time_fallback(item.path) for item in items), default=datetime.now(timezone.utc))
+    earliest = min((capture_time_fallback(item.path) for item in items), default=datetime.now(UTC))
     if layout_mode in {DenLayoutMode.PRESERVE, DenLayoutMode.PRESERVE_DATES}:
         destination_folder = destination_root
     elif layout_mode == DenLayoutMode.PROJECT or project_name:

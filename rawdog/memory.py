@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 
 from rawdog import __version__
 from rawdog.models import OrganizationMode
-from rawdog.planner import default_date_only_destination, slug_folder_name
+from rawdog.planner import slug_folder_name
 
 
 def rawdog_version() -> str:
@@ -24,7 +24,7 @@ def rawdog_version() -> str:
 class DestinationMemory(BaseModel):
     rawdog_version: str = Field(default_factory=rawdog_version)
     memory_kind: str = "destination_project_memory"
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     organization_mode: OrganizationMode
     project_name: str | None = None
     memory_name: str

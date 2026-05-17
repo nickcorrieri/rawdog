@@ -1,6 +1,6 @@
 # Author: Nicholas Corrieri
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -14,7 +14,7 @@ from rawdog.planner import (
 
 
 def test_project_template_rendering() -> None:
-    captured_at = datetime(2026, 5, 16, tzinfo=timezone.utc)
+    captured_at = datetime(2026, 5, 16, tzinfo=UTC)
 
     rendered = render_folder_template("YYYY/YYYYMMDD_PROJECT", captured_at)
 
@@ -22,7 +22,7 @@ def test_project_template_rendering() -> None:
 
 
 def test_project_destination_uses_sanitized_project_name(tmp_path) -> None:
-    captured_at = datetime(2026, 5, 16, tzinfo=timezone.utc)
+    captured_at = datetime(2026, 5, 16, tzinfo=UTC)
 
     rendered = default_project_destination(tmp_path, "Senior Photos Emma", captured_at)
 
@@ -38,7 +38,7 @@ def test_slug_folder_name_deduplicates_separator_runs() -> None:
 
 
 def test_template_cannot_escape_destination() -> None:
-    captured_at = datetime(2026, 5, 16, tzinfo=timezone.utc)
+    captured_at = datetime(2026, 5, 16, tzinfo=UTC)
 
     with pytest.raises(TemplateError):
         render_folder_template("../YYYY", captured_at)

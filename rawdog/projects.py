@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from rawdog.models import Project, ProjectCreate
 from rawdog.planner import slug_folder_name
@@ -15,7 +15,7 @@ class ProjectError(RuntimeError):
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def create_project(connection: sqlite3.Connection, payload: ProjectCreate) -> Project:

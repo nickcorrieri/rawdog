@@ -9,6 +9,16 @@ from pathlib import Path
 
 from rawdog.metadata import capture_time_fallback, is_raw_file
 
+DEFAULT_SKIPPED_DIRS = {
+    ".DocumentRevisions-V100",
+    ".Spotlight-V100",
+    ".TemporaryItems",
+    ".Trashes",
+    ".fseventsd",
+    ".rawdog",
+    "__MACOSX",
+}
+
 
 @dataclass(frozen=True)
 class InventoryItem:
@@ -32,7 +42,8 @@ def scan_raw_files(
         dirnames[:] = sorted(
             dirname
             for dirname in dirnames
-            if not _is_excluded(current_path / dirname, resolved_excludes)
+            if dirname not in DEFAULT_SKIPPED_DIRS
+            and not _is_excluded(current_path / dirname, resolved_excludes)
         )
         for filename in sorted(filenames):
             path = current_path / filename

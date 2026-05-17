@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-
 
 RAW_EXTENSIONS = {
     ".3fr",
@@ -38,4 +37,4 @@ def is_raw_file(path: Path) -> bool:
 
 
 def capture_time_fallback(path: Path) -> datetime:
-    return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+    return datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)

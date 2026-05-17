@@ -4,7 +4,12 @@ from pathlib import Path
 
 from rawdog.db import initialize, session
 from rawdog.models import CollisionPolicy, ImportProfileCreate, NamingConvention, ProjectCreate
-from rawdog.profiles import create_or_update_profile, get_last_profile, get_profile_by_name, list_profiles
+from rawdog.profiles import (
+    create_or_update_profile,
+    get_last_profile,
+    get_profile_by_name,
+    list_profiles,
+)
 from rawdog.projects import create_project
 
 
