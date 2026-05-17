@@ -64,6 +64,52 @@ def test_den_can_preserve_structure_but_normalize_date_folders(tmp_path: Path) -
     assert plan.rows[0].destination_path == destination / "Trips" / "20260516" / "IMG_0001.CR3"
 
 
+def test_den_preserve_dates_keeps_date_folder_label_and_file_name(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "archive"
+    raw = source / "Trips" / "05.16.2026 Senior Photos" / "IMG_0042.CR2"
+    raw.parent.mkdir(parents=True)
+    destination.mkdir()
+    raw.write_bytes(b"raw")
+
+    plan = build_den_plan(source, destination, layout_mode=DenLayoutMode.PRESERVE_DATES)
+
+    assert plan.rows[0].destination_path == (
+        destination / "Trips" / "20260516_Senior Photos" / "IMG_0042.CR2"
+    )
+
+
+def test_den_excludes_destination_when_it_is_inside_source(tmp_path: Path) -> None:
+    source = tmp_path / "drive"
+    destination = source / "Photo_Library"
+    old_raw = source / "OldMess" / "IMG_0001.CR3"
+    archive_raw = destination / "IMG_0002.CR3"
+    old_raw.parent.mkdir(parents=True)
+    archive_raw.parent.mkdir(parents=True)
+    old_raw.write_bytes(b"raw")
+    archive_raw.write_bytes(b"archive")
+
+    plan = build_den_plan(source, destination, exclude_roots=[destination])
+
+    assert len(plan.rows) == 1
+    assert plan.rows[0].source_path == old_raw
+    assert plan.excluded_roots == [destination.resolve()]
+
+
+def test_den_limit_creates_small_review_plan(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "archive"
+    source.mkdir()
+    destination.mkdir()
+    (source / "IMG_0001.CR3").write_bytes(b"raw")
+    (source / "IMG_0002.CR3").write_bytes(b"raw")
+
+    plan = build_den_plan(source, destination, limit=1)
+
+    assert len(plan.rows) == 1
+    assert plan.limited_to == 1
+
+
 def test_den_summary_by_year(tmp_path: Path) -> None:
     source = tmp_path / "source"
     destination = tmp_path / "archive"

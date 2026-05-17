@@ -9,7 +9,8 @@ from pathlib import Path
 
 from rawdog.copier import append_only_copy, append_only_move
 from rawdog.datefolders import normalize_date_folder_parts
-from rawdog.inventory import InventoryItem, earliest_raw_capture_time, scan_raw_files
+from rawdog.inventory import InventoryItem, scan_raw_files
+from rawdog.metadata import capture_time_fallback
 from rawdog.models import DenLayoutMode, DenTransferAction
 from rawdog.planner import default_date_only_destination, default_project_destination
 
@@ -29,6 +30,8 @@ class DenPlan:
     destination_folder: Path
     rows: list[DenPlanRow]
     transfer_action: DenTransferAction = DenTransferAction.COPY
+    excluded_roots: list[Path] | None = None
+    limited_to: int | None = None
 
     @property
     def files_to_copy(self) -> int:
@@ -65,11 +68,14 @@ def build_den_plan(
     layout_mode: DenLayoutMode = DenLayoutMode.PRESERVE,
     transfer_action: DenTransferAction = DenTransferAction.COPY,
     folder_template: str = "YYYY/YYYY-MM",
+    exclude_roots: list[Path] | None = None,
+    limit: int | None = None,
 ) -> DenPlan:
     source_root = source_root.expanduser().resolve()
-    destination_root = destination_root.expanduser()
-    items = scan_raw_files(source_root)
-    earliest = earliest_raw_capture_time(source_root) or datetime.now(timezone.utc)
+    destination_root = destination_root.expanduser().resolve()
+    excluded_roots = [path.expanduser().resolve() for path in (exclude_roots or [])]
+    items = scan_raw_files(source_root, exclude_roots=excluded_roots, limit=limit)
+    earliest = min((capture_time_fallback(item.path) for item in items), default=datetime.now(timezone.utc))
     if layout_mode in {DenLayoutMode.PRESERVE, DenLayoutMode.PRESERVE_DATES}:
         destination_folder = destination_root
     elif layout_mode == DenLayoutMode.PROJECT or project_name:
@@ -97,6 +103,8 @@ def build_den_plan(
         destination_folder=destination_folder,
         rows=rows,
         transfer_action=transfer_action,
+        excluded_roots=excluded_roots,
+        limited_to=limit,
     )
 
 

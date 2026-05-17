@@ -59,12 +59,17 @@ def ensure_import_roots(source_root: Path, destination_root: Path) -> None:
         raise SafetyError("destination cannot be inside source")
 
 
-def ensure_consolidation_roots(source_root: Path, destination_root: Path) -> None:
+def ensure_consolidation_roots(
+    source_root: Path,
+    destination_root: Path,
+    *,
+    allow_destination_inside_source: bool = False,
+) -> None:
     source = source_root.expanduser().resolve()
     destination = destination_root.expanduser().resolve()
     if source == destination:
         raise SafetyError("source and destination must be different paths")
-    if source in destination.parents:
+    if source in destination.parents and not allow_destination_inside_source:
         raise SafetyError("destination cannot be inside source")
 
 

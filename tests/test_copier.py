@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from rawdog.copier import append_only_copy
+from rawdog.copier import append_only_copy, append_only_move
 from rawdog.safety import SafetyError
 
 
@@ -101,3 +101,29 @@ def test_append_only_copy_refuses_outside_archive_root(tmp_path: Path) -> None:
 
     with pytest.raises(SafetyError):
         append_only_copy(source, destination, tmp_path / "archive")
+
+
+def test_append_only_move_renames_unique_file_same_filesystem(tmp_path: Path) -> None:
+    source = tmp_path / "source.CR3"
+    destination = tmp_path / "archive" / "source.CR3"
+    source.write_bytes(b"raw")
+    destination.parent.mkdir()
+
+    status = append_only_move(source, destination, tmp_path / "archive")
+
+    assert status == "moved"
+    assert not source.exists()
+    assert destination.read_bytes() == b"raw"
+
+
+def test_append_only_move_refuses_existing_collision(tmp_path: Path) -> None:
+    source = tmp_path / "source.CR3"
+    destination = tmp_path / "archive" / "source.CR3"
+    source.write_bytes(b"raw")
+    destination.parent.mkdir()
+    destination.write_bytes(b"different")
+
+    status = append_only_move(source, destination, tmp_path / "archive")
+
+    assert status == "skipped_collision"
+    assert source.exists()

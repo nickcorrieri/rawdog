@@ -19,3 +19,23 @@ def test_raw_extension_is_case_insensitive() -> None:
     assert is_raw_file(Path("IMG_0001.NEF"))
     assert is_raw_file(Path("IMG_0001.nef"))
     assert not is_raw_file(Path("IMG_0001.NEF.partial"))
+
+
+def test_scan_raw_files_excludes_destination_subtree(tmp_path: Path) -> None:
+    (tmp_path / "Old" / "IMG_0001.CR3").parent.mkdir()
+    (tmp_path / "Old" / "IMG_0001.CR3").write_bytes(b"raw")
+    (tmp_path / "Photo_Library" / "IMG_0002.CR3").parent.mkdir()
+    (tmp_path / "Photo_Library" / "IMG_0002.CR3").write_bytes(b"archive")
+
+    items = scan_raw_files(tmp_path, exclude_roots=[tmp_path / "Photo_Library"])
+
+    assert [item.relative_path for item in items] == [Path("Old/IMG_0001.CR3")]
+
+
+def test_scan_raw_files_can_limit_preview(tmp_path: Path) -> None:
+    (tmp_path / "IMG_0001.CR3").write_bytes(b"raw")
+    (tmp_path / "IMG_0002.CR3").write_bytes(b"raw")
+
+    items = scan_raw_files(tmp_path, limit=1)
+
+    assert len(items) == 1

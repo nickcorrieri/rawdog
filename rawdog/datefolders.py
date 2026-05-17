@@ -14,10 +14,14 @@ class DateFolderMatch:
 
 
 DATE_PATTERNS = [
-    re.compile(r"^(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})$"),
-    re.compile(r"^(?P<year>\d{4})[._-](?P<month>\d{2})[._-](?P<day>\d{2})$"),
-    re.compile(r"^(?P<month>\d{2})(?P<day>\d{2})(?P<year>\d{4})$"),
-    re.compile(r"^(?P<month>\d{2})[._-](?P<day>\d{2})[._-](?P<year>\d{4})$"),
+    re.compile(r"^(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})(?P<label>.*)$"),
+    re.compile(
+        r"^(?P<year>\d{4})[._-](?P<month>\d{2})[._-](?P<day>\d{2})(?P<label>.*)$"
+    ),
+    re.compile(r"^(?P<month>\d{2})(?P<day>\d{2})(?P<year>\d{4})(?P<label>.*)$"),
+    re.compile(
+        r"^(?P<month>\d{2})[._-](?P<day>\d{2})[._-](?P<year>\d{4})(?P<label>.*)$"
+    ),
 ]
 
 
@@ -33,8 +37,19 @@ def normalize_date_folder_name(value: str) -> DateFolderMatch | None:
             parsed = date(year, month, day)
         except ValueError:
             return None
-        return DateFolderMatch(original=value, normalized=parsed.strftime("%Y%m%d"))
+        label = _normalize_label_suffix(match.group("label") or "")
+        return DateFolderMatch(original=value, normalized=f"{parsed:%Y%m%d}{label}")
     return None
+
+
+def _normalize_label_suffix(value: str) -> str:
+    if not value:
+        return ""
+    label = value.strip()
+    label = re.sub(r"^[\s._-]+", "", label)
+    if not label:
+        return ""
+    return f"_{label}"
 
 
 def normalize_date_folder_parts(parts: tuple[str, ...]) -> tuple[str, ...]:

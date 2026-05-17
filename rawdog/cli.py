@@ -142,6 +142,12 @@ def _print_layout_analysis(analysis: LayoutAnalysis) -> None:
     )
 
 
+def _destination_inside_source(source_root: Path, destination_root: Path) -> bool:
+    source = source_root.expanduser().resolve()
+    destination = destination_root.expanduser().resolve()
+    return source in destination.parents
+
+
 def _print_ai_review_prompt(title: str, paths: list[Path], suggestion: str) -> None:
     if not paths:
         return
@@ -638,6 +644,10 @@ def _persist_den_execution_plan(
         f"{plan.files_to_transfer} files should be at {plan.destination_folder}; "
         f"{skipped} already-present files skipped; {collisions} collisions held for review."
     )
+    if plan.excluded_roots:
+        expected += " Excluded from source scan: " + ", ".join(str(path) for path in plan.excluded_roots) + "."
+    if plan.limited_to:
+        expected += f" Limited preview: first {plan.limited_to} RAW files only."
     with session(config.database_path) as connection:
         execution_plan = create_execution_plan(
             connection,
@@ -732,11 +742,19 @@ def _execute_persisted_plan(config: RawdogConfig, plan_id: int) -> ExecutionPlan
         try:
             if plan.destination_root is None:
                 raise SafetyError("execution plan is missing destination root")
-            status = (
-                append_only_move(row.source_path, row.destination_path, plan.destination_root)
-                if row.transfer_action == DenTransferAction.MOVE
-                else append_only_copy(row.source_path, row.destination_path, plan.destination_root)
-            )
+            if (
+                row.transfer_action == DenTransferAction.MOVE
+                and not row.source_path.exists()
+                and row.destination_path.exists()
+                and row.destination_path.stat().st_size == row.size_bytes
+            ):
+                status = "moved"
+            else:
+                status = (
+                    append_only_move(row.source_path, row.destination_path, plan.destination_root)
+                    if row.transfer_action == DenTransferAction.MOVE
+                    else append_only_copy(row.source_path, row.destination_path, plan.destination_root)
+                )
             audit_status = _audit_execution_row(row, status)
             if status in {"copied", "moved"}:
                 transferred += 1
@@ -808,8 +826,14 @@ def den(
     project_name: str | None = typer.Option(None, "--project", help="Optional project folder name."),
     workflow_name: str | None = typer.Option(None, "--workflow", "-w", help="Save or reuse workflow name."),
     layout: DenLayoutMode = typer.Option(DenLayoutMode.PRESERVE, "--layout", help="Destination layout."),
-    action: DenTransferAction = typer.Option(DenTransferAction.COPY, "--action", help="copy or move."),
+    action: DenTransferAction = typer.Option(
+        DenTransferAction.COPY,
+        "--action",
+        "--transfer-action",
+        help="copy or move.",
+    ),
     template: str | None = typer.Option(None, "--template", help="Folder template override."),
+    limit: int | None = typer.Option(None, "--limit", min=1, help="Limit the planning scan for review."),
     dry_run: bool = typer.Option(True, "--dry-run/--commit", help="Preview before execution."),
 ) -> None:
     """Consolidate a messy RAW source into a RAWDOG folder structure."""
@@ -825,14 +849,25 @@ def den(
         raise typer.BadParameter("--workflow with saved paths, or source and --dest, are required.")
     source_root = parse_user_path(str(source_value))
     destination_root = parse_user_path(str(destination_value))
+    effective_layout = loaded_workflow.layout_mode if loaded_workflow and not source else layout
+    effective_action = loaded_workflow.transfer_action if loaded_workflow and not source else action
+    destination_inside_source = _destination_inside_source(source_root, destination_root)
+    if destination_inside_source and effective_action == DenTransferAction.MOVE:
+        raise typer.BadParameter(
+            "Whole-source move into a child destination is not allowed. "
+            "Use --action copy for a whole-drive consolidation preview, or choose a narrower old-folder source."
+        )
+    exclude_roots = [destination_root] if destination_inside_source else []
     try:
         ensure_existing_directory(source_root, "source")
         ensure_existing_directory(destination_root, "destination")
-        ensure_consolidation_roots(source_root, destination_root)
+        ensure_consolidation_roots(
+            source_root,
+            destination_root,
+            allow_destination_inside_source=destination_inside_source,
+        )
     except SafetyError as exc:
         raise typer.BadParameter(str(exc)) from exc
-    effective_layout = loaded_workflow.layout_mode if loaded_workflow and not source else layout
-    effective_action = loaded_workflow.transfer_action if loaded_workflow and not source else action
     if effective_action == DenTransferAction.MOVE:
         try:
             ensure_same_filesystem(source_root, destination_root)
@@ -844,6 +879,15 @@ def den(
         if effective_layout == DenLayoutMode.PROJECT or project_name
         else config.date_folder_template
     )
+    layout_analysis = analyze_source_layout(source_root, exclude_roots=exclude_roots, limit=limit)
+    _print_layout_analysis(layout_analysis)
+    if exclude_roots:
+        console.print(
+            "[bold yellow on black]Destination is inside source:[/] "
+            "RAWDOG will exclude the destination subtree from source inventory."
+        )
+        for excluded_root in exclude_roots:
+            console.print(f"Excluded: {excluded_root}")
     plan = build_den_plan(
         source_root,
         destination_root,
@@ -851,6 +895,8 @@ def den(
         layout_mode=effective_layout,
         transfer_action=effective_action,
         folder_template=effective_template,
+        exclude_roots=exclude_roots,
+        limit=limit,
     )
     if workflow_name:
         with session(config.database_path) as connection:
@@ -1259,10 +1305,20 @@ def queue_add_den(
     _, config = _load_or_exit()
     source_root = parse_user_path(str(source))
     destination_root = parse_user_path(str(destination))
+    destination_inside_source = _destination_inside_source(source_root, destination_root)
+    if destination_inside_source and action == DenTransferAction.MOVE:
+        raise typer.BadParameter(
+            "Whole-source move into a child destination is not allowed. "
+            "Use --action copy, or choose a narrower old-folder source."
+        )
     try:
         ensure_existing_directory(source_root, "source")
         ensure_existing_directory(destination_root, "destination")
-        ensure_consolidation_roots(source_root, destination_root)
+        ensure_consolidation_roots(
+            source_root,
+            destination_root,
+            allow_destination_inside_source=destination_inside_source,
+        )
         if action == DenTransferAction.MOVE:
             ensure_same_filesystem(source_root, destination_root)
     except SafetyError as exc:
@@ -1397,8 +1453,20 @@ def queue_run(
                     raise typer.BadParameter(
                         f"Queue step #{step.step_order} is missing a destination."
                     )
+                destination_inside_source = _destination_inside_source(
+                    step.source_root,
+                    step.destination_root,
+                )
+                if destination_inside_source and step.transfer_action == DenTransferAction.MOVE:
+                    raise typer.BadParameter(
+                        f"Queue step #{step.step_order} cannot move a whole source into a child destination."
+                    )
                 ensure_existing_directory(step.destination_root, "destination")
-                ensure_consolidation_roots(step.source_root, step.destination_root)
+                ensure_consolidation_roots(
+                    step.source_root,
+                    step.destination_root,
+                    allow_destination_inside_source=destination_inside_source,
+                )
                 if step.transfer_action == DenTransferAction.MOVE:
                     ensure_same_filesystem(step.source_root, step.destination_root)
         except SafetyError as exc:
@@ -1424,6 +1492,11 @@ def queue_run(
                 layout_mode=layout_mode,
                 transfer_action=transfer_action,
                 folder_template=folder_template,
+                exclude_roots=(
+                    [step.destination_root]
+                    if _destination_inside_source(step.source_root, step.destination_root)
+                    else []
+                ),
             )
             runnable_steps.append((step, plan))
             total_files += plan.files_to_transfer

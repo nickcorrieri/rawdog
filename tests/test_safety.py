@@ -63,6 +63,14 @@ def test_consolidation_destination_cannot_be_inside_source(tmp_path: Path) -> No
         ensure_consolidation_roots(source, destination)
 
 
+def test_consolidation_can_explicitly_allow_destination_inside_source(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    destination = source / "archive"
+    destination.mkdir(parents=True)
+
+    ensure_consolidation_roots(source, destination, allow_destination_inside_source=True)
+
+
 def test_migration_helper_rejects_unsafe_identifiers(tmp_path: Path) -> None:
     connection = connect(tmp_path / "rawdog.sqlite")
     try:

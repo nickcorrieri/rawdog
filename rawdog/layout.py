@@ -49,8 +49,13 @@ class LayoutAnalysis:
         return True
 
 
-def analyze_source_layout(root: Path) -> LayoutAnalysis:
-    items = scan_raw_files(root)
+def analyze_source_layout(
+    root: Path,
+    *,
+    exclude_roots: list[Path] | None = None,
+    limit: int | None = None,
+) -> LayoutAnalysis:
+    items = scan_raw_files(root, exclude_roots=exclude_roots, limit=limit)
     if not items:
         return LayoutAnalysis(
             source_root=root,
