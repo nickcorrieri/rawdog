@@ -27,11 +27,22 @@ main product shape.
 
 ## Import Profiles
 
-RAWDOG supports reusable import profiles. A profile stores a source root,
-destination root, organization mode, and folder template. This supports normal
-local working folders, SD-card imports, and external-volume-to-external-volume
+RAWDOG supports reusable import profiles. These are the existing RAWDOG profiles,
+not a second profile system. A profile stores a source root, destination root,
+organization mode, folder template, naming convention, collision policy, verify
+preference, dry-run default, and exclude patterns. This supports normal local
+working folders, SD-card imports, and external-volume-to-external-volume
 workflows where the photographer does not want a local setup.
 Use `rawdog fetch --profile last` to reuse the most recently used profile.
+
+`fetch` detects whether the source looks semi-organized or like a raw camera
+dump:
+
+- semi-organized sources keep existing project/date folder names by default
+- raw camera dumps are suggested for DDD placement
+- mixed sources are flagged for operator review
+
+RAWDOG only suggests this behavior. It does not silently reorganize a source.
 
 `fetch` previews by default. Project/profile memory is written only when the
 operator uses `--commit`.
@@ -64,6 +75,7 @@ Lightroom or another editor inside the working project folder, then run
 `breed` snapshots the current working project state to append-only archive
 destinations. If a local working file was deleted before breed, RAWDOG simply
 does not copy it in that run. Existing archive files are not deleted.
+`rawdog backup` is an explicit alias for the same append-only workflow.
 
 ```bash
 rawdog breed --project Wedding_Smith --dest /Volumes/WD_BLACK
@@ -82,6 +94,7 @@ Run `rawdog` with no arguments to open the colored workflow chooser. Use
 rawdog init
 rawdog fetch
 rawdog breed
+rawdog backup
 rawdog den
 rawdog sniff
 rawdog score
@@ -149,6 +162,13 @@ Queues are for operations such as:
 Destructive cleanup is never queued. RAWDOG must not queue deletion, mismatch
 cleanup, thumbnail cleanup, overwrite, rename, or automatic dedupe reduction.
 No queued operation may silently resolve collisions.
+
+When RAWDOG finds a semi-destructive review item, such as a collision, stale
+partial, failed move, or destination mismatch, it prints a short copy-paste AI
+review prompt with the relevant paths. The prompt is meant for ChatGPT or
+another assistant to help the operator reason through the situation before any
+manual cleanup or retry. RAWDOG still refuses to delete originals or auto-resolve
+collisions.
 
 ```bash
 rawdog queue create old_drive_cleanup

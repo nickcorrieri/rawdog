@@ -8,7 +8,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 def connect(database_path: Path) -> sqlite3.Connection:
@@ -61,8 +61,14 @@ def migrate(connection: sqlite3.Connection) -> None:
             name TEXT NOT NULL UNIQUE,
             source_root TEXT NOT NULL,
             destination_root TEXT NOT NULL,
+            profile_kind TEXT NOT NULL DEFAULT 'ingest',
             organization_mode TEXT NOT NULL,
             folder_template TEXT NOT NULL,
+            naming_convention TEXT NOT NULL DEFAULT 'detect',
+            collision_policy TEXT NOT NULL DEFAULT 'skip',
+            verify_after_copy INTEGER NOT NULL DEFAULT 1,
+            dry_run_default INTEGER NOT NULL DEFAULT 1,
+            exclude_patterns_json TEXT NOT NULL DEFAULT '[]',
             project_id INTEGER REFERENCES projects(project_id),
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
@@ -198,9 +204,15 @@ def migrate(connection: sqlite3.Connection) -> None:
         );
 
         INSERT INTO schema_meta(key, value)
-        VALUES ('schema_version', '7')
+        VALUES ('schema_version', '8')
         ON CONFLICT(key) DO UPDATE SET value = excluded.value;
         """
+    )
+    _add_column_if_missing(
+        connection,
+        table="import_profiles",
+        column="profile_kind",
+        definition="TEXT NOT NULL DEFAULT 'ingest'",
     )
     _add_column_if_missing(
         connection,
@@ -213,6 +225,36 @@ def migrate(connection: sqlite3.Connection) -> None:
         table="import_profiles",
         column="project_id",
         definition="INTEGER REFERENCES projects(project_id)",
+    )
+    _add_column_if_missing(
+        connection,
+        table="import_profiles",
+        column="naming_convention",
+        definition="TEXT NOT NULL DEFAULT 'detect'",
+    )
+    _add_column_if_missing(
+        connection,
+        table="import_profiles",
+        column="collision_policy",
+        definition="TEXT NOT NULL DEFAULT 'skip'",
+    )
+    _add_column_if_missing(
+        connection,
+        table="import_profiles",
+        column="verify_after_copy",
+        definition="INTEGER NOT NULL DEFAULT 1",
+    )
+    _add_column_if_missing(
+        connection,
+        table="import_profiles",
+        column="dry_run_default",
+        definition="INTEGER NOT NULL DEFAULT 1",
+    )
+    _add_column_if_missing(
+        connection,
+        table="import_profiles",
+        column="exclude_patterns_json",
+        definition="TEXT NOT NULL DEFAULT '[]'",
     )
     _add_column_if_missing(
         connection,

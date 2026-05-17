@@ -3,7 +3,7 @@
 from pathlib import Path
 
 from rawdog.db import initialize, session
-from rawdog.models import ImportProfileCreate, ProjectCreate
+from rawdog.models import CollisionPolicy, ImportProfileCreate, NamingConvention, ProjectCreate
 from rawdog.profiles import create_or_update_profile, get_last_profile, get_profile_by_name, list_profiles
 from rawdog.projects import create_project
 
@@ -19,6 +19,11 @@ def test_create_update_and_list_profile(tmp_path: Path) -> None:
                 name="Wedding_Smith",
                 source_root=tmp_path / "card",
                 destination_root=tmp_path / "external",
+                naming_convention=NamingConvention.KEEP_EXISTING,
+                collision_policy=CollisionPolicy.ASK,
+                verify_after_copy=False,
+                dry_run_default=False,
+                exclude_patterns=["**/.DS_Store"],
             ),
         )
 
@@ -33,6 +38,11 @@ def test_create_update_and_list_profile(tmp_path: Path) -> None:
     assert last.profile_id == profile.profile_id
     assert loaded.source_root == tmp_path / "card"
     assert loaded.destination_root == tmp_path / "external"
+    assert loaded.naming_convention == NamingConvention.KEEP_EXISTING
+    assert loaded.collision_policy == CollisionPolicy.ASK
+    assert loaded.verify_after_copy is False
+    assert loaded.dry_run_default is False
+    assert loaded.exclude_patterns == ["**/.DS_Store"]
     assert profiles[0].name == "Wedding_Smith"
 
 

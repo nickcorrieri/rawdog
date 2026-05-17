@@ -14,6 +14,22 @@ class OrganizationMode(StrEnum):
     PROJECT = "project"
 
 
+class ProfileKind(StrEnum):
+    INGEST = "ingest"
+
+
+class NamingConvention(StrEnum):
+    DETECT = "detect"
+    KEEP_EXISTING = "keep-existing"
+    DDD = "ddd"
+    PROJECT_LABEL = "project-label"
+
+
+class CollisionPolicy(StrEnum):
+    SKIP = "skip"
+    ASK = "ask"
+
+
 class DenLayoutMode(StrEnum):
     PRESERVE = "preserve"
     PRESERVE_DATES = "preserve-dates"
@@ -77,8 +93,14 @@ class ImportProfileCreate(BaseModel):
     name: str = Field(min_length=1)
     source_root: Path
     destination_root: Path
+    profile_kind: ProfileKind = ProfileKind.INGEST
     organization_mode: OrganizationMode = OrganizationMode.PROJECT
     folder_template: str = "YYYY/YYYYMMDD_PROJECT"
+    naming_convention: NamingConvention = NamingConvention.DETECT
+    collision_policy: CollisionPolicy = CollisionPolicy.SKIP
+    verify_after_copy: bool = True
+    dry_run_default: bool = True
+    exclude_patterns: list[str] = Field(default_factory=list)
     project_id: int | None = None
     notes: str | None = None
 
@@ -88,8 +110,14 @@ class ImportProfile(BaseModel):
     name: str
     source_root: Path
     destination_root: Path
+    profile_kind: ProfileKind
     organization_mode: OrganizationMode
     folder_template: str
+    naming_convention: NamingConvention
+    collision_policy: CollisionPolicy
+    verify_after_copy: bool
+    dry_run_default: bool
+    exclude_patterns: list[str] = Field(default_factory=list)
     project_id: int | None = None
     created_at: datetime
     updated_at: datetime

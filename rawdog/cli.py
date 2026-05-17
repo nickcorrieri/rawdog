@@ -28,11 +28,13 @@ from rawdog.execution import (
     update_execution_plan_row,
 )
 from rawdog.inventory import earliest_raw_capture_time, scan_raw_files
+from rawdog.layout import LayoutAnalysis, analyze_source_layout
 from rawdog.memory import (
     build_destination_memory,
     write_destination_memory,
 )
 from rawdog.models import (
+    CollisionPolicy,
     ConsolidationWorkflowCreate,
     DenLayoutMode,
     DenTransferAction,
@@ -42,6 +44,7 @@ from rawdog.models import (
     ExecutionPlanRowCreate,
     ExecutionPlanStatus,
     ImportProfileCreate,
+    NamingConvention,
     OrganizationMode,
     PlanQueueCreate,
     PlanQueueStepCreate,
@@ -121,6 +124,55 @@ def _choose_path(label: str) -> Path:
         raise typer.BadParameter("Invalid path selection.") from exc
 
 
+def _print_layout_analysis(analysis: LayoutAnalysis) -> None:
+    table = Table(title="Source Layout Detection")
+    table.add_column("Metric")
+    table.add_column("Value", justify="right")
+    table.add_row("RAW files", str(analysis.file_count))
+    table.add_row("Camera-dump files", str(analysis.raw_dump_files))
+    table.add_row("Semi-organized files", str(analysis.organized_files))
+    table.add_row("Recommendation", analysis.recommendation)
+    table.add_row("Confidence", f"{analysis.confidence}%")
+    console.print(table)
+    for signal in analysis.signals:
+        console.print(f"- {signal}")
+    console.print(
+        "[bold yellow on black]Operator confirmation required:[/] "
+        "RAWDOG suggests layout behavior but never silently reorganizes."
+    )
+
+
+def _print_ai_review_prompt(title: str, paths: list[Path], suggestion: str) -> None:
+    if not paths:
+        return
+    shown_paths = paths[:8]
+    prompt_lines = [
+        "This is what is going on:",
+        f"RAWDOG found: {title}.",
+        "",
+        "Relevant paths:",
+        *[f"- {path}" for path in shown_paths],
+    ]
+    if len(paths) > len(shown_paths):
+        prompt_lines.append(f"- ...and {len(paths) - len(shown_paths)} more paths.")
+    prompt_lines.extend(
+        [
+            "",
+            "I need help deciding what to do before taking any semi-destructive action.",
+            f"RAWDOG suggests: {suggestion}",
+            "Please help me validate whether I should keep, copy, move, skip, or manually inspect these files.",
+            "Do not suggest deleting originals unless I explicitly confirm I have verified backups.",
+        ]
+    )
+    console.print(
+        Panel(
+            "\n".join(prompt_lines),
+            title=f"Ask ChatGPT / AI Review Prompt: {title}",
+            border_style="yellow",
+        )
+    )
+
+
 @app.callback(invoke_without_command=True)
 def main(ctx: typer.Context) -> None:
     try:
@@ -152,7 +204,7 @@ def _show_home_menu() -> None:
     table.add_column("Command", style=STYLE_PATH)
     table.add_row("1", "First setup", "rawdog init")
     table.add_row("2", "Fetch from card/folder", "rawdog fetch")
-    table.add_row("3", "Archive edited project", "rawdog breed")
+    table.add_row("3", "Backup/archive edited project", "rawdog breed / rawdog backup")
     table.add_row("4", "Consolidate old drive/folder", "rawdog den")
     table.add_row("5", "Queue a longer safe job", "rawdog queue create")
     table.add_row("6", "Inspect or score a folder", "rawdog sniff / rawdog score")
@@ -187,6 +239,7 @@ def _show_home_menu() -> None:
             "rawdog fetch --profile last",
         ],
         "3": [
+            "rawdog backup --project Wedding_Smith --source ~/Pictures/RAWDOG/2026/20260516_Wedding_Smith --dest /Volumes/Archive",
             "rawdog breed --project Wedding_Smith --source ~/Pictures/RAWDOG/2026/20260516_Wedding_Smith --dest /Volumes/Archive",
         ],
         "4": [
@@ -264,8 +317,27 @@ def fetch(
     ),
     project_name: str | None = typer.Option(None, "--project", help="Project name for this import."),
     profile_name: str | None = typer.Option(None, "--save-profile", help="Save source/destination as profile."),
+    naming: NamingConvention | None = typer.Option(
+        None,
+        "--naming",
+        help="Source layout behavior: detect, keep-existing, ddd, or project-label.",
+    ),
+    collision_policy: CollisionPolicy | None = typer.Option(
+        None,
+        "--collision-policy",
+        help="Collision behavior remembered with the profile. RAWDOG defaults to skip/review.",
+    ),
+    verify_after_copy: bool | None = typer.Option(
+        None,
+        "--verify/--no-verify",
+        help="Remember verify preference.",
+    ),
     detect_sessions: bool = typer.Option(False, "--detect-sessions", help="Suggest time-gap splits."),
-    dry_run: bool = typer.Option(True, "--dry-run/--commit", help="Preview before copying."),
+    dry_run: bool | None = typer.Option(
+        None,
+        "--dry-run/--commit",
+        help="Preview before copying.",
+    ),
 ) -> None:
     """Fetch RAW files from an SD card or import source into the working library."""
     _, config = _load_or_exit()
@@ -297,16 +369,43 @@ def fetch(
     except SafetyError as exc:
         raise typer.BadParameter(str(exc)) from exc
 
+    layout_analysis = analyze_source_layout(source_root)
+    _print_layout_analysis(layout_analysis)
+
+    effective_naming = naming or (
+        loaded_profile.naming_convention if loaded_profile else NamingConvention.DETECT
+    )
+    if effective_naming == NamingConvention.DETECT:
+        if layout_analysis.recommendation == "keep-existing":
+            effective_naming = NamingConvention.KEEP_EXISTING
+        elif layout_analysis.recommendation == "ddd":
+            effective_naming = NamingConvention.DDD
+    if project_name:
+        effective_naming = NamingConvention.PROJECT_LABEL
+    effective_collision_policy = collision_policy or (
+        loaded_profile.collision_policy if loaded_profile else CollisionPolicy.SKIP
+    )
+    effective_verify = (
+        verify_after_copy
+        if verify_after_copy is not None
+        else (loaded_profile.verify_after_copy if loaded_profile else True)
+    )
+    effective_dry_run = (
+        dry_run
+        if dry_run is not None
+        else (loaded_profile.dry_run_default if loaded_profile else True)
+    )
+
     project = None
     if project_name:
         with session(config.database_path) as connection:
             project = get_project_by_name(connection, project_name)
-            if project is None and not dry_run:
+            if project is None and not effective_dry_run:
                 try:
                     project = create_project(connection, ProjectCreate(name=project_name))
                 except ProjectError as exc:
                     raise typer.BadParameter(str(exc)) from exc
-            if not dry_run:
+            if not effective_dry_run:
                 remembered_name = profile_name or project_name
                 remembered_profile = create_or_update_profile(
                     connection,
@@ -318,13 +417,17 @@ def fetch(
                         folder_template=(
                             loaded_profile.folder_template if loaded_profile else config.project_folder_template
                         ),
+                        naming_convention=effective_naming,
+                        collision_policy=effective_collision_policy,
+                        verify_after_copy=effective_verify,
+                        dry_run_default=effective_dry_run,
                         project_id=project.project_id if project else None,
                     ),
                 )
                 touch_profile(connection, remembered_profile.profile_id)
             elif project is None:
                 console.print(f"Project would be created on commit: {project_name}")
-    elif profile_name and not dry_run:
+    elif profile_name and not effective_dry_run:
         with session(config.database_path) as connection:
             create_or_update_profile(
                 connection,
@@ -338,9 +441,13 @@ def fetch(
                         if config.organization_mode == OrganizationMode.PROJECT
                         else config.date_folder_template
                     ),
+                    naming_convention=effective_naming,
+                    collision_policy=effective_collision_policy,
+                    verify_after_copy=effective_verify,
+                    dry_run_default=effective_dry_run,
                 ),
             )
-    elif loaded_profile and not dry_run:
+    elif loaded_profile and not effective_dry_run:
         with session(config.database_path) as connection:
             touch_profile(connection, loaded_profile.profile_id)
     elif profile_name:
@@ -350,6 +457,9 @@ def fetch(
     console.print(f"Source: {source_root}")
     console.print(f"Destination: {destination_root}")
     console.print(f"Mode: {(loaded_profile.organization_mode if loaded_profile else config.organization_mode).value}")
+    console.print(f"Naming: {effective_naming.value}")
+    console.print(f"Collision policy: {effective_collision_policy.value}")
+    console.print(f"Verify after copy: {'yes' if effective_verify else 'no'}")
     effective_mode = loaded_profile.organization_mode if loaded_profile else config.organization_mode
     effective_template = (
         loaded_profile.folder_template
@@ -374,12 +484,16 @@ def fetch(
         console.print(f"Project: {preview_project_name}")
         console.print(f"Default project folder: {destination_folder}")
     elif earliest_capture_at:
-        destination_folder = default_date_only_destination(
-            destination_root,
-            earliest_capture_at,
-            effective_template,
-        )
-        console.print(f"Default date-only folder: {destination_folder}")
+        if effective_naming == NamingConvention.KEEP_EXISTING:
+            destination_folder = destination_root
+            console.print(f"Default keep-existing root: {destination_folder}")
+        else:
+            destination_folder = default_date_only_destination(
+                destination_root,
+                earliest_capture_at,
+                effective_template,
+            )
+            console.print(f"Default DDD/date folder: {destination_folder}")
     if destination_folder:
         memory = build_destination_memory(
             organization_mode=effective_mode,
@@ -391,10 +505,10 @@ def fetch(
             earliest_capture_at=earliest_capture_at,
             profile_name=profile_name or profile,
         )
-        memory_path = write_destination_memory(memory, dry_run=dry_run)
+        memory_path = write_destination_memory(memory, dry_run=effective_dry_run)
         console.print(f"Destination memory planned: {memory_path}")
     console.print(f"Session detection: {'on' if detect_sessions else 'off'}")
-    console.print(f"Dry run: {'yes' if dry_run else 'no'}")
+    console.print(f"Dry run: {'yes' if effective_dry_run else 'no'}")
     console.print("No files copied. Re-run with --commit after reviewing the plan.")
 
 
@@ -439,6 +553,24 @@ def breed(
         console.print("Archive destination: profile/import specific")
     console.print(f"Profile: {profile or 'not specified'}")
     console.print(f"Dry run: {'yes' if dry_run else 'no'}")
+
+
+@app.command()
+def backup(
+    project_name: str | None = typer.Option(None, "--project", help="Project to archive."),
+    source: Path | None = typer.Option(None, "--source", "-s", help="Working project source."),
+    destinations: list[Path] | None = typer.Option(None, "--dest", "-d", help="Archive destination."),
+    profile: str | None = typer.Option(None, "--profile", "-p", help="Saved archive/import profile."),
+    dry_run: bool = typer.Option(True, "--dry-run/--commit", help="Preview before archiving."),
+) -> None:
+    """Alias for breed: append-only backup from working library to archive storage."""
+    breed(
+        project_name=project_name,
+        source=source,
+        destinations=destinations,
+        profile=profile,
+        dry_run=dry_run,
+    )
 
 
 @app.command()
@@ -579,11 +711,14 @@ def _execute_persisted_plan(config: RawdogConfig, plan_id: int) -> ExecutionPlan
     skipped = 0
     review = 0
     failed = 0
+    review_paths: list[Path] = []
+    failed_paths: list[Path] = []
     for row in rows:
         if row.status not in {"plan_copy", "planned", "failed"}:
             audit_status = _audit_execution_row(row, row.status)
             if audit_status.startswith("needs") or audit_status.endswith("missing"):
                 review += 1
+                review_paths.append(row.destination_path)
             if row.status.startswith("skip"):
                 skipped += 1
             with session(config.database_path) as connection:
@@ -609,6 +744,7 @@ def _execute_persisted_plan(config: RawdogConfig, plan_id: int) -> ExecutionPlan
                 skipped += 1
             if audit_status.startswith("needs") or audit_status.endswith("missing"):
                 review += 1
+                review_paths.append(row.destination_path)
             with session(config.database_path) as connection:
                 update_execution_plan_row(
                     connection,
@@ -618,6 +754,7 @@ def _execute_persisted_plan(config: RawdogConfig, plan_id: int) -> ExecutionPlan
                 )
         except Exception as exc:
             failed += 1
+            failed_paths.append(row.destination_path)
             with session(config.database_path) as connection:
                 update_execution_plan_row(
                     connection,
@@ -649,6 +786,18 @@ def _execute_persisted_plan(config: RawdogConfig, plan_id: int) -> ExecutionPlan
         finished = get_execution_plan(connection, plan_id)
     if finished is None:
         raise typer.BadParameter(f"Unknown plan: {plan_id}")
+    _print_ai_review_prompt(
+        "rows needing manual review",
+        review_paths,
+        "do not move or clean these rows automatically; inspect the listed destination paths and "
+        "compare against the matching source files first.",
+    )
+    _print_ai_review_prompt(
+        "failed transfer rows",
+        failed_paths,
+        "pause execution, check mount state/free space/permissions, then resume the persisted plan "
+        "only after the storage issue is understood.",
+    )
     return finished
 
 
@@ -753,6 +902,13 @@ def den(
     collisions = sum(1 for row in plan.rows if row.status == "collision")
     console.print(f"Skipped existing: {skipped}")
     console.print(f"Collisions needing review: {collisions}")
+    collision_paths = [row.destination_path for row in plan.rows if row.status == "collision"]
+    _print_ai_review_prompt(
+        "destination collisions",
+        collision_paths,
+        "skip these rows for now, inspect the source and destination manually, and only copy after "
+        "confirming they are not conflicting originals.",
+    )
     if dry_run:
         console.print(
             f"Plan #{execution_plan.plan_id} written to the database. "
@@ -912,6 +1068,11 @@ def profile_create(
     destination: Path | None = typer.Option(None, "--destination", "-d"),
     mode: OrganizationMode = typer.Option(OrganizationMode.PROJECT, "--mode"),
     template: str = typer.Option("YYYY/YYYYMMDD_PROJECT", "--template"),
+    naming: NamingConvention = typer.Option(NamingConvention.DETECT, "--naming"),
+    collision_policy: CollisionPolicy = typer.Option(CollisionPolicy.SKIP, "--collision-policy"),
+    verify_after_copy: bool = typer.Option(True, "--verify/--no-verify"),
+    dry_run_default: bool = typer.Option(True, "--dry-run-default/--commit-default"),
+    exclude_patterns: list[str] = typer.Option(None, "--exclude"),
     notes: str | None = typer.Option(None, "--notes"),
 ) -> None:
     """Create or update a reusable import profile."""
@@ -927,6 +1088,11 @@ def profile_create(
                 destination_root=parse_user_path(str(destination_root)),
                 organization_mode=mode,
                 folder_template=template,
+                naming_convention=naming,
+                collision_policy=collision_policy,
+                verify_after_copy=verify_after_copy,
+                dry_run_default=dry_run_default,
+                exclude_patterns=exclude_patterns or [],
                 notes=notes,
             ),
         )
@@ -944,6 +1110,8 @@ def profile_list() -> None:
     table.add_column("Name")
     table.add_column("Source")
     table.add_column("Destination")
+    table.add_column("Naming")
+    table.add_column("Collision")
     table.add_column("Template")
     for profile in profiles:
         table.add_row(
@@ -951,6 +1119,8 @@ def profile_list() -> None:
             profile.name,
             str(profile.source_root),
             str(profile.destination_root),
+            profile.naming_convention.value,
+            profile.collision_policy.value,
             profile.folder_template,
         )
     console.print(table)
@@ -1027,6 +1197,19 @@ def plans_show(plan_id: int = typer.Argument(...)) -> None:
     for (status, audit_status), count in sorted(counts.items()):
         table.add_row(status, audit_status, str(count))
     console.print(table)
+    review_paths = [
+        row.destination_path
+        for row in rows
+        if row.status in {"collision", "failed", "skipped_existing_partial"}
+        or (row.audit_status or "").startswith("needs")
+        or (row.audit_status or "").endswith("missing")
+    ]
+    _print_ai_review_prompt(
+        "persisted plan review items",
+        review_paths,
+        "keep the plan paused, inspect these paths, and only resume after you understand why RAWDOG "
+        "held or failed these rows.",
+    )
 
 
 @plans_app.command("resume")

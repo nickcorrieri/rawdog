@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-from rawdog.models import ImportProfile, ImportProfileCreate, OrganizationMode
+from rawdog.models import (
+    CollisionPolicy,
+    ImportProfile,
+    ImportProfileCreate,
+    NamingConvention,
+    OrganizationMode,
+    ProfileKind,
+)
 
 
 def _now() -> str:
@@ -21,15 +29,22 @@ def create_or_update_profile(
     connection.execute(
         """
         INSERT INTO import_profiles (
-            name, source_root, destination_root, organization_mode, folder_template,
-            project_id, created_at, updated_at, notes
+            name, source_root, destination_root, profile_kind, organization_mode, folder_template,
+            naming_convention, collision_policy, verify_after_copy, dry_run_default,
+            exclude_patterns_json, project_id, created_at, updated_at, notes
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(name) DO UPDATE SET
             source_root = excluded.source_root,
             destination_root = excluded.destination_root,
+            profile_kind = excluded.profile_kind,
             organization_mode = excluded.organization_mode,
             folder_template = excluded.folder_template,
+            naming_convention = excluded.naming_convention,
+            collision_policy = excluded.collision_policy,
+            verify_after_copy = excluded.verify_after_copy,
+            dry_run_default = excluded.dry_run_default,
+            exclude_patterns_json = excluded.exclude_patterns_json,
             project_id = excluded.project_id,
             updated_at = excluded.updated_at,
             notes = excluded.notes
@@ -38,8 +53,14 @@ def create_or_update_profile(
             payload.name,
             str(payload.source_root),
             str(payload.destination_root),
+            payload.profile_kind.value,
             payload.organization_mode.value,
             payload.folder_template,
+            payload.naming_convention.value,
+            payload.collision_policy.value,
+            int(payload.verify_after_copy),
+            int(payload.dry_run_default),
+            json.dumps(payload.exclude_patterns),
             payload.project_id,
             now,
             now,
@@ -89,8 +110,14 @@ def row_to_profile(row: sqlite3.Row) -> ImportProfile:
         name=row["name"],
         source_root=Path(row["source_root"]),
         destination_root=Path(row["destination_root"]),
+        profile_kind=ProfileKind(row["profile_kind"]),
         organization_mode=OrganizationMode(row["organization_mode"]),
         folder_template=row["folder_template"],
+        naming_convention=NamingConvention(row["naming_convention"]),
+        collision_policy=CollisionPolicy(row["collision_policy"]),
+        verify_after_copy=bool(row["verify_after_copy"]),
+        dry_run_default=bool(row["dry_run_default"]),
+        exclude_patterns=json.loads(row["exclude_patterns_json"]),
         project_id=row["project_id"],
         created_at=datetime.fromisoformat(row["created_at"]),
         updated_at=datetime.fromisoformat(row["updated_at"]),
