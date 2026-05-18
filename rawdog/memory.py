@@ -3,28 +3,24 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
-from pydantic import BaseModel, Field
-
 from rawdog import __version__
-from rawdog.models import OrganizationMode
+from rawdog.models import OrganizationMode, model_to_json_data
 from rawdog.planner import slug_folder_name
 
 
 def rawdog_version() -> str:
-    try:
-        return version("rawdog")
-    except PackageNotFoundError:
-        return __version__
+    return __version__
 
 
-class DestinationMemory(BaseModel):
-    rawdog_version: str = Field(default_factory=rawdog_version)
+@dataclass(slots=True, kw_only=True)
+class DestinationMemory:
+    rawdog_version: str = field(default_factory=rawdog_version)
     memory_kind: str = "destination_project_memory"
-    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     organization_mode: OrganizationMode
     project_name: str | None = None
     memory_name: str
@@ -80,6 +76,6 @@ def write_destination_memory(memory: DestinationMemory, dry_run: bool = True) ->
         return path
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:
-        json.dump(memory.model_dump(mode="json"), handle, indent=2)
+        json.dump(model_to_json_data(memory), handle, indent=2)
         handle.write("\n")
     return path

@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
-
-from pydantic import BaseModel, Field
+from typing import Any
 
 
 class OrganizationMode(StrEnum):
@@ -56,7 +56,29 @@ class ExecutionPlanStatus(StrEnum):
     FAILED = "failed"
 
 
-class RawdogConfig(BaseModel):
+def _require_name(value: str, field_name: str = "name") -> None:
+    if not value.strip():
+        raise ValueError(f"{field_name} is required")
+
+
+def model_to_json_data(value: Any) -> Any:
+    if is_dataclass(value):
+        return {key: model_to_json_data(item) for key, item in asdict(value).items()}
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, StrEnum):
+        return value.value
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, list):
+        return [model_to_json_data(item) for item in value]
+    if isinstance(value, dict):
+        return {key: model_to_json_data(item) for key, item in value.items()}
+    return value
+
+
+@dataclass(slots=True, kw_only=True)
+class RawdogConfig:
     organization_mode: OrganizationMode
     working_root: Path | None = None
     archive_root: Path | None = None
@@ -64,24 +86,40 @@ class RawdogConfig(BaseModel):
     date_folder_template: str = "YYYY/YYYY-MM"
     project_folder_template: str = "YYYY/YYYYMMDD_PROJECT"
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> RawdogConfig:
+        return cls(
+            organization_mode=OrganizationMode(data["organization_mode"]),
+            working_root=Path(data["working_root"]) if data.get("working_root") else None,
+            archive_root=Path(data["archive_root"]) if data.get("archive_root") else None,
+            database_path=Path(data["database_path"]),
+            date_folder_template=data.get("date_folder_template", "YYYY/YYYY-MM"),
+            project_folder_template=data.get("project_folder_template", "YYYY/YYYYMMDD_PROJECT"),
+        )
 
-class ProjectCreate(BaseModel):
-    name: str = Field(min_length=1)
+
+@dataclass(slots=True, kw_only=True)
+class ProjectCreate:
+    name: str
     client_name: str | None = None
-    tags: list[str] = Field(default_factory=list)
+    tags: list[str] = field(default_factory=list)
     location: str | None = None
     notes: str | None = None
     preferred_folder_template: str | None = None
 
+    def __post_init__(self) -> None:
+        _require_name(self.name)
 
-class Project(BaseModel):
+
+@dataclass(slots=True, kw_only=True)
+class Project:
     project_id: int
     name: str
     folder_slug: str
     created_at: datetime
     updated_at: datetime
     client_name: str | None = None
-    tags: list[str] = Field(default_factory=list)
+    tags: list[str] = field(default_factory=list)
     location: str | None = None
     notes: str | None = None
     preferred_folder_template: str | None = None
@@ -89,8 +127,9 @@ class Project(BaseModel):
     last_import_at: datetime | None = None
 
 
-class ImportProfileCreate(BaseModel):
-    name: str = Field(min_length=1)
+@dataclass(slots=True, kw_only=True)
+class ImportProfileCreate:
+    name: str
     source_root: Path
     destination_root: Path
     profile_kind: ProfileKind = ProfileKind.INGEST
@@ -100,12 +139,16 @@ class ImportProfileCreate(BaseModel):
     collision_policy: CollisionPolicy = CollisionPolicy.SKIP
     verify_after_copy: bool = True
     dry_run_default: bool = True
-    exclude_patterns: list[str] = Field(default_factory=list)
+    exclude_patterns: list[str] = field(default_factory=list)
     project_id: int | None = None
     notes: str | None = None
 
+    def __post_init__(self) -> None:
+        _require_name(self.name)
 
-class ImportProfile(BaseModel):
+
+@dataclass(slots=True, kw_only=True)
+class ImportProfile:
     profile_id: int
     name: str
     source_root: Path
@@ -117,7 +160,7 @@ class ImportProfile(BaseModel):
     collision_policy: CollisionPolicy
     verify_after_copy: bool
     dry_run_default: bool
-    exclude_patterns: list[str] = Field(default_factory=list)
+    exclude_patterns: list[str] = field(default_factory=list)
     project_id: int | None = None
     created_at: datetime
     updated_at: datetime
@@ -125,8 +168,9 @@ class ImportProfile(BaseModel):
     notes: str | None = None
 
 
-class ConsolidationWorkflowCreate(BaseModel):
-    name: str = Field(min_length=1)
+@dataclass(slots=True, kw_only=True)
+class ConsolidationWorkflowCreate:
+    name: str
     source_root: Path
     destination_root: Path
     layout_mode: DenLayoutMode = DenLayoutMode.PRESERVE
@@ -135,8 +179,12 @@ class ConsolidationWorkflowCreate(BaseModel):
     project_id: int | None = None
     notes: str | None = None
 
+    def __post_init__(self) -> None:
+        _require_name(self.name)
 
-class ConsolidationWorkflow(BaseModel):
+
+@dataclass(slots=True, kw_only=True)
+class ConsolidationWorkflow:
     workflow_id: int
     name: str
     source_root: Path
@@ -152,12 +200,17 @@ class ConsolidationWorkflow(BaseModel):
     notes: str | None = None
 
 
-class PlanQueueCreate(BaseModel):
-    name: str = Field(min_length=1)
+@dataclass(slots=True, kw_only=True)
+class PlanQueueCreate:
+    name: str
     notes: str | None = None
 
+    def __post_init__(self) -> None:
+        _require_name(self.name)
 
-class PlanQueue(BaseModel):
+
+@dataclass(slots=True, kw_only=True)
+class PlanQueue:
     queue_id: int
     name: str
     created_at: datetime
@@ -166,7 +219,8 @@ class PlanQueue(BaseModel):
     notes: str | None = None
 
 
-class PlanQueueStepCreate(BaseModel):
+@dataclass(slots=True, kw_only=True)
+class PlanQueueStepCreate:
     queue_id: int
     step_order: int
     step_kind: PlanStepKind
@@ -178,7 +232,8 @@ class PlanQueueStepCreate(BaseModel):
     project_name: str | None = None
 
 
-class PlanQueueStep(BaseModel):
+@dataclass(slots=True, kw_only=True)
+class PlanQueueStep:
     step_id: int
     queue_id: int
     step_order: int
@@ -194,7 +249,8 @@ class PlanQueueStep(BaseModel):
     updated_at: datetime
 
 
-class ExecutionPlanCreate(BaseModel):
+@dataclass(slots=True, kw_only=True)
+class ExecutionPlanCreate:
     plan_kind: str
     what: str
     subject: str
@@ -206,7 +262,8 @@ class ExecutionPlanCreate(BaseModel):
     queue_id: int | None = None
 
 
-class ExecutionPlan(BaseModel):
+@dataclass(slots=True, kw_only=True)
+class ExecutionPlan:
     plan_id: int
     plan_kind: str
     status: ExecutionPlanStatus
@@ -224,7 +281,8 @@ class ExecutionPlan(BaseModel):
     completed_at: datetime | None = None
 
 
-class ExecutionPlanRowCreate(BaseModel):
+@dataclass(slots=True, kw_only=True)
+class ExecutionPlanRowCreate:
     source_path: Path
     destination_path: Path
     size_bytes: int
@@ -232,7 +290,8 @@ class ExecutionPlanRowCreate(BaseModel):
     status: str
 
 
-class ExecutionPlanRow(BaseModel):
+@dataclass(slots=True, kw_only=True)
+class ExecutionPlanRow:
     row_id: int
     plan_id: int
     source_path: Path
@@ -246,7 +305,8 @@ class ExecutionPlanRow(BaseModel):
     error: str | None = None
 
 
-class SessionCandidate(BaseModel):
+@dataclass(slots=True, kw_only=True)
+class SessionCandidate:
     start_at: datetime
     end_at: datetime
     file_count: int

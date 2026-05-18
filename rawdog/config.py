@@ -7,7 +7,7 @@ from pathlib import Path
 
 from platformdirs import user_config_dir, user_data_dir
 
-from rawdog.models import OrganizationMode, RawdogConfig
+from rawdog.models import OrganizationMode, RawdogConfig, model_to_json_data
 
 APP_NAME = "rawdog"
 
@@ -24,13 +24,13 @@ def load_config(config_path: Path | None = None) -> RawdogConfig:
     path = config_path or default_config_path()
     with path.open("r", encoding="utf-8") as handle:
         data = json.load(handle)
-    return RawdogConfig.model_validate(data)
+    return RawdogConfig.from_dict(data)
 
 
 def save_config(config: RawdogConfig, config_path: Path | None = None) -> Path:
     path = config_path or default_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = config.model_dump(mode="json")
+    payload = model_to_json_data(config)
     with path.open("w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2)
         handle.write("\n")
