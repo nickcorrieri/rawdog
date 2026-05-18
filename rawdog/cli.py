@@ -105,6 +105,19 @@ STYLE_ACTION = "bold yellow on black"
 STYLE_SAFE = "bold green on black"
 STYLE_WARN = "bold red on black"
 STYLE_PATH = "bold cyan on black"
+STYLE_ROW = "green on black"
+
+RAWDOG_ASCII = r"""
+        __________________
+       /   RAWDOG CLI    \__
+      |   [__]       o     _)
+       \__________________/
+              / \__
+             (    @\___
+              /         O
+             /   (_____/
+            /_____/   U
+"""
 
 
 def _load_or_exit() -> tuple[Path, RawdogConfig]:
@@ -234,18 +247,21 @@ def main(ctx: typer.Context) -> None:
 def _show_home_menu() -> None:
     while True:
         banner = Text()
+        banner.append(RAWDOG_ASCII, style="bold yellow on black")
         banner.append("RAWDOG\n", style=STYLE_TITLE)
         banner.append(
             "RAW photo managing tool that can fetch, copy, and audit your RAW libraries.",
             style="green on black",
         )
-        console.print(Panel(banner, border_style="green", style="on black"))
+        console.print(Panel(banner, border_style="green", style="on black", expand=True))
 
         table = Table(
             title="Choose A Workflow",
             title_style=STYLE_ACTION,
             border_style="green",
             style="on black",
+            row_styles=[STYLE_ROW],
+            expand=True,
         )
         table.add_column("Option", style=STYLE_ACTION, justify="right")
         table.add_column("Workflow", style=STYLE_SAFE)
@@ -253,7 +269,7 @@ def _show_home_menu() -> None:
         table.add_row("1", "First setup", "Initialize config and database")
         table.add_row("2", "Fetch from card/folder", "Preview an ingest")
         table.add_row("3", "Backup/archive edited project", "Preview an append-only backup")
-        table.add_row("4", "Consolidate old drive/folder", "Plan a den consolidation")
+        table.add_row("4", "Consolidate old drive/folder", "Audit -> review -> copy/move into archive")
         table.add_row("5", "Queue a longer safe job", "Show queue starter commands")
         table.add_row("6", "Inspect or score a folder", "Run sniff or score")
         table.add_row("7", "Check saved memory and plans", "Show status and recent plans")
@@ -390,6 +406,7 @@ def _home_backup() -> None:
 
 
 def _home_den() -> None:
+    _print_den_guidance()
     source = _choose_path("Messy source")
     destination = _choose_path("Clean destination")
     layout_choice = Prompt.ask(
@@ -416,6 +433,30 @@ def _home_den() -> None:
         template=None,
         limit=None,
         dry_run=dry_run,
+    )
+
+
+def _print_den_guidance() -> None:
+    console.print(
+        Panel(
+            "\n".join(
+                [
+                    "[bold green on black]DEN is for consolidation into a master archive location.[/]",
+                    "",
+                    "Same drive: audit first, review the plan, then MOVE can be fast and avoids duplicate storage.",
+                    "Different drives: COPY first, validate, then keep source cleanup/manual moves separate.",
+                    "",
+                    "RAWDOG stores the plan in SQLite before execution.",
+                    "Each planned row records source path, destination path, size, status, and audit result.",
+                    "",
+                    "After this archive is mastered, use backup/breed to copy it to another drive.",
+                ]
+            ),
+            title="Den Workflow",
+            border_style="yellow",
+            style="on black",
+            expand=True,
+        )
     )
 
 
@@ -850,6 +891,7 @@ def _persist_den_execution_plan(
     subject = f"{plan.source_root} -> {plan.destination_root}"
     expected = (
         f"{plan.files_to_transfer} files should be at {plan.destination_folder}; "
+        f"this destination is treated as the master archive location for this den plan; "
         f"{skipped} already-present files skipped; {collisions} collisions held for review."
     )
     if plan.excluded_roots:
