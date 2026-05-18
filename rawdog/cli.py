@@ -191,36 +191,64 @@ def main(ctx: typer.Context) -> None:
 
 
 def _show_home_menu() -> None:
-    banner = Text()
-    banner.append("RAWDOG\n", style=STYLE_TITLE)
-    banner.append(
-        "RAW photo managing tool that can fetch, copy, and audit your RAW libraries.",
-        style="green on black",
-    )
-    console.print(Panel(banner, border_style="green", style="on black"))
+    while True:
+        banner = Text()
+        banner.append("RAWDOG\n", style=STYLE_TITLE)
+        banner.append(
+            "RAW photo managing tool that can fetch, copy, and audit your RAW libraries.",
+            style="green on black",
+        )
+        console.print(Panel(banner, border_style="green", style="on black"))
 
-    table = Table(
-        title="Choose A Workflow",
-        title_style=STYLE_ACTION,
-        border_style="green",
-        style="on black",
-    )
-    table.add_column("Option", style=STYLE_ACTION, justify="right")
-    table.add_column("Workflow", style=STYLE_SAFE)
-    table.add_column("Command", style=STYLE_PATH)
-    table.add_row("1", "First setup", "rawdog init")
-    table.add_row("2", "Fetch from card/folder", "rawdog fetch")
-    table.add_row("3", "Backup/archive edited project", "rawdog breed / rawdog backup")
-    table.add_row("4", "Consolidate old drive/folder", "rawdog den")
-    table.add_row("5", "Queue a longer safe job", "rawdog queue create")
-    table.add_row("6", "Inspect or score a folder", "rawdog sniff / rawdog score")
-    table.add_row("7", "Check saved memory and plans", "rawdog plans list")
-    table.add_row("0", "Show full help", "rawdog --help")
-    console.print(table)
-    console.print(
-        "[bold red on black]Preview-first:[/] fetch, breed, and den do not write archive files "
-        "unless you use [bold yellow on black]--commit[/]."
-    )
+        table = Table(
+            title="Choose A Workflow",
+            title_style=STYLE_ACTION,
+            border_style="green",
+            style="on black",
+        )
+        table.add_column("Option", style=STYLE_ACTION, justify="right")
+        table.add_column("Workflow", style=STYLE_SAFE)
+        table.add_column("Action", style=STYLE_PATH)
+        table.add_row("1", "First setup", "Initialize config and database")
+        table.add_row("2", "Fetch from card/folder", "Preview an ingest")
+        table.add_row("3", "Backup/archive edited project", "Preview an append-only backup")
+        table.add_row("4", "Consolidate old drive/folder", "Plan a den consolidation")
+        table.add_row("5", "Queue a longer safe job", "Show queue starter commands")
+        table.add_row("6", "Inspect or score a folder", "Run sniff or score")
+        table.add_row("7", "Check saved memory and plans", "Show status and recent plans")
+        table.add_row("8", "Help", "Show command examples")
+        table.add_row("0", "Quit", "Exit RAWDOG")
+        console.print(table)
+        console.print(
+            "[bold red on black]Preview-first:[/] fetch, breed, and den do not write archive files "
+            "unless you explicitly choose [bold yellow on black]commit[/]."
+        )
+        _print_latest_plan_hint()
+        choice = Prompt.ask(
+            "[bold yellow on black]CHOOSE AN OPTION[/]",
+            choices=["0", "1", "2", "3", "4", "5", "6", "7", "8"],
+            default="0",
+            console=console,
+        )
+        if choice == "0":
+            console.print("[bold green on black]Goodbye.[/]")
+            return
+        try:
+            _run_home_choice(choice)
+        except typer.BadParameter as exc:
+            console.print(f"[bold red on black]Error:[/] {exc}")
+        except SafetyError as exc:
+            console.print(f"[bold red on black]Safety stop:[/] {exc}")
+        except KeyboardInterrupt:
+            console.print("\n[bold yellow on black]Cancelled.[/]")
+        Prompt.ask(
+            "[bold yellow on black]Press Enter to return to RAWDOG[/]",
+            default="",
+            console=console,
+        )
+
+
+def _print_latest_plan_hint() -> None:
     try:
         _, config = _load_or_exit()
         with session(config.database_path) as connection:
@@ -232,46 +260,183 @@ def _show_home_menu() -> None:
             )
     except typer.BadParameter:
         pass
-    choice = Prompt.ask(
-        "[bold yellow on black]CHOOSE AN OPTION[/]",
-        choices=["0", "1", "2", "3", "4", "5", "6", "7"],
-        default="0",
+
+
+def _optional_prompt(label: str) -> str | None:
+    value = Prompt.ask(label, default="", console=console).strip()
+    return value or None
+
+
+def _yes_no(label: str, default: bool = False) -> bool:
+    answer = Prompt.ask(
+        label,
+        choices=["yes", "no"],
+        default="yes" if default else "no",
         console=console,
     )
-    suggestions = {
-        "1": ["rawdog init"],
-        "2": [
-            "rawdog fetch /Volumes/CARD --destination ~/Pictures/RAWDOG --project Wedding_Smith",
-            "rawdog fetch --profile last",
-        ],
-        "3": [
-            "rawdog backup --project Wedding_Smith --source ~/Pictures/RAWDOG/2026/20260516_Wedding_Smith --dest /Volumes/Archive",
-            "rawdog breed --project Wedding_Smith --source ~/Pictures/RAWDOG/2026/20260516_Wedding_Smith --dest /Volumes/Archive",
-        ],
-        "4": [
-            "rawdog sniff /Volumes/OldDrive",
-            "rawdog score /Volumes/OldDrive",
-            "rawdog den /Volumes/OldDrive --dest /Volumes/Archive --layout preserve-dates",
-        ],
-        "5": [
-            "rawdog queue create old_drive_cleanup",
-            "rawdog queue add-sniff old_drive_cleanup /Volumes/OldDrive",
-            "rawdog queue add-score old_drive_cleanup /Volumes/OldDrive",
-            "rawdog queue add-den old_drive_cleanup /Volumes/OldDrive --dest /Volumes/Archive",
-            "rawdog queue show old_drive_cleanup",
-            "rawdog queue run old_drive_cleanup --commit",
-        ],
-        "6": ["rawdog sniff /Volumes/OldDrive", "rawdog score /Volumes/OldDrive"],
-        "7": [
-            "rawdog projects list",
-            "rawdog profiles list",
-            "rawdog workflows list",
-            "rawdog queue list",
-            "rawdog plans list",
-        ],
-        "0": ["rawdog --help"],
-    }
-    console.print(Panel("\n".join(suggestions[choice]), title="Next Command", border_style="yellow"))
+    return answer == "yes"
+
+
+def _run_home_choice(choice: str) -> None:
+    if choice == "1":
+        _home_init()
+    elif choice == "2":
+        _home_fetch()
+    elif choice == "3":
+        _home_backup()
+    elif choice == "4":
+        _home_den()
+    elif choice == "5":
+        _show_queue_examples()
+    elif choice == "6":
+        _home_inspect()
+    elif choice == "7":
+        _home_status()
+    elif choice == "8":
+        _show_command_examples()
+
+
+def _home_init() -> None:
+    mode_choice = Prompt.ask(
+        "How do you organize your shoots?",
+        choices=["date", "project"],
+        default="project",
+        console=console,
+    )
+    working_root = _choose_path("Default working library") if _yes_no("Set default working path?") else None
+    archive_root = _choose_path("Default archive library") if _yes_no("Set default archive path?") else None
+    init(
+        working_root=working_root,
+        archive_root=archive_root,
+        mode=OrganizationMode(mode_choice),
+        date_template="YYYY/YYYY-MM",
+        project_template="YYYY/YYYYMMDD_PROJECT",
+    )
+
+
+def _home_fetch() -> None:
+    source = _choose_path("Import source")
+    destination = _choose_path("Import destination")
+    project_name = _optional_prompt("Project name, or Enter for date/layout detection")
+    detect_sessions = _yes_no("Detect sessions by time gaps?")
+    fetch(
+        source=source,
+        destination=destination,
+        profile=None,
+        project_name=project_name,
+        profile_name=None,
+        naming=None,
+        collision_policy=None,
+        verify_after_copy=None,
+        detect_sessions=detect_sessions,
+        dry_run=True,
+    )
+
+
+def _home_backup() -> None:
+    source = _choose_path("Working project/source")
+    destination = _choose_path("Archive destination")
+    project_name = _optional_prompt("Project name, or Enter to skip")
+    backup(
+        project_name=project_name,
+        source=source,
+        destinations=[destination],
+        profile=None,
+        dry_run=True,
+    )
+
+
+def _home_den() -> None:
+    source = _choose_path("Messy source")
+    destination = _choose_path("Clean destination")
+    layout_choice = Prompt.ask(
+        "Layout",
+        choices=["preserve", "preserve-dates", "date", "project"],
+        default="preserve-dates",
+        console=console,
+    )
+    action_choice = Prompt.ask(
+        "Transfer action",
+        choices=["copy", "move"],
+        default="copy",
+        console=console,
+    )
+    project_name = _optional_prompt("Project name, or Enter to skip")
+    dry_run = not _yes_no("Commit now? Dry-run is safer.", default=False)
+    den(
+        source=source,
+        destination=destination,
+        project_name=project_name,
+        workflow_name=None,
+        layout=DenLayoutMode(layout_choice),
+        action=DenTransferAction(action_choice),
+        template=None,
+        limit=None,
+        dry_run=dry_run,
+    )
+
+
+def _home_inspect() -> None:
+    root = _choose_path("Folder to inspect")
+    action = Prompt.ask("Inspect action", choices=["sniff", "score"], default="sniff", console=console)
+    if action == "score":
+        score(root=root)
+    else:
+        sniff(roots=[root])
+
+
+def _home_status() -> None:
+    status()
+    _, config = _load_or_exit()
+    with session(config.database_path) as connection:
+        plans = list_execution_plans(connection, limit=5)
+    if not plans:
+        return
+    table = Table(title="Recent Plans")
+    table.add_column("ID", justify="right")
+    table.add_column("Status")
+    table.add_column("What")
+    for plan in plans:
+        table.add_row(str(plan.plan_id), plan.status.value, plan.what)
+    console.print(table)
+
+
+def _show_queue_examples() -> None:
+    console.print(
+        Panel(
+            "\n".join(
+                [
+                    "rawdog queue create old_drive_cleanup",
+                    "rawdog queue add-sniff old_drive_cleanup /Volumes/OldDrive",
+                    "rawdog queue add-score old_drive_cleanup /Volumes/OldDrive",
+                    "rawdog queue add-den old_drive_cleanup /Volumes/OldDrive --dest /Volumes/Archive",
+                    "rawdog queue show old_drive_cleanup",
+                    "rawdog queue run old_drive_cleanup --commit",
+                ]
+            ),
+            title="Queue Starter",
+            border_style="yellow",
+        )
+    )
+
+
+def _show_command_examples() -> None:
+    console.print(
+        Panel(
+            "\n".join(
+                [
+                    "rawdog init",
+                    "rawdog fetch /Volumes/CARD --destination ~/Pictures/RAWDOG --project Wedding_Smith",
+                    "rawdog den /Volumes/OldDrive --dest /Volumes/Archive --layout preserve-dates",
+                    "rawdog backup --source ~/Pictures/RAWDOG --dest /Volumes/Archive",
+                    "rawdog plans list",
+                    "rawdog --help",
+                ]
+            ),
+            title="Command Examples",
+            border_style="green",
+        )
+    )
 
 
 @app.command()
