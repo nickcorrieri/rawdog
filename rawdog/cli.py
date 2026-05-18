@@ -175,17 +175,82 @@ def _print_init_guidance() -> None:
 
 def _choose_path(label: str) -> Path:
     choices = standard_path_choices()
-    console.print(f"{label}:")
-    for index, (name, path) in enumerate(choices, start=1):
-        console.print(f"{index}. {name}: {path}")
-    console.print("0. Other")
-    selection = typer.prompt("Choose a path", default="1")
-    if selection == "0":
-        return parse_user_path(typer.prompt("Path"))
-    try:
-        return choices[int(selection) - 1][1]
-    except (IndexError, ValueError) as exc:
-        raise typer.BadParameter("Invalid path selection.") from exc
+    while True:
+        console.print(f"{label} [dim](Ctrl-C to exit)[/]:")
+        for index, (name, path) in enumerate(choices, start=1):
+            console.print(f"{index}. {name}: {path}")
+        console.print("0. Other / type a path directly")
+        selection = Prompt.ask("Choose a path or type one", default="1", console=console).strip()
+        if selection == "0":
+            return parse_user_path(Prompt.ask("Path", console=console))
+        if selection.startswith(("/", "~", ".")):
+            return parse_user_path(selection)
+        try:
+            index = int(selection)
+        except ValueError:
+            console.print("[bold red on black]Invalid choice.[/] Enter a number or a path.")
+            continue
+        if 1 <= index <= len(choices):
+            return choices[index - 1][1]
+        console.print("[bold red on black]Invalid choice.[/] Try again.")
+
+
+def _choose_project_root(label: str, folder_name: str) -> Path:
+    base = _choose_path(f"{label} base location")
+    while True:
+        console.print(f"[bold cyan on black]Selected base:[/] {base}")
+        console.print("1. Search for existing folder under this base")
+        console.print(f"2. Create {folder_name} here")
+        console.print("3. Use this root directly")
+        console.print("4. Enter exact path")
+        console.print("0. Pick a different base")
+        choice = Prompt.ask(
+            "Choose folder action (Ctrl-C to exit)",
+            choices=["0", "1", "2", "3", "4"],
+            default="2",
+            console=console,
+        )
+        if choice == "0":
+            base = _choose_path(f"{label} base location")
+            continue
+        if choice == "1":
+            found = _search_folders(base, Prompt.ask("Folder name search", console=console).strip())
+            if not found:
+                console.print("[bold yellow on black]No matching folders found.[/]")
+                continue
+            for index, path in enumerate(found, start=1):
+                console.print(f"{index}. {path}")
+            picked = Prompt.ask("Choose folder", default="1", console=console).strip()
+            try:
+                return found[int(picked) - 1]
+            except (ValueError, IndexError):
+                console.print("[bold red on black]Invalid choice.[/] Try again.")
+                continue
+        if choice == "2":
+            target = base / folder_name
+            if _yes_no(f"Create or use {target}?", default=True):
+                target.mkdir(parents=True, exist_ok=True)
+                return target
+            continue
+        if choice == "3":
+            if _yes_no(
+                f"Use {base} directly? Projects may be written directly under this root.",
+                default=False,
+            ):
+                return base
+            continue
+        return parse_user_path(Prompt.ask("Exact path", console=console))
+
+
+def _search_folders(base: Path, query: str) -> list[Path]:
+    if not query:
+        return []
+    lowered = query.lower()
+    matches: list[Path] = []
+    for path in base.expanduser().iterdir() if base.expanduser().exists() else []:
+        if path.is_dir() and lowered in path.name.lower():
+            matches.append(path)
+    return sorted(matches)[:20]
 
 
 def _print_layout_analysis(analysis: LayoutAnalysis) -> None:
@@ -338,13 +403,15 @@ def _optional_prompt(label: str) -> str | None:
 
 
 def _yes_no(label: str, default: bool = False) -> bool:
-    answer = Prompt.ask(
-        label,
-        choices=["yes", "no"],
-        default="yes" if default else "no",
-        console=console,
-    )
-    return answer == "yes"
+    suffix = "[Y/n]" if default else "[y/N]"
+    while True:
+        raw = Prompt.ask(f"{label} {suffix}", default="y" if default else "n", console=console)
+        answer = raw.strip().lower()
+        if answer in {"y", "yes"}:
+            return True
+        if answer in {"n", "no"}:
+            return False
+        console.print("[bold red on black]Please answer y or n.[/]")
 
 
 def _run_home_choice(choice: str) -> None:
@@ -375,8 +442,16 @@ def _home_init() -> None:
         default="project",
         console=console,
     )
-    working_root = _choose_path("Default working library") if _yes_no("Set default working path?") else None
-    archive_root = _choose_path("Default archive library") if _yes_no("Set default archive path?") else None
+    working_root = (
+        _choose_project_root("Default working library", "RAWDOG_YARD")
+        if _yes_no("Set default working path?")
+        else None
+    )
+    archive_root = (
+        _choose_project_root("Default archive library", "RAWDOG_DEN")
+        if _yes_no("Set default archive path?")
+        else None
+    )
     init(
         working_root=working_root,
         archive_root=archive_root,
@@ -384,6 +459,10 @@ def _home_init() -> None:
         date_template="YYYY/YYYY-MM",
         project_template="YYYY/YYYYMMDD_PROJECT",
     )
+    if working_root and _yes_no("Register this working root as a RAWDOG yard?", default=True):
+        _setup_store("primary", working_root, StoreKind.YARD)
+    if archive_root and _yes_no("Register this archive root as a RAWDOG den?", default=True):
+        _setup_store("primary", archive_root, StoreKind.DEN)
 
 
 def _home_fetch() -> None:
