@@ -13,12 +13,24 @@ CAMERA_DUMP_PARTS = {
     "dcim",
     "private",
     "misc",
+    "canon",
+    "nikon",
+    "sony",
+    "fujifilm",
+    "fuji",
+    "gopro",
     "100canon",
     "101canon",
     "100eos",
     "101eos",
     "100msdcf",
 }
+CAMERA_DUMP_FOLDER_RE = re.compile(
+    r"^(\d{3}(canon|eos|eosr\d*|msdcf|nikon|sony|fuji|fujif|gopro)|"
+    r"\d{3}[a-z0-9]{3,}|"
+    r"(eosr\d+|nikon|sony|canon|fujifilm|fuji|gopro))$",
+    re.IGNORECASE,
+)
 
 CAMERA_FILENAME_RE = re.compile(
     r"^(img|dsc|dscf|dscn|_dsc|r\d{3}|c\d{4}|mvi|gh\d|gopr|g\d{6})[_-]?\d+",
@@ -114,8 +126,7 @@ def analyze_source_layout(
 
 
 def _looks_like_camera_dump(item: InventoryItem) -> bool:
-    parts = {part.lower() for part in item.relative_path.parts[:-1]}
-    if parts & CAMERA_DUMP_PARTS:
+    if any(_is_camera_dump_part(part) for part in item.relative_path.parts[:-1]):
         return True
     return bool(CAMERA_FILENAME_RE.match(item.path.stem)) and not _looks_organized(item)
 
@@ -126,6 +137,11 @@ def _looks_organized(item: InventoryItem) -> bool:
         normalized = part.replace("-", " ").replace("_", " ").replace(".", " ")
         if DATE_FOLDER_RE.search(part):
             return True
-        if PROJECT_WORD_RE.search(normalized) and part.lower() not in CAMERA_DUMP_PARTS:
+        if PROJECT_WORD_RE.search(normalized) and not _is_camera_dump_part(part):
             return True
     return False
+
+
+def _is_camera_dump_part(part: str) -> bool:
+    normalized = part.lower()
+    return normalized in CAMERA_DUMP_PARTS or bool(CAMERA_DUMP_FOLDER_RE.match(part))

@@ -8,7 +8,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 
 def connect(database_path: Path) -> sqlite3.Connection:
@@ -161,6 +161,18 @@ def migrate(connection: sqlite3.Connection) -> None:
             error TEXT
         );
 
+        CREATE TABLE IF NOT EXISTS stores (
+            store_id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            store_kind TEXT NOT NULL,
+            root_path TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL,
+            notes TEXT,
+            UNIQUE(store_kind, name)
+        );
+
         CREATE TABLE IF NOT EXISTS files (
             file_id INTEGER PRIMARY KEY,
             absolute_path TEXT NOT NULL UNIQUE,
@@ -204,7 +216,7 @@ def migrate(connection: sqlite3.Connection) -> None:
         );
 
         INSERT INTO schema_meta(key, value)
-        VALUES ('schema_version', '8')
+        VALUES ('schema_version', '9')
         ON CONFLICT(key) DO UPDATE SET value = excluded.value;
         """
     )

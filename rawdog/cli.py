@@ -58,6 +58,8 @@ from rawdog.models import (
     PlanStepKind,
     ProjectCreate,
     RawdogConfig,
+    StoreCreate,
+    StoreKind,
 )
 from rawdog.planner import default_date_only_destination, default_project_destination
 from rawdog.profiles import (
@@ -83,6 +85,14 @@ from rawdog.safety import (
     ensure_import_roots,
     ensure_same_filesystem,
     reject_dangerous_arguments,
+)
+from rawdog.stores import (
+    create_or_update_store,
+    find_store_for_path,
+    get_store_by_name,
+    list_store_files_by_original_source,
+    list_stores,
+    record_store_file,
 )
 from rawdog.workflows import (
     create_or_update_workflow,
@@ -274,6 +284,7 @@ def _show_home_menu() -> None:
         table.add_row("6", "Inspect or score a folder", "Run sniff or score")
         table.add_row("7", "Check saved memory and plans", "Show status and recent plans")
         table.add_row("8", "Help", "Show command examples")
+        table.add_row("9", "Den / yard setup", "Register archive and working stores")
         table.add_row("0", "Quit", "Exit RAWDOG")
         console.print(table)
         console.print(
@@ -285,7 +296,7 @@ def _show_home_menu() -> None:
         _print_latest_plan_hint()
         choice = Prompt.ask(
             "[bold yellow on black]CHOOSE AN OPTION[/]",
-            choices=["0", "1", "2", "3", "4", "5", "6", "7", "8"],
+            choices=["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"],
             default="0",
             console=console,
         )
@@ -353,6 +364,8 @@ def _run_home_choice(choice: str) -> None:
         _home_status()
     elif choice == "8":
         _show_command_examples()
+    elif choice == "9":
+        _home_store_setup()
 
 
 def _home_init() -> None:
@@ -441,15 +454,15 @@ def _print_den_guidance() -> None:
         Panel(
             "\n".join(
                 [
-                    "[bold green on black]DEN is for consolidation into a master archive location.[/]",
+                    "[bold green on black]DEN is for consolidation into an archive store.[/]",
                     "",
                     "Same drive: audit first, review the plan, then MOVE can be fast and avoids duplicate storage.",
                     "Different drives: COPY first, validate, then keep source cleanup/manual moves separate.",
                     "",
-                    "RAWDOG stores the plan in SQLite before execution.",
-                    "Each planned row records source path, destination path, size, status, and audit result.",
+                    "App Support remembers known dens and yards.",
+                    "Each den/yard also carries .rawdog/store.json and .rawdog/store.sqlite.",
                     "",
-                    "After this archive is mastered, use backup/breed to copy it to another drive.",
+                    "After this den is established, use backup/breed to copy it to another drive.",
                 ]
             ),
             title="Den Workflow",
@@ -485,6 +498,14 @@ def _home_status() -> None:
     console.print(table)
 
 
+def _home_store_setup() -> None:
+    kind_choice = Prompt.ask("Store type", choices=["den", "yard"], default="den", console=console)
+    name = Prompt.ask("Store name", default="primary", console=console)
+    root = _choose_path("Store root")
+    notes = _optional_prompt("Notes, or Enter to skip")
+    _setup_store(name=name, root=root, store_kind=StoreKind(kind_choice), notes=notes)
+
+
 def _show_queue_examples() -> None:
     console.print(
         Panel(
@@ -510,8 +531,11 @@ def _show_command_examples() -> None:
             "\n".join(
                 [
                     "rawdog init",
+                    "rawdog yard setup primary --root ~/Pictures/RAWDOG",
+                    "rawdog dens setup primary --root /Volumes/WD_BLACK/RAWDOG_Archive",
                     "rawdog fetch /Volumes/CARD --destination ~/Pictures/RAWDOG --project Wedding_Smith",
                     "rawdog den /Volumes/OldDrive --dest /Volumes/Archive --layout preserve-dates",
+                    "rawdog junkyard --yard primary --den primary",
                     "rawdog backup --source ~/Pictures/RAWDOG --dest /Volumes/Archive",
                     "rawdog plans list",
                     "rawdog --help",
@@ -891,7 +915,7 @@ def _persist_den_execution_plan(
     subject = f"{plan.source_root} -> {plan.destination_root}"
     expected = (
         f"{plan.files_to_transfer} files should be at {plan.destination_folder}; "
-        f"this destination is treated as the master archive location for this den plan; "
+        f"this destination is treated as the archive store for this den plan; "
         f"{skipped} already-present files skipped; {collisions} collisions held for review."
     )
     if plan.excluded_roots:
@@ -982,6 +1006,17 @@ def _execute_persisted_plan(config: RawdogConfig, plan_id: int) -> ExecutionPlan
             if row.status.startswith("skip"):
                 skipped += 1
             with session(config.database_path) as connection:
+                if audit_status == "destination_verified":
+                    store = find_store_for_path(connection, row.destination_path, StoreKind.DEN)
+                    if store:
+                        record_store_file(
+                            store,
+                            store_path=row.destination_path,
+                            original_source_path=row.source_path,
+                            size_bytes=row.size_bytes,
+                            execution_plan_id=plan_id,
+                            execution_row_id=row.row_id,
+                        )
                 update_execution_plan_row(
                     connection,
                     row.row_id,
@@ -1014,6 +1049,17 @@ def _execute_persisted_plan(config: RawdogConfig, plan_id: int) -> ExecutionPlan
                 review += 1
                 review_paths.append(row.destination_path)
             with session(config.database_path) as connection:
+                if audit_status == "destination_verified":
+                    store = find_store_for_path(connection, row.destination_path, StoreKind.DEN)
+                    if store:
+                        record_store_file(
+                            store,
+                            store_path=row.destination_path,
+                            original_source_path=row.source_path,
+                            size_bytes=row.size_bytes,
+                            execution_plan_id=plan_id,
+                            execution_row_id=row.row_id,
+                        )
                 update_execution_plan_row(
                     connection,
                     row.row_id,
@@ -1123,6 +1169,18 @@ def den(
             ensure_same_filesystem(source_root, destination_root)
         except SafetyError as exc:
             raise typer.BadParameter(str(exc)) from exc
+    with session(config.database_path) as connection:
+        den_store = find_store_for_path(connection, destination_root, StoreKind.DEN)
+    if den_store:
+        console.print(
+            "[bold green on black]Established den:[/] "
+            f"{den_store.name} ({den_store.store_id}) at {den_store.root_path}"
+        )
+    else:
+        console.print(
+            "[bold yellow on black]Unregistered den destination:[/] "
+            "run `rawdog dens setup --root DESTINATION` to give this archive a portable store catalog."
+        )
     effective_template = template or (loaded_workflow.folder_template if loaded_workflow else None)
     effective_template = effective_template or (
         config.project_folder_template
@@ -1242,9 +1300,11 @@ def status() -> None:
     with session(config.database_path) as connection:
         projects = list_projects(connection)
         profiles = list_profiles(connection)
+        stores = list_stores(connection)
         latest_plans = list_execution_plans(connection, limit=3)
     table.add_row("Projects", str(len(projects)))
     table.add_row("Profiles", str(len(profiles)))
+    table.add_row("Known stores", str(len(stores)))
     console.print(table)
     if latest_plans:
         plan_table = Table(title="Recent Execution Plans")
@@ -1295,6 +1355,57 @@ def verify(
     console.print(f"Verify will inspect RAWDOG archive root: {config.archive_root}")
 
 
+@app.command()
+def junkyard(
+    yard_name: str | None = typer.Option(None, "--yard", help="Limit report to one registered yard."),
+    den_name: str | None = typer.Option(None, "--den", help="Limit report to one registered den."),
+    before: str | None = typer.Option(None, "--before", help="Only show yard files modified before YYYY-MM-DD."),
+) -> None:
+    """Report working files that appear safe to scrap. This never deletes files."""
+    _, config = _load_or_exit()
+    before_dt = datetime.fromisoformat(before).replace(tzinfo=UTC) if before else None
+    with session(config.database_path) as connection:
+        if yard_name:
+            yard_store = get_store_by_name(connection, yard_name, StoreKind.YARD)
+            if yard_store is None:
+                raise typer.BadParameter(f"Unknown yard: {yard_name}")
+            yards = [yard_store]
+        else:
+            yards = list_stores(connection, StoreKind.YARD)
+        if den_name:
+            den_store = get_store_by_name(connection, den_name, StoreKind.DEN)
+            if den_store is None:
+                raise typer.BadParameter(f"Unknown den: {den_name}")
+            dens = [den_store]
+        else:
+            dens = list_stores(connection, StoreKind.DEN)
+    den_by_source: dict[Path, object] = {}
+    for den_store in dens:
+        den_by_source.update(list_store_files_by_original_source(den_store))
+    table = Table(title="RAWDOG Junkyard Report", style="on black", row_styles=[STYLE_ROW], expand=True)
+    table.add_column("Yard File")
+    table.add_column("Matched Den File")
+    table.add_column("Bytes", justify="right")
+    candidates = 0
+    total_bytes = 0
+    for yard_store in yards:
+        for item in scan_raw_files(yard_store.root_path):
+            if before_dt and datetime.fromtimestamp(item.path.stat().st_mtime, tz=UTC) >= before_dt:
+                continue
+            record = den_by_source.get(item.path.expanduser().resolve())
+            if record is None or record.size_bytes != item.size_bytes:
+                continue
+            candidates += 1
+            total_bytes += item.size_bytes
+            table.add_row(str(item.path), str(record.store_path), str(item.size_bytes))
+    console.print(table)
+    console.print(
+        "[bold yellow on black]Report only:[/] "
+        f"{candidates} working files ({total_bytes / 1_000_000_000:.2f} GB) appear den-recorded. "
+        "RAWDOG did not delete or move anything."
+    )
+
+
 projects_app = typer.Typer(help="Manage RAWDOG projects.")
 app.add_typer(projects_app, name="projects")
 
@@ -1309,6 +1420,12 @@ app.add_typer(queue_app, name="queue")
 
 plans_app = typer.Typer(help="Inspect and resume persisted execution plans.")
 app.add_typer(plans_app, name="plans")
+
+dens_app = typer.Typer(help="Manage RAWDOG archive stores.")
+app.add_typer(dens_app, name="dens")
+
+yard_app = typer.Typer(help="Manage RAWDOG working stores.")
+app.add_typer(yard_app, name="yard")
 
 
 @projects_app.command("create")
@@ -1353,6 +1470,102 @@ def project_list(include_archived: bool = typer.Option(False, "--include-archive
             project.name,
             project.client_name or "",
             project.last_import_at.isoformat() if project.last_import_at else "",
+        )
+    console.print(table)
+
+
+def _setup_store(name: str, root: Path, store_kind: StoreKind, notes: str | None = None) -> None:
+    _, config = _load_or_exit()
+    root_path = parse_user_path(str(root))
+    try:
+        ensure_existing_directory(root_path, f"{store_kind.value} root")
+    except SafetyError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    with session(config.database_path) as connection:
+        store = create_or_update_store(
+            connection,
+            StoreCreate(name=name, root_path=root_path, store_kind=store_kind, notes=notes),
+        )
+    console.print(
+        Panel(
+            "\n".join(
+                [
+                    f"Name: {store.name}",
+                    f"Type: {store.store_kind.value}",
+                    f"Root: {store.root_path}",
+                    f"Store ID: {store.store_id}",
+                    f"Portable metadata: {store.root_path / '.rawdog'}",
+                    "App Support remembers this store path, and the store carries its own catalog.",
+                ]
+            ),
+            title=f"RAWDOG {store.store_kind.value.title()} Store",
+            border_style="green",
+            style="on black",
+            expand=True,
+        )
+    )
+
+
+@dens_app.command("setup")
+def den_store_setup(
+    name: str = typer.Argument("primary", help="Den store name."),
+    root: Path | None = typer.Option(None, "--root", "-r", help="Archive root to register as a den."),
+    notes: str | None = typer.Option(None, "--notes"),
+) -> None:
+    """Create or update a den archive store."""
+    root_path = root or _choose_path("Den archive root")
+    _setup_store(name=name, root=root_path, store_kind=StoreKind.DEN, notes=notes)
+
+
+@dens_app.command("list")
+def den_store_list() -> None:
+    """List den archive stores."""
+    _, config = _load_or_exit()
+    with session(config.database_path) as connection:
+        stores = list_stores(connection, StoreKind.DEN)
+    table = Table(title="RAWDOG Dens", style="on black", row_styles=[STYLE_ROW], expand=True)
+    table.add_column("Store ID")
+    table.add_column("Name")
+    table.add_column("Root")
+    table.add_column("Updated")
+    for store in stores:
+        table.add_row(
+            store.store_id,
+            store.name,
+            str(store.root_path),
+            store.updated_at.isoformat(),
+        )
+    console.print(table)
+
+
+@yard_app.command("setup")
+def yard_setup(
+    name: str = typer.Argument("primary", help="Yard store name."),
+    root: Path | None = typer.Option(None, "--root", "-r", help="Working root to register as a yard."),
+    notes: str | None = typer.Option(None, "--notes"),
+) -> None:
+    """Create or update a yard working store."""
+    root_path = root or _choose_path("Yard working root")
+    _setup_store(name=name, root=root_path, store_kind=StoreKind.YARD, notes=notes)
+
+
+@yard_app.command("list")
+def yard_list() -> None:
+    """List yard working stores."""
+    _, config = _load_or_exit()
+    with session(config.database_path) as connection:
+        stores = list_stores(connection, StoreKind.YARD)
+    table = Table(title="RAWDOG Yards", style="on black", row_styles=[STYLE_ROW], expand=True)
+    table.add_column("Store ID")
+    table.add_column("Name")
+    table.add_column("Root")
+    table.add_column("Updated")
+    for store in stores:
+        table.add_row(
+            store.store_id,
+            store.name,
+            str(store.root_path),
+            store.updated_at.isoformat(),
         )
     console.print(table)
 

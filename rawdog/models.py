@@ -56,6 +56,16 @@ class ExecutionPlanStatus(StrEnum):
     FAILED = "failed"
 
 
+class StoreKind(StrEnum):
+    DEN = "den"
+    YARD = "yard"
+
+
+class StoreFileStatus(StrEnum):
+    PRESENT = "present"
+    NEEDS_REVIEW = "needs_review"
+
+
 def _require_name(value: str, field_name: str = "name") -> None:
     if not value.strip():
         raise ValueError(f"{field_name} is required")
@@ -311,3 +321,42 @@ class SessionCandidate:
     end_at: datetime
     file_count: int
     suggested_name: str | None = None
+
+
+@dataclass(slots=True, kw_only=True)
+class StoreCreate:
+    name: str
+    root_path: Path
+    store_kind: StoreKind
+    notes: str | None = None
+
+    def __post_init__(self) -> None:
+        _require_name(self.name)
+
+
+@dataclass(slots=True, kw_only=True)
+class Store:
+    store_id: str
+    name: str
+    store_kind: StoreKind
+    root_path: Path
+    created_at: datetime
+    updated_at: datetime
+    last_seen_at: datetime
+    notes: str | None = None
+
+
+@dataclass(slots=True, kw_only=True)
+class StoreFile:
+    store_file_id: int
+    store_id: str
+    store_path: Path
+    relative_path: Path
+    size_bytes: int
+    status: StoreFileStatus
+    original_source_path: Path | None = None
+    execution_plan_id: int | None = None
+    execution_row_id: int | None = None
+    created_at: datetime
+    updated_at: datetime
+    last_seen_at: datetime

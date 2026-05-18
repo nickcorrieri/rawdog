@@ -96,6 +96,11 @@ rawdog fetch
 rawdog breed
 rawdog backup
 rawdog den
+rawdog dens setup
+rawdog dens list
+rawdog yard setup
+rawdog yard list
+rawdog junkyard
 rawdog sniff
 rawdog score
 rawdog status
@@ -124,11 +129,19 @@ For old folders or drives that need to be gathered into a RAWDOG structure, use
 same-name/same-size files, and reports collisions for review.
 
 ```bash
+rawdog dens setup primary --root /Volumes/Archive
+rawdog yard setup primary --root ~/Pictures/RAWDOG
 rawdog sniff /Volumes/OldDrive
 rawdog score /Volumes/OldDrive
 rawdog den /Volumes/OldDrive --dest /Volumes/Archive
 rawdog den /Volumes/OldDrive --dest /Volumes/Archive --commit
 ```
+
+App Support remembers known dens and yards. Each registered den or yard also
+carries its own portable `.rawdog/store.json` and `.rawdog/store.sqlite` inside
+that folder, so the store can still identify itself if a volume path changes.
+Successful den copy/move rows under a registered den are written to that den's
+local store catalog.
 
 Two consolidation workflows are supported:
 
@@ -212,6 +225,17 @@ rawdog queue run same_drive_cleanup --commit
 ```
 
 Move still refuses overwrites and collisions.
+
+Camera-generated folders such as `DCIM`, `100CANON`, `102EOSR7`, `NIKON`, or
+`SONY` are treated as camera dump structure, not project folders.
+
+`junkyard` is report-only. It compares registered yard files against registered
+den catalogs and reports working files that appear safe to review for removal
+because they are already recorded in a den. RAWDOG does not delete them.
+
+```bash
+rawdog junkyard --yard primary --den primary
+```
 
 If RAWDOG is interrupted, rerun `rawdog plans list`, inspect the latest started
 or incomplete plan, then resume it explicitly with `rawdog plans resume PLAN_ID`.
