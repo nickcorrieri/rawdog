@@ -173,16 +173,28 @@ def _print_init_guidance() -> None:
     )
 
 
-def _choose_path(label: str) -> Path:
+def _choose_path(label: str, *, browse_number_selection: bool = False) -> Path:
     choices = standard_path_choices()
     while True:
         console.print(f"{label} [dim](Ctrl-C to exit)[/]:")
         for index, (name, path) in enumerate(choices, start=1):
             console.print(f"{index}. {name}: {path}")
         console.print("0. Other / type a path directly")
-        selection = Prompt.ask("Choose a path or type one", default="1", console=console).strip()
+        console.print("[dim]Tip: enter b7 to browse option 7, or type a full path directly.[/]")
+        prompt = "Choose a folder to browse, or type a path" if browse_number_selection else "Choose a path or type one"
+        selection = Prompt.ask(prompt, default="1", console=console).strip()
         if selection == "0":
             return parse_user_path(Prompt.ask("Path", console=console))
+        if selection.lower().startswith("b") and len(selection) > 1:
+            try:
+                browse_index = int(selection[1:])
+            except ValueError:
+                console.print("[bold red on black]Invalid browse choice.[/] Use b plus a number, like b7.")
+                continue
+            if 1 <= browse_index <= len(choices):
+                return _browse_folder(choices[browse_index - 1][1])
+            console.print("[bold red on black]Invalid browse choice.[/] Try again.")
+            continue
         if selection.startswith(("/", "~", ".")):
             return parse_user_path(selection)
         try:
@@ -191,7 +203,129 @@ def _choose_path(label: str) -> Path:
             console.print("[bold red on black]Invalid choice.[/] Enter a number or a path.")
             continue
         if 1 <= index <= len(choices):
+            if browse_number_selection:
+                return _browse_folder(choices[index - 1][1])
             return choices[index - 1][1]
+        console.print("[bold red on black]Invalid choice.[/] Try again.")
+
+
+def _browse_folder(start: Path) -> Path:
+    current = start.expanduser().resolve()
+    while True:
+        console.print(f"[bold cyan on black]Browsing:[/] {current}")
+        folders = _sorted_child_folders(current)
+        console.print(".".ljust(4) + "Use this folder")
+        console.print("..".ljust(4) + "Parent folder")
+        console.print("0".ljust(4) + "Type exact path")
+        for index, (path, size_bytes) in enumerate(folders, start=1):
+            console.print(f"{str(index).ljust(4)}{path.name}  [dim]{_format_bytes(size_bytes)}[/]")
+        selection = Prompt.ask("Choose folder (Ctrl-C to exit)", default=".", console=console).strip()
+        if selection == ".":
+            return current
+        if selection == "..":
+            current = current.parent
+            continue
+        if selection == "0":
+            current = parse_user_path(Prompt.ask("Path", console=console))
+            continue
+        if selection.startswith(("/", "~", ".")):
+            current = parse_user_path(selection)
+            continue
+        try:
+            index = int(selection)
+        except ValueError:
+            console.print("[bold red on black]Invalid folder choice.[/] Try again.")
+            continue
+        if 1 <= index <= len(folders):
+            current = folders[index - 1][0]
+            continue
+        console.print("[bold red on black]Invalid folder choice.[/] Try again.")
+
+
+def _sorted_child_folders(root: Path) -> list[tuple[Path, int]]:
+    try:
+        children = [path for path in root.iterdir() if path.is_dir()]
+    except OSError as exc:
+        console.print(f"[bold red on black]Cannot read folder:[/] {exc}")
+        return []
+    return sorted(
+        ((path, _estimate_folder_size(path)) for path in children),
+        key=lambda item: (-item[1], item[0].name.lower()),
+    )
+
+
+def _estimate_folder_size(root: Path, *, max_files: int = 500) -> int:
+    total = 0
+    counted = 0
+    stack = [root]
+    while stack and counted < max_files:
+        folder = stack.pop()
+        try:
+            entries = list(folder.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            if counted >= max_files:
+                break
+            try:
+                if entry.is_dir():
+                    stack.append(entry)
+                elif entry.is_file():
+                    total += entry.stat().st_size
+                    counted += 1
+            except OSError:
+                continue
+    return total
+
+
+def _format_bytes(size_bytes: int) -> str:
+    value = float(size_bytes)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if value < 1000 or unit == "TB":
+            return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
+        value /= 1000
+    return f"{value:.1f} TB"
+
+
+def _choose_store_path(label: str, store_kind: StoreKind) -> Path:
+    try:
+        _, config = _load_or_exit()
+        with session(config.database_path) as connection:
+            stores = list_stores(connection, store_kind=store_kind)
+    except typer.BadParameter:
+        stores = []
+    if not stores:
+        return _choose_path(label, browse_number_selection=True)
+    noun = "den" if store_kind == StoreKind.DEN else "yard"
+    while True:
+        console.print(f"{label} [dim](Ctrl-C to exit)[/]:")
+        console.print(f"[bold green on black]Established RAWDOG {noun}s[/]")
+        for index, store in enumerate(stores, start=1):
+            console.print(f"{index}. {store.name}: {store.root_path}")
+        console.print("0. Other / browse common paths")
+        console.print("[dim]Tip: enter b1 to browse inside an established store.[/]")
+        selection = Prompt.ask("Choose store, browse, or type a path", default="1", console=console).strip()
+        if selection == "0":
+            return _choose_path(label, browse_number_selection=True)
+        if selection.lower().startswith("b") and len(selection) > 1:
+            try:
+                browse_index = int(selection[1:])
+            except ValueError:
+                console.print("[bold red on black]Invalid browse choice.[/] Use b plus a number, like b1.")
+                continue
+            if 1 <= browse_index <= len(stores):
+                return _browse_folder(stores[browse_index - 1].root_path)
+            console.print("[bold red on black]Invalid browse choice.[/] Try again.")
+            continue
+        if selection.startswith(("/", "~", ".")):
+            return parse_user_path(selection)
+        try:
+            index = int(selection)
+        except ValueError:
+            console.print("[bold red on black]Invalid choice.[/] Enter a number, b-number, or a path.")
+            continue
+        if 1 <= index <= len(stores):
+            return stores[index - 1].root_path
         console.print("[bold red on black]Invalid choice.[/] Try again.")
 
 
@@ -466,8 +600,8 @@ def _home_init() -> None:
 
 
 def _home_fetch() -> None:
-    source = _choose_path("Import source")
-    destination = _choose_path("Import destination")
+    source = _choose_path("Import source", browse_number_selection=True)
+    destination = _choose_store_path("Import destination", StoreKind.YARD)
     project_name = _optional_prompt("Project name, or Enter for date/layout detection")
     detect_sessions = _yes_no("Detect sessions by time gaps?")
     fetch(
@@ -485,8 +619,8 @@ def _home_fetch() -> None:
 
 
 def _home_backup() -> None:
-    source = _choose_path("Working project/source")
-    destination = _choose_path("Archive destination")
+    source = _choose_store_path("Working project/source", StoreKind.YARD)
+    destination = _choose_store_path("Archive destination", StoreKind.DEN)
     project_name = _optional_prompt("Project name, or Enter to skip")
     backup(
         project_name=project_name,
@@ -499,8 +633,8 @@ def _home_backup() -> None:
 
 def _home_den() -> None:
     _print_den_guidance()
-    source = _choose_path("Messy source")
-    destination = _choose_path("Clean destination")
+    source = _choose_path("Messy source", browse_number_selection=True)
+    destination = _choose_store_path("Clean destination", StoreKind.DEN)
     layout_choice = Prompt.ask(
         "Layout",
         choices=["preserve", "preserve-dates", "date", "project"],
@@ -553,7 +687,7 @@ def _print_den_guidance() -> None:
 
 
 def _home_inspect() -> None:
-    root = _choose_path("Folder to inspect")
+    root = _choose_path("Folder to inspect", browse_number_selection=True)
     action = Prompt.ask("Inspect action", choices=["sniff", "score"], default="sniff", console=console)
     if action == "score":
         score(root=root)

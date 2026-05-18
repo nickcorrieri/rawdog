@@ -2,6 +2,7 @@
 
 from datetime import UTC, datetime
 
+from rawdog import __version__
 from rawdog.memory import (
     build_destination_memory,
     memory_file_for_destination,
@@ -40,7 +41,7 @@ def test_destination_memory_keeps_project_optional(tmp_path) -> None:
 
     assert memory.project_name is None
     assert memory.memory_name == "Date_Only"
-    assert memory.rawdog_version == "0.2.5"
+    assert memory.rawdog_version == __version__
 
 
 def test_destination_memory_writes_on_commit(tmp_path) -> None:
