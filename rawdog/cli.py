@@ -12,7 +12,13 @@ from rich.prompt import Prompt
 from rich.table import Table
 from rich.text import Text
 
-from rawdog.config import build_config, default_config_path, load_config, save_config
+from rawdog.config import (
+    build_config,
+    default_config_path,
+    default_database_path,
+    load_config,
+    save_config,
+)
 from rawdog.copier import append_only_copy, append_only_move
 from rawdog.db import initialize, session
 from rawdog.den import DenPlan, build_den_plan, score_items, summarize_by_year
@@ -104,9 +110,44 @@ STYLE_PATH = "bold cyan on black"
 def _load_or_exit() -> tuple[Path, RawdogConfig]:
     config_path = default_config_path()
     if not config_path.exists():
-        raise typer.BadParameter("RAWDOG is not initialized. Run `rawdog init` first.")
+        raise typer.BadParameter(_init_guidance_text())
     config = load_config(config_path)
     return config_path, config
+
+
+def _init_guidance_text() -> str:
+    config_path = default_config_path()
+    database_path = default_database_path()
+    return "\n".join(
+        [
+            "RAWDOG is not initialized yet.",
+            "",
+            "Start here:",
+            "  rawdog init --mode project --working-root ~/Pictures/RAWDOG --archive-root /Volumes/WD_BLACK/RAWDOG_Archive",
+            "",
+            "You can run that command from any folder. The important choices are:",
+            "  working-root: local/project workspace, for example ~/Pictures/RAWDOG",
+            "  archive-root: external/archive destination, for example /Volumes/WD_BLACK/RAWDOG_Archive",
+            "",
+            "Or just run `rawdog`, press 1, and RAWDOG will walk you through setup.",
+            f"Config will be saved at: {config_path}",
+            f"Database will be saved at: {database_path}",
+        ]
+    )
+
+
+def _is_initialized() -> bool:
+    return default_config_path().exists()
+
+
+def _print_init_guidance() -> None:
+    console.print(
+        Panel(
+            _init_guidance_text(),
+            title="First Run Setup",
+            border_style="yellow",
+        )
+    )
 
 
 def _choose_path(label: str) -> Path:
@@ -223,6 +264,8 @@ def _show_home_menu() -> None:
             "[bold red on black]Preview-first:[/] fetch, breed, and den do not write archive files "
             "unless you explicitly choose [bold yellow on black]commit[/]."
         )
+        if not _is_initialized():
+            _print_init_guidance()
         _print_latest_plan_hint()
         choice = Prompt.ask(
             "[bold yellow on black]CHOOSE AN OPTION[/]",
