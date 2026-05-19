@@ -36,6 +36,7 @@ def render_folder_template(
     replacements = {
         "YYYY": f"{captured_at.year:04d}",
         "YYYYMMDD": captured_at.strftime("%Y%m%d"),
+        "YYYYMM": captured_at.strftime("%Y%m"),
         "YYYY-MM-DD": captured_at.strftime("%Y-%m-%d"),
         "YYYY-MM": captured_at.strftime("%Y-%m"),
         "MM-Month": captured_at.strftime("%m-%B"),

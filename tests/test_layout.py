@@ -44,6 +44,32 @@ def test_selected_camera_model_folder_is_detected_as_raw_dump(tmp_path: Path) ->
     assert analysis.organized_files == 0
 
 
+def test_popular_camera_folder_conventions_are_not_project_layout(tmp_path: Path) -> None:
+    camera_folders = [
+        "100NIKON",
+        "100_FUJI",
+        "100MSDCF",
+        "100GOPRO",
+        "100OLYMP",
+        "100_PANA",
+        "100LEICA",
+        "100MEDIA",
+        "100APPLE",
+        "100PENTX",
+        "100RICOH",
+        "100SIGMA",
+        "102EOSR7",
+    ]
+    for folder in camera_folders:
+        _raw(tmp_path / folder / f"IMG_{folder}.CR3")
+
+    analysis = analyze_source_layout(tmp_path)
+
+    assert analysis.recommendation == "ddd"
+    assert analysis.raw_dump_files == len(camera_folders)
+    assert analysis.organized_files == 0
+
+
 def test_detects_existing_project_layout(tmp_path: Path) -> None:
     _raw(tmp_path / "2026" / "Wedding_Smith" / "IMG_0001.CR3")
     _raw(tmp_path / "2026" / "Wedding_Smith" / "IMG_0002.CR3")

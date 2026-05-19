@@ -13,22 +13,52 @@ CAMERA_DUMP_PARTS = {
     "dcim",
     "private",
     "misc",
+    "avchd",
+    "bdmv",
     "canon",
+    "clip",
+    "eos_digital",
+    "fujif",
     "nikon",
+    "m4root",
+    "mp_root",
+    "xdroot",
     "sony",
     "fujifilm",
     "fuji",
     "gopro",
+    "olympus",
+    "olymp",
+    "om_system",
+    "panasonic",
+    "leica",
+    "pentax",
+    "ricoh",
+    "sigma",
+    "hasselblad",
+    "dji",
     "100canon",
     "101canon",
     "100eos",
     "101eos",
     "100msdcf",
+    "100nikon",
+    "100_fuji",
+    "100gopro",
+    "100olymp",
+    "100_pana",
+    "100leica",
+    "100media",
 }
 CAMERA_DUMP_FOLDER_RE = re.compile(
-    r"^(\d{3}(canon|eos|eosr\d*|msdcf|nikon|sony|fuji|fujif|gopro)|"
-    r"\d{3}[a-z0-9]{3,}|"
-    r"(eosr\d+|nikon|sony|canon|fujifilm|fuji|gopro))$",
+    r"^("
+    r"\d{3}_?(canon|eos|eosr\d*|msdcf|nikon|sony|fuji|fujif|gopro|olymp|"
+    r"pana|leica|ricoh|pentx|sigma|hass|dji|media|apple|om\d*|z\d+|d\d+|"
+    r"r\d+|a\d+)|"
+    r"\d{3}[a-z0-9_]{3,12}|"
+    r"(eosr\d+|nikon|sony|canon|fujifilm|fuji|gopro|olympus|olymp|om[-_ ]?system|"
+    r"panasonic|leica|pentax|ricoh|sigma|hasselblad|dji)"
+    r")$",
     re.IGNORECASE,
 )
 

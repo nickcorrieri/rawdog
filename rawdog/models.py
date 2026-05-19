@@ -35,11 +35,17 @@ class DenLayoutMode(StrEnum):
     PRESERVE_DATES = "preserve-dates"
     DATE = "date"
     PROJECT = "project"
+    PROJECT_DATES = "project-dates"
 
 
 class DenTransferAction(StrEnum):
     COPY = "copy"
     MOVE = "move"
+
+
+class DateGroupMode(StrEnum):
+    MONTH = "month"
+    DAY = "day"
 
 
 class PlanStepKind(StrEnum):

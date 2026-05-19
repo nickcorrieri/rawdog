@@ -4,6 +4,7 @@ from pathlib import Path
 
 from rawdog.den import build_den_plan, score_items, summarize_by_year
 from rawdog.inventory import scan_raw_files
+from rawdog.metadata import capture_time_fallback
 from rawdog.models import DenLayoutMode, DenTransferAction
 
 
@@ -103,6 +104,75 @@ def test_den_date_layout_drops_dcim_camera_folder_wrappers(tmp_path: Path) -> No
     assert plan.rows[0].destination_path.name == "IMG_0001.CR3"
     assert "DCIM" not in plan.rows[0].destination_path.parts
     assert "100CANON" not in plan.rows[0].destination_path.parts
+
+
+def test_den_preserve_dates_keeps_project_prefix_but_drops_camera_wrappers(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "archive"
+    raw = source / "Wedding_Smith" / "DCIM" / "100NIKON" / "IMG_0001.NEF"
+    raw.parent.mkdir(parents=True)
+    destination.mkdir()
+    raw.write_bytes(b"raw")
+
+    plan = build_den_plan(
+        source,
+        destination,
+        layout_mode=DenLayoutMode.PRESERVE_DATES,
+        folder_template="YYYY/YYYYMMDD",
+    )
+
+    assert plan.rows[0].destination_path.name == "IMG_0001.NEF"
+    assert plan.rows[0].destination_path.parts[: len(destination.parts) + 1] == (
+        *destination.parts,
+        "Wedding_Smith",
+    )
+    assert "DCIM" not in plan.rows[0].destination_path.parts
+    assert "100NIKON" not in plan.rows[0].destination_path.parts
+
+
+def test_den_project_dates_groups_project_by_file_date(tmp_path: Path) -> None:
+    source = tmp_path / "102EOSR7"
+    destination = tmp_path / "archive"
+    raw = source / "IMG_0001.CR3"
+    source.mkdir()
+    destination.mkdir()
+    raw.write_bytes(b"raw")
+    captured_at = capture_time_fallback(raw)
+
+    plan = build_den_plan(
+        source,
+        destination,
+        project_name="Soccer",
+        layout_mode=DenLayoutMode.PROJECT_DATES,
+        folder_template="YYYY/PROJECT-YYYYMM",
+    )
+
+    assert plan.destination_folder == destination
+    assert plan.rows[0].destination_path == (
+        destination / f"{captured_at.year:04d}" / f"Soccer-{captured_at:%Y%m}" / "IMG_0001.CR3"
+    )
+
+
+def test_den_project_dates_can_group_project_by_day(tmp_path: Path) -> None:
+    source = tmp_path / "102EOSR7"
+    destination = tmp_path / "archive"
+    raw = source / "IMG_0001.CR3"
+    source.mkdir()
+    destination.mkdir()
+    raw.write_bytes(b"raw")
+    captured_at = capture_time_fallback(raw)
+
+    plan = build_den_plan(
+        source,
+        destination,
+        project_name="Soccer",
+        layout_mode=DenLayoutMode.PROJECT_DATES,
+        folder_template="YYYY/PROJECT-YYYYMMDD",
+    )
+
+    assert plan.rows[0].destination_path == (
+        destination / f"{captured_at.year:04d}" / f"Soccer-{captured_at:%Y%m%d}" / "IMG_0001.CR3"
+    )
 
 
 def test_den_preserve_dates_keeps_date_folder_label_and_file_name(tmp_path: Path) -> None:

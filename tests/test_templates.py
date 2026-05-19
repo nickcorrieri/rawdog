@@ -21,6 +21,14 @@ def test_project_template_rendering() -> None:
     assert str(rendered) == "2026/20260516_Date_Only"
 
 
+def test_template_supports_compact_year_month() -> None:
+    captured_at = datetime(2026, 5, 16, tzinfo=UTC)
+
+    rendered = render_folder_template("YYYY/PROJECT-YYYYMM", captured_at, project_name="Soccer")
+
+    assert str(rendered) == "2026/Soccer-202605"
+
+
 def test_project_destination_uses_sanitized_project_name(tmp_path) -> None:
     captured_at = datetime(2026, 5, 16, tzinfo=UTC)
 

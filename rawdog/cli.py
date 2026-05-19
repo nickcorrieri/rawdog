@@ -44,6 +44,7 @@ from rawdog.memory import (
 from rawdog.models import (
     CollisionPolicy,
     ConsolidationWorkflowCreate,
+    DateGroupMode,
     DenLayoutMode,
     DenTransferAction,
     ExecutionPlan,
@@ -1019,13 +1020,8 @@ def _home_den() -> None:
     )
     _print_layout_analysis(layout_analysis)
     default_layout = "date" if layout_analysis.recommendation == "ddd" else "preserve-dates"
-    _print_den_layout_guidance()
-    layout_choice = Prompt.ask(
-        "Layout",
-        choices=["preserve", "preserve-dates", "date", "project"],
-        default=default_layout,
-        console=console,
-    )
+    layout = _choose_den_layout(default_layout)
+    group_by = _choose_date_grouping(layout) if _layout_generates_date_groups(layout) else None
     action_choice = Prompt.ask(
         "Transfer action",
         choices=["copy", "move"],
@@ -1039,34 +1035,97 @@ def _home_den() -> None:
         destination=destination,
         project_name=project_name,
         workflow_name=None,
-        layout=DenLayoutMode(layout_choice),
+        layout=layout,
         action=DenTransferAction(action_choice),
         template=None,
+        group_by=group_by,
         limit=None,
         dry_run=dry_run,
     )
 
 
-def _print_den_layout_guidance() -> None:
+def _choose_den_layout(default_layout: str) -> DenLayoutMode:
+    options = [
+        ("1", DenLayoutMode.PRESERVE),
+        ("2", DenLayoutMode.PRESERVE_DATES),
+        ("3", DenLayoutMode.DATE),
+        ("4", DenLayoutMode.PROJECT),
+        ("5", DenLayoutMode.PROJECT_DATES),
+    ]
+    by_key = {key: layout for key, layout in options}
+    by_value = {layout.value: layout for _, layout in options}
+    default_choice = next((key for key, layout in options if layout.value == default_layout), "2")
+    _print_den_layout_guidance(options)
+    while True:
+        choice = Prompt.ask(
+            "Choose layout",
+            choices=[key for key, _ in options] + [layout.value for _, layout in options],
+            default=default_choice,
+            console=console,
+        )
+        if choice in by_key:
+            return by_key[choice]
+        if choice in by_value:
+            return by_value[choice]
+
+
+def _layout_generates_date_groups(layout: DenLayoutMode) -> bool:
+    return layout in {DenLayoutMode.PRESERVE_DATES, DenLayoutMode.DATE, DenLayoutMode.PROJECT_DATES}
+
+
+def _choose_date_grouping(layout: DenLayoutMode) -> DateGroupMode:
+    if layout == DenLayoutMode.PRESERVE_DATES:
+        console.print(
+            "[bold yellow]Date grouping only applies to camera-dump rows.[/] "
+            "Existing meaningful/date folders are still preserved or normalized."
+        )
+    table = _styled_table(title="Date Grouping")
+    table.add_column("Option", justify="right", style=STYLE_ACTION)
+    table.add_column("Grouping", style=STYLE_ACTION)
+    table.add_column("Example", style=STYLE_SAFE)
+    if layout == DenLayoutMode.PROJECT_DATES:
+        table.add_row("1", "month", "Soccer-202601")
+        table.add_row("2", "day", "Soccer-20260115")
+    else:
+        table.add_row("1", "month", "2026/2026-01")
+        table.add_row("2", "day", "2026/20260115")
+    console.print(table)
+    choice = Prompt.ask(
+        "Group generated date folders by",
+        choices=["1", "2", "month", "day"],
+        default="1",
+        console=console,
+    )
+    return DateGroupMode.DAY if choice in {"2", "day"} else DateGroupMode.MONTH
+
+
+def _den_template_for_grouping(layout: DenLayoutMode, group_by: DateGroupMode | None) -> str | None:
+    if group_by is None:
+        return None
+    if layout == DenLayoutMode.PROJECT_DATES:
+        return "YYYY/PROJECT-YYYYMMDD" if group_by == DateGroupMode.DAY else "YYYY/PROJECT-YYYYMM"
+    return "YYYY/YYYYMMDD" if group_by == DateGroupMode.DAY else "YYYY/YYYY-MM"
+
+
+def _print_den_layout_guidance(options: list[tuple[str, DenLayoutMode]] | None = None) -> None:
     table = _styled_table(title="DEN Layout Options")
+    if options:
+        table.add_column("Option", justify="right", style=STYLE_ACTION)
     table.add_column("Layout", style=STYLE_ACTION)
     table.add_column("What it does", style=STYLE_SAFE)
-    table.add_row(
-        "preserve",
-        "Mirror the source structure exactly. Keep custom folders, project folders, and date folders unchanged.",
-    )
-    table.add_row(
-        "preserve-dates",
-        "Best default for mixed old libraries. Preserve project/custom folders; normalize only existing date-like folders to YYYYMMDD.",
-    )
-    table.add_row(
-        "date",
-        "Ignore source folders and place files into RAWDOG date folders using capture time.",
-    )
-    table.add_row(
-        "project",
-        "Create one dated project folder from the project name/template. Default shape: YYYY/YYYYMMDD_PROJECT.",
-    )
+    descriptions = {
+        DenLayoutMode.PRESERVE: "Mirror source folders exactly. No generated date grouping; camera wrappers are kept.",
+        DenLayoutMode.PRESERVE_DATES: "Keep meaningful folders, normalize existing date-like folders, and drop camera wrappers. Camera dumps can group by month/day.",
+        DenLayoutMode.DATE: "Ignore source folders and group by capture date. Default grouping is month.",
+        DenLayoutMode.PROJECT: "Create one dated project/session folder from the earliest file date; files are directly inside it.",
+        DenLayoutMode.PROJECT_DATES: "Create project plus date buckets. Default month buckets look like Soccer-202601.",
+    }
+    rows = options or [(None, layout) for layout in DenLayoutMode]
+    for key, layout in rows:
+        if key is None:
+            table.add_row(layout.value, descriptions[layout])
+        else:
+            table.add_row(key, layout.value, descriptions[layout])
     console.print(table)
 
 
@@ -1917,6 +1976,11 @@ def den(
         help="copy or move.",
     ),
     template: str | None = typer.Option(None, "--template", help="Folder template override."),
+    group_by: DateGroupMode | None = typer.Option(
+        None,
+        "--group-by",
+        help="Generated date grouping for date/project-dates layouts: month or day.",
+    ),
     limit: int | None = typer.Option(None, "--limit", min=1, help="Limit the planning scan for review."),
     dry_run: bool = typer.Option(True, "--dry-run/--commit", help="Preview before execution."),
 ) -> None:
@@ -1969,11 +2033,19 @@ def den(
             "[bold yellow]Unregistered den destination:[/] "
             "run `rawdog dens setup --root DESTINATION` to give this archive a portable store catalog."
         )
-    effective_template = template or (loaded_workflow.folder_template if loaded_workflow else None)
+    effective_template = (
+        template
+        or _den_template_for_grouping(effective_layout, group_by)
+        or (loaded_workflow.folder_template if loaded_workflow else None)
+    )
     effective_template = effective_template or (
-        config.project_folder_template
-        if effective_layout == DenLayoutMode.PROJECT or project_name
-        else config.date_folder_template
+        "YYYY/PROJECT-YYYYMM"
+        if effective_layout == DenLayoutMode.PROJECT_DATES
+        else (
+            config.project_folder_template
+            if effective_layout == DenLayoutMode.PROJECT or project_name
+            else config.date_folder_template
+        )
     )
     layout_analysis = analyze_source_layout(source_root, exclude_roots=exclude_roots, limit=limit)
     _print_layout_analysis(layout_analysis)
@@ -2585,6 +2657,11 @@ def queue_add_den(
     action: DenTransferAction = typer.Option(DenTransferAction.COPY, "--action"),
     project_name: str | None = typer.Option(None, "--project"),
     template: str | None = typer.Option(None, "--template"),
+    group_by: DateGroupMode | None = typer.Option(
+        None,
+        "--group-by",
+        help="Generated date grouping for date/project-dates layouts: month or day.",
+    ),
 ) -> None:
     """Add a safe den step to a queue."""
     _, config = _load_or_exit()
@@ -2624,7 +2701,7 @@ def queue_add_den(
                 destination_root=destination_root,
                 layout_mode=layout,
                 transfer_action=action,
-                folder_template=template,
+                folder_template=template or _den_template_for_grouping(layout, group_by),
                 project_name=project_name,
             ),
         )
@@ -2766,9 +2843,13 @@ def queue_run(
             layout_mode = step.layout_mode or DenLayoutMode.PRESERVE
             transfer_action = step.transfer_action or DenTransferAction.COPY
             folder_template = step.folder_template or (
-                config.project_folder_template
-                if layout_mode == DenLayoutMode.PROJECT or step.project_name
-                else config.date_folder_template
+                "YYYY/PROJECT-YYYYMM"
+                if layout_mode == DenLayoutMode.PROJECT_DATES
+                else (
+                    config.project_folder_template
+                    if layout_mode == DenLayoutMode.PROJECT or step.project_name
+                    else config.date_folder_template
+                )
             )
             plan = build_den_plan(
                 step.source_root,

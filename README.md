@@ -54,7 +54,10 @@ source/destination pair. By default project imports land under:
 {destination}/YYYY/YYYYMMDD_PROJECT
 ```
 
-`YYYYMMDD` is based on the earliest RAW file in the import source.
+`YYYYMMDD` is based on the earliest RAW file in the import source. That creates
+one project folder. For project plus date buckets, use the den `project-dates`
+layout. Its default month buckets look like `Soccer-202601`; day buckets look
+like `Soccer-20260115`.
 
 RAWDOG keeps canonical memory in its local SQLite database and writes a portable
 manifest to:
@@ -199,12 +202,26 @@ rawdog plans ops 1
 rawdog plans resume 1
 ```
 
-`den` preserves existing source folder structure by default, which helps when an
-old drive already has useful names or partial date/project discipline. Use
-`--layout preserve-dates` to preserve the structure but normalize date-like
-folders such as `MMDDYYYY`, `MM.DD.YYYY`, `YYYYMMDD`, or `YYYY.MM.DD` into
-`YYYYMMDD`. Use `--layout date` or `--layout project` when you want RAWDOG to
-place everything under a generated date or project folder.
+`den` layouts are explicit about whether RAWDOG preserves existing folders or
+generates new date/project folders:
+
+| Layout | Result |
+| --- | --- |
+| `preserve` | Mirrors source folders exactly. No generated date grouping. Camera wrappers are kept. |
+| `preserve-dates` | Keeps meaningful folders, normalizes existing date-like folders to `YYYYMMDD`, and drops camera wrappers such as `DCIM/100CANON`. For camera dumps, it generates date folders. |
+| `date` | Ignores source folders and groups by capture date. Default is month: `YYYY/YYYY-MM`. Choose `--group-by day` for `YYYY/YYYYMMDD`. |
+| `project` | Creates one dated project/session folder from the earliest file date, default `YYYY/YYYYMMDD_PROJECT`, and puts files directly inside it. |
+| `project-dates` | Creates project plus date buckets. Default is month folders like `YYYY/Soccer-202601`. Choose `--group-by day` for `YYYY/Soccer-20260115`. |
+
+Example project plus month grouping:
+
+```bash
+rawdog den /Volumes/WD_BLACK/102EOSR7 \
+  --dest /Volumes/WD_BLACK/RAW_DEN \
+  --layout project-dates \
+  --project Soccer \
+  --group-by month
+```
 
 Saved consolidation workflows can be reused:
 
@@ -228,10 +245,26 @@ rawdog queue run same_drive_cleanup --commit
 
 Move still refuses overwrites and collisions.
 
-Camera-generated folders such as `DCIM`, `100CANON`, `102EOSR7`, `NIKON`, or
-`SONY` are treated as camera dump structure, not project folders. This applies
-even when the selected source itself is the camera folder, such as
-`/Volumes/WD_BLACK/102EOSR7`.
+Camera-generated folders such as `DCIM`, `100CANON`, `102EOSR7`, `100NIKON`,
+`100_FUJI`, `100MSDCF`, `100GOPRO`, `100OLYMP`, `100_PANA`, `100LEICA`,
+`100MEDIA`, `NIKON`, or `SONY` are treated as camera dump structure, not project
+folders. This applies even when the selected source itself is the camera folder,
+such as `/Volumes/WD_BLACK/102EOSR7`.
+
+If a camera dump represents a shoot, client, period, or session that you want
+preserved, make that a project/session label instead of relying on the camera
+folder name:
+
+```bash
+rawdog den /Volumes/WD_BLACK/102EOSR7 \
+  --dest /Volumes/WD_BLACK/RAW_DEN \
+  --layout project \
+  --project Wedding_Smith_Ceremony
+```
+
+Dens can contain project folders, including nested project/session groupings.
+Camera folders remain transport wrappers; project folders are the human archive
+boundary.
 
 `junkyard` is report-only. It compares registered yard files against registered
 den catalogs and reports working files that appear safe to review for removal
