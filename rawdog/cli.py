@@ -110,15 +110,19 @@ app = typer.Typer(
     help="RAW photo managing tool that can fetch, copy, and audit your RAW libraries.",
     no_args_is_help=False,
 )
-console = Console(force_terminal=True, color_system="standard")
 
-
-STYLE_TITLE = "bold green on black"
-STYLE_ACTION = "bold yellow on black"
-STYLE_SAFE = "bold green on black"
-STYLE_WARN = "bold red on black"
-STYLE_PATH = "bold cyan on black"
-STYLE_ROW = "green on black"
+STYLE_BG = "#101418"
+STYLE_BG_ALT = "#17201a"
+STYLE_TEXT = f"#d7f7d7 on {STYLE_BG}"
+STYLE_TITLE = f"bold #7ee787 on {STYLE_BG}"
+STYLE_ACTION = f"bold #ffd166 on {STYLE_BG}"
+STYLE_SAFE = f"bold #7ee787 on {STYLE_BG}"
+STYLE_WARN = f"bold #ff6b6b on {STYLE_BG}"
+STYLE_PATH = f"bold #80dfff on {STYLE_BG}"
+STYLE_ROW = STYLE_TEXT
+STYLE_ROW_ALT = f"#d7f7d7 on {STYLE_BG_ALT}"
+STYLE_ROWS = [STYLE_ROW, STYLE_ROW_ALT]
+console = Console(force_terminal=True, color_system="truecolor", style=STYLE_TEXT)
 
 RAWDOG_ASCII = r"""
         __________________
@@ -178,11 +182,17 @@ def _print_init_guidance() -> None:
 
 
 def _prompt(text: str) -> str:
-    return f"[bold yellow on black]{text}[/]"
+    return f"[bold yellow on #101418]{text}[/]"
 
 
 def _print_option(key: str, text: str) -> None:
-    console.print(f"[bold yellow on black]{key}[/] [green on black]{text}[/]")
+    console.print(f"[bold yellow on #101418]{key}[/] [green on #101418]{text}[/]")
+
+
+def _styled_table(*args, **kwargs) -> Table:
+    kwargs.setdefault("style", STYLE_ROW)
+    kwargs.setdefault("row_styles", STYLE_ROWS)
+    return Table(*args, **kwargs)
 
 
 def _choose_path(label: str, *, browse_number_selection: bool = False) -> Path:
@@ -190,7 +200,7 @@ def _choose_path(label: str, *, browse_number_selection: bool = False) -> Path:
     while True:
         console.print(f"{label} [dim](Ctrl-C to exit)[/]:")
         for index, (name, path) in enumerate(choices, start=1):
-            console.print(f"[bold yellow on black]{index}.[/] [green on black]{name}:[/] {path}")
+            console.print(f"[bold yellow on #101418]{index}.[/] [green on #101418]{name}:[/] {path}")
         _print_option("0.", "Other / type a path directly")
         console.print("[dim]Tip: enter b7 to browse option 7, or type a full path directly.[/]")
         prompt = "Choose a folder to browse, or type a path" if browse_number_selection else "Choose a path or type one"
@@ -201,24 +211,24 @@ def _choose_path(label: str, *, browse_number_selection: bool = False) -> Path:
             try:
                 browse_index = int(selection[1:])
             except ValueError:
-                console.print("[bold red on black]Invalid browse choice.[/] Use b plus a number, like b7.")
+                console.print("[bold red on #101418]Invalid browse choice.[/] Use b plus a number, like b7.")
                 continue
             if 1 <= browse_index <= len(choices):
                 return _browse_folder(choices[browse_index - 1][1])
-            console.print("[bold red on black]Invalid browse choice.[/] Try again.")
+            console.print("[bold red on #101418]Invalid browse choice.[/] Try again.")
             continue
         if selection.startswith(("/", "~", ".")):
             return parse_user_path(selection)
         try:
             index = int(selection)
         except ValueError:
-            console.print("[bold red on black]Invalid choice.[/] Enter a number or a path.")
+            console.print("[bold red on #101418]Invalid choice.[/] Enter a number or a path.")
             continue
         if 1 <= index <= len(choices):
             if browse_number_selection:
                 return _browse_folder(choices[index - 1][1])
             return choices[index - 1][1]
-        console.print("[bold red on black]Invalid choice.[/] Try again.")
+        console.print("[bold red on #101418]Invalid choice.[/] Try again.")
 
 
 def _choose_source_path(label: str) -> Path:
@@ -227,14 +237,14 @@ def _choose_source_path(label: str) -> Path:
     while True:
         console.print(f"{label} [dim](Ctrl-C to exit)[/]:")
         if yards:
-            console.print("[bold green on black]Established RAWDOG yards[/]")
+            console.print("[bold green on #101418]Established RAWDOG yards[/]")
             page_stores = _store_page(yards, page)
             for index, store in enumerate(page_stores, start=1):
-                console.print(f"[bold yellow on black]{index}.[/] [green on black]{store.name}:[/] {store.root_path}")
+                console.print(f"[bold yellow on #101418]{index}.[/] [green on #101418]{store.name}:[/] {store.root_path}")
             if _has_next_store_page(yards, page):
                 _print_option("6.", "Next yards")
         else:
-            console.print("[bold yellow on black]No RAWDOG yards registered yet.[/]")
+            console.print("[bold yellow on #101418]No RAWDOG yards registered yet.[/]")
         _print_option("9.", "Explore common folders / volumes")
         _print_option("0.", "Enter manual path")
         selection = Prompt.ask(_prompt("Choose existing source folder"), default="9", console=console).strip()
@@ -251,7 +261,7 @@ def _choose_source_path(label: str) -> Path:
         try:
             index = int(selection)
         except ValueError:
-            console.print("[bold red on black]Invalid source choice.[/] Try again.")
+            console.print("[bold red on #101418]Invalid source choice.[/] Try again.")
             continue
         page_stores = _store_page(yards, page)
         if 1 <= index <= len(page_stores):
@@ -260,9 +270,9 @@ def _choose_source_path(label: str) -> Path:
             if path.exists() and path.is_dir():
                 _mark_store_used(store)
                 return path
-            console.print(f"[bold red on black]Source folder is not available:[/] {path}")
+            console.print(f"[bold red on #101418]Source folder is not available:[/] {path}")
             continue
-        console.print("[bold red on black]Invalid source choice.[/] Try again.")
+        console.print("[bold red on #101418]Invalid source choice.[/] Try again.")
 
 
 def _choose_explored_source_path(label: str) -> Path:
@@ -277,9 +287,9 @@ def _choose_den_destination_path(label: str) -> Path:
         console.print(f"{label} [dim](Ctrl-C to exit)[/]:")
         default_den = config.archive_root
         if default_den:
-            console.print(f"[bold yellow on black]1.[/] [green on black]Default den from init:[/] {default_den}")
+            console.print(f"[bold yellow on #101418]1.[/] [green on #101418]Default den from init:[/] {default_den}")
         else:
-            console.print("[bold yellow on black]1.[/] [green on black]Default den from init:[/] [dim]not configured[/]")
+            console.print("[bold yellow on #101418]1.[/] [green on #101418]Default den from init:[/] [dim]not configured[/]")
         _print_option("2.", "Pick a registered den")
         _print_option("3.", "Pick a volume / drive / path")
         _print_option("0.", "Enter manual path")
@@ -290,7 +300,7 @@ def _choose_den_destination_path(label: str) -> Path:
         ).strip()
         if selection == "1":
             if not default_den:
-                console.print("[bold yellow on black]No default den configured.[/]")
+                console.print("[bold yellow on #101418]No default den configured.[/]")
                 continue
             path = _confirm_destination_path(default_den)
             if path:
@@ -311,7 +321,7 @@ def _choose_den_destination_path(label: str) -> Path:
                 _register_or_mark_store_path(path, StoreKind.DEN, path.name or "den")
                 return path
             continue
-        console.print("[bold red on black]Invalid den destination choice.[/] Try again.")
+        console.print("[bold red on #101418]Invalid den destination choice.[/] Try again.")
 
 
 def _choose_standard_root(label: str) -> Path:
@@ -319,7 +329,7 @@ def _choose_standard_root(label: str) -> Path:
     while True:
         console.print(f"{label} [dim](Ctrl-C to exit)[/]:")
         for index, (name, path) in enumerate(choices, start=1):
-            console.print(f"[bold yellow on black]{index}.[/] [green on black]{name}:[/] {path}")
+            console.print(f"[bold yellow on #101418]{index}.[/] [green on #101418]{name}:[/] {path}")
         _print_option("0.", "Enter manual path")
         selection = Prompt.ask(_prompt("Choose starting folder"), default="1", console=console).strip()
         if selection == "0":
@@ -330,15 +340,15 @@ def _choose_standard_root(label: str) -> Path:
         try:
             index = int(selection)
         except ValueError:
-            console.print("[bold red on black]Invalid path choice.[/] Try again.")
+            console.print("[bold red on #101418]Invalid path choice.[/] Try again.")
             continue
         if 1 <= index <= len(choices):
             path = choices[index - 1][1]
             if path.exists() and path.is_dir():
                 return path
-            console.print(f"[bold red on black]Folder is not available:[/] {path}")
+            console.print(f"[bold red on #101418]Folder is not available:[/] {path}")
             continue
-        console.print("[bold red on black]Invalid path choice.[/] Try again.")
+        console.print("[bold red on #101418]Invalid path choice.[/] Try again.")
 
 
 def _browse_folder(
@@ -350,10 +360,10 @@ def _browse_folder(
 ) -> Path:
     current = start.expanduser().resolve()
     while True:
-        console.print(f"[bold cyan on black]Browsing:[/] {current}")
+        console.print(f"[bold cyan on #101418]Browsing:[/] {current}")
         folders = _sorted_child_folders(current)[:max_children]
         for index, (path, size_bytes) in enumerate(folders, start=1):
-            console.print(f"[bold yellow on black]{index:<4}[/][green on black]{path.name}[/]  [dim]{_format_bytes(size_bytes)}[/]")
+            console.print(f"[bold yellow on #101418]{index:<4}[/][green on #101418]{path.name}[/]  [dim]{_format_bytes(size_bytes)}[/]")
         _print_option("8", "Parent folder")
         _print_option("9", confirm_label)
         _print_option("0", "Manual path")
@@ -385,26 +395,26 @@ def _browse_folder(
         try:
             index = int(selection)
         except ValueError:
-            console.print("[bold red on black]Invalid folder choice.[/] Try again.")
+            console.print("[bold red on #101418]Invalid folder choice.[/] Try again.")
             continue
         if 1 <= index <= len(folders):
             current = folders[index - 1][0]
             continue
-        console.print("[bold red on black]Invalid folder choice.[/] Try again.")
+        console.print("[bold red on #101418]Invalid folder choice.[/] Try again.")
 
 
 def _browse_den_destination(start: Path, dens: list) -> Path:
     current = start.expanduser().resolve()
     while True:
-        console.print(f"[bold cyan on black]Browsing destination:[/] {current}")
+        console.print(f"[bold cyan on #101418]Browsing destination:[/] {current}")
         dens_here = _stores_under_path(dens, current)
         if dens_here:
-            console.print("[bold green on black]Known dens in this path[/]")
+            console.print("[bold green on #101418]Known dens in this path[/]")
             for index, store in enumerate(dens_here[:5], start=1):
-                console.print(f"[bold yellow on black]D{index}.[/] [green on black]{store.name}:[/] {store.root_path}")
+                console.print(f"[bold yellow on #101418]D{index}.[/] [green on #101418]{store.name}:[/] {store.root_path}")
         folders = _sorted_child_folders(current)[:5]
         for index, (path, size_bytes) in enumerate(folders, start=1):
-            console.print(f"[bold yellow on black]{index:<4}[/][green on black]{path.name}[/]  [dim]{_format_bytes(size_bytes)}[/]")
+            console.print(f"[bold yellow on #101418]{index:<4}[/][green on #101418]{path.name}[/]  [dim]{_format_bytes(size_bytes)}[/]")
         _print_option("7", "Select a known den in this path")
         _print_option("8", "Parent folder")
         _print_option("9", "Create / use DEN here")
@@ -439,12 +449,12 @@ def _browse_den_destination(start: Path, dens: list) -> Path:
         try:
             index = int(selection)
         except ValueError:
-            console.print("[bold red on black]Invalid destination choice.[/] Try again.")
+            console.print("[bold red on #101418]Invalid destination choice.[/] Try again.")
             continue
         if 1 <= index <= len(folders):
             current = folders[index - 1][0]
             continue
-        console.print("[bold red on black]Invalid destination choice.[/] Try again.")
+        console.print("[bold red on #101418]Invalid destination choice.[/] Try again.")
 
 
 def _standard_path_choices(*, limit: int | None = None) -> list[tuple[str, Path]]:
@@ -538,13 +548,13 @@ def _stores_under_path(stores: list[Store], root: Path) -> list[Store]:
 
 def _pick_registered_store(stores: list[Store], noun: str) -> Path | None:
     if not stores:
-        console.print(f"[bold yellow on black]No registered RAWDOG {noun}s available here.[/]")
+        console.print(f"[bold yellow on #101418]No registered RAWDOG {noun}s available here.[/]")
         return None
     page = 0
     while True:
         page_stores = _store_page(stores, page)
         for index, store in enumerate(page_stores, start=1):
-            console.print(f"[bold yellow on black]{index}.[/] [green on black]{store.name}:[/] {store.root_path}")
+            console.print(f"[bold yellow on #101418]{index}.[/] [green on #101418]{store.name}:[/] {store.root_path}")
         if _has_next_store_page(stores, page):
             _print_option("6.", f"Next {noun}s")
         _print_option("0.", "Back")
@@ -557,13 +567,13 @@ def _pick_registered_store(stores: list[Store], noun: str) -> Path | None:
         try:
             index = int(selection)
         except ValueError:
-            console.print("[bold red on black]Invalid store choice.[/] Try again.")
+            console.print("[bold red on #101418]Invalid store choice.[/] Try again.")
             continue
         if 1 <= index <= len(page_stores):
             store = page_stores[index - 1]
             _mark_store_used(store)
             return store.root_path
-        console.print("[bold red on black]Invalid store choice.[/] Try again.")
+        console.print("[bold red on #101418]Invalid store choice.[/] Try again.")
 
 
 def _manual_existing_directory(label: str) -> Path | None:
@@ -574,7 +584,7 @@ def _manual_existing_directory(label: str) -> Path | None:
 def _is_existing_directory(path: Path) -> bool:
     if path.exists() and path.is_dir():
         return True
-    console.print(f"[bold red on black]Folder must already exist:[/] {path}")
+    console.print(f"[bold red on #101418]Folder must already exist:[/] {path}")
     return False
 
 
@@ -587,11 +597,11 @@ def _confirm_destination_path(path: Path) -> Path | None:
     if path.exists():
         if path.is_dir():
             return path
-        console.print(f"[bold red on black]Destination exists but is not a folder:[/] {path}")
+        console.print(f"[bold red on #101418]Destination exists but is not a folder:[/] {path}")
         return None
     parent = path.parent
     if not parent.exists() or not parent.is_dir():
-        console.print(f"[bold red on black]Parent folder does not exist:[/] {parent}")
+        console.print(f"[bold red on #101418]Parent folder does not exist:[/] {parent}")
         return None
     if _yes_no(f"Destination does not exist. Create {path}?", default=True):
         path.mkdir(parents=True, exist_ok=True)
@@ -603,7 +613,7 @@ def _sorted_child_folders(root: Path) -> list[tuple[Path, int]]:
     try:
         children = [path for path in root.iterdir() if path.is_dir()]
     except OSError as exc:
-        console.print(f"[bold red on black]Cannot read folder:[/] {exc}")
+        console.print(f"[bold red on #101418]Cannot read folder:[/] {exc}")
         return []
     return sorted(
         ((path, _estimate_folder_size(path)) for path in children),
@@ -657,10 +667,10 @@ def _choose_store_path(label: str, store_kind: StoreKind) -> Path:
     page = 0
     while True:
         console.print(f"{label} [dim](Ctrl-C to exit)[/]:")
-        console.print(f"[bold green on black]Established RAWDOG {noun}s[/]")
+        console.print(f"[bold green on #101418]Established RAWDOG {noun}s[/]")
         page_stores = _store_page(stores, page)
         for index, store in enumerate(page_stores, start=1):
-            console.print(f"[bold yellow on black]{index}.[/] [green on black]{store.name}:[/] {store.root_path}")
+            console.print(f"[bold yellow on #101418]{index}.[/] [green on #101418]{store.name}:[/] {store.root_path}")
         if _has_next_store_page(stores, page):
             _print_option("6.", f"Next {noun}s")
         _print_option("0.", "Other / browse common paths")
@@ -675,32 +685,32 @@ def _choose_store_path(label: str, store_kind: StoreKind) -> Path:
             try:
                 browse_index = int(selection[1:])
             except ValueError:
-                console.print("[bold red on black]Invalid browse choice.[/] Use b plus a number, like b1.")
+                console.print("[bold red on #101418]Invalid browse choice.[/] Use b plus a number, like b1.")
                 continue
             if 1 <= browse_index <= len(page_stores):
                 store = page_stores[browse_index - 1]
                 _mark_store_used(store)
                 return _browse_folder(store.root_path)
-            console.print("[bold red on black]Invalid browse choice.[/] Try again.")
+            console.print("[bold red on #101418]Invalid browse choice.[/] Try again.")
             continue
         if selection.startswith(("/", "~", ".")):
             return parse_user_path(selection)
         try:
             index = int(selection)
         except ValueError:
-            console.print("[bold red on black]Invalid choice.[/] Enter a number, b-number, or a path.")
+            console.print("[bold red on #101418]Invalid choice.[/] Enter a number, b-number, or a path.")
             continue
         if 1 <= index <= len(page_stores):
             store = page_stores[index - 1]
             _mark_store_used(store)
             return store.root_path
-        console.print("[bold red on black]Invalid choice.[/] Try again.")
+        console.print("[bold red on #101418]Invalid choice.[/] Try again.")
 
 
 def _choose_project_root(label: str, folder_name: str) -> Path:
     base = _choose_path(f"{label} base location")
     while True:
-        console.print(f"[bold cyan on black]Selected base:[/] {base}")
+        console.print(f"[bold cyan on #101418]Selected base:[/] {base}")
         console.print("1. Search for existing folder under this base")
         console.print(f"2. Create {folder_name} here")
         console.print("3. Use this root directly")
@@ -718,7 +728,7 @@ def _choose_project_root(label: str, folder_name: str) -> Path:
         if choice == "1":
             found = _search_folders(base, Prompt.ask("Folder name search", console=console).strip())
             if not found:
-                console.print("[bold yellow on black]No matching folders found.[/]")
+                console.print("[bold yellow on #101418]No matching folders found.[/]")
                 continue
             for index, path in enumerate(found, start=1):
                 console.print(f"{index}. {path}")
@@ -726,7 +736,7 @@ def _choose_project_root(label: str, folder_name: str) -> Path:
             try:
                 return found[int(picked) - 1]
             except (ValueError, IndexError):
-                console.print("[bold red on black]Invalid choice.[/] Try again.")
+                console.print("[bold red on #101418]Invalid choice.[/] Try again.")
                 continue
         if choice == "2":
             target = base / folder_name
@@ -756,7 +766,7 @@ def _search_folders(base: Path, query: str) -> list[Path]:
 
 
 def _print_layout_analysis(analysis: LayoutAnalysis) -> None:
-    table = Table(title="Source Layout Detection")
+    table = _styled_table(title="Source Layout Detection")
     table.add_column("Metric")
     table.add_column("Value", justify="right")
     table.add_row("RAW files", str(analysis.file_count))
@@ -768,7 +778,7 @@ def _print_layout_analysis(analysis: LayoutAnalysis) -> None:
     for signal in analysis.signals:
         console.print(f"- {signal}")
     console.print(
-        "[bold yellow on black]Operator confirmation required:[/] "
+        "[bold yellow on #101418]Operator confirmation required:[/] "
         "RAWDOG suggests layout behavior but never silently reorganizes."
     )
 
@@ -824,20 +834,20 @@ def main(ctx: typer.Context) -> None:
 def _show_home_menu() -> None:
     while True:
         banner = Text()
-        banner.append(RAWDOG_ASCII, style="bold yellow on black")
+        banner.append(RAWDOG_ASCII, style=STYLE_ACTION)
         banner.append("RAWDOG\n", style=STYLE_TITLE)
         banner.append(
             "RAW photo managing tool that can fetch, copy, and audit your RAW libraries.",
-            style="green on black",
+            style=STYLE_ROW,
         )
-        console.print(Panel(banner, border_style="green", style="on black", expand=True))
+        console.print(Panel(banner, border_style="green", style=STYLE_ROW, expand=True))
 
-        table = Table(
+        table = _styled_table(
             title="Choose A Workflow",
             title_style=STYLE_ACTION,
             border_style="green",
-            style="on black",
-            row_styles=[STYLE_ROW],
+            style=STYLE_ROW,
+            row_styles=STYLE_ROWS,
             expand=True,
         )
         table.add_column("Option", style=STYLE_ACTION, justify="right")
@@ -855,32 +865,31 @@ def _show_home_menu() -> None:
         table.add_row("0", "Quit", "Exit RAWDOG")
         console.print(table)
         console.print(
-            "[bold red on black]Preview-first:[/] fetch, breed, and den do not write archive files "
-            "unless you explicitly choose [bold yellow on black]commit[/]."
+            "[bold red on #101418]Preview-first:[/] fetch, breed, and den do not write archive files "
+            "unless you explicitly choose [bold yellow on #101418]commit[/]."
         )
         if not _is_initialized():
             _print_init_guidance()
         _print_latest_plan_hint()
         choice = Prompt.ask(
-            "[bold yellow on black]CHOOSE AN OPTION[/]",
+            "[bold yellow on #101418]CHOOSE AN OPTION[/]",
             choices=["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"],
             default="0",
             console=console,
         )
         if choice == "0":
-            console.print("[bold green on black]Goodbye.[/]")
+            console.print("[bold green on #101418]Goodbye.[/]")
             return
         try:
             _run_home_choice(choice)
         except typer.BadParameter as exc:
-            console.print(f"[bold red on black]Error:[/] {exc}")
+            console.print(f"[bold red on #101418]Error:[/] {exc}")
         except SafetyError as exc:
-            console.print(f"[bold red on black]Safety stop:[/] {exc}")
+            console.print(f"[bold red on #101418]Safety stop:[/] {exc}")
         except KeyboardInterrupt:
-            console.print("\n[bold yellow on black]Cancelled.[/]")
+            console.print("\n[bold yellow on #101418]Cancelled.[/]")
         Prompt.ask(
-            "[bold yellow on black]Press Enter to return to RAWDOG[/]",
-            default="",
+            "[bold yellow on #101418]Press Enter to return to RAWDOG[/]",
             console=console,
         )
 
@@ -892,7 +901,7 @@ def _print_latest_plan_hint() -> None:
             latest_plan = get_latest_execution_plan(connection)
         if latest_plan:
             console.print(
-                "[bold yellow on black]Last plan:[/] "
+                "[bold yellow on #101418]Last plan:[/] "
                 f"#{latest_plan.plan_id} {latest_plan.status.value} - {latest_plan.what}"
             )
     except typer.BadParameter:
@@ -913,7 +922,7 @@ def _yes_no(label: str, default: bool = False) -> bool:
             return True
         if answer in {"n", "no"}:
             return False
-        console.print("[bold red on black]Please answer y or n.[/]")
+        console.print("[bold red on #101418]Please answer y or n.[/]")
 
 
 def _run_home_choice(choice: str) -> None:
@@ -1035,7 +1044,7 @@ def _print_den_guidance() -> None:
         Panel(
             "\n".join(
                 [
-                    "[bold green on black]DEN is for consolidation into an archive store.[/]",
+                    "[bold green on #101418]DEN is for consolidation into an archive store.[/]",
                     "",
                     "Same drive: audit first, review the plan, then MOVE can be fast and avoids duplicate storage.",
                     "Different drives: COPY first, validate, then keep source cleanup/manual moves separate.",
@@ -1048,7 +1057,7 @@ def _print_den_guidance() -> None:
             ),
             title="Den Workflow",
             border_style="yellow",
-            style="on black",
+            style=STYLE_ROW,
             expand=True,
         )
     )
@@ -1070,7 +1079,7 @@ def _home_status() -> None:
         plans = list_execution_plans(connection, limit=5)
     if not plans:
         return
-    table = Table(title="Recent Plans")
+    table = _styled_table(title="Recent Plans")
     table.add_column("ID", justify="right")
     table.add_column("Status")
     table.add_column("What")
@@ -1440,7 +1449,7 @@ def sniff(roots: list[Path] | None = typer.Argument(None, help="Folders or volum
     sniff_roots = roots or [root for root in [config.working_root, config.archive_root] if root]
     if not sniff_roots:
         raise typer.BadParameter("No roots provided and no default roots are configured.")
-    table = Table(title="RAWDOG Sniff")
+    table = _styled_table(title="RAWDOG Sniff")
     table.add_column("Root")
     table.add_column("RAW files", justify="right")
     table.add_column("GB", justify="right")
@@ -1471,7 +1480,7 @@ def score(root: Path = typer.Argument(..., help="Folder or volume to score.")) -
         raise typer.BadParameter(str(exc)) from exc
     items = scan_raw_files(root)
     result = score_items(items)
-    table = Table(title="RAWDOG Score")
+    table = _styled_table(title="RAWDOG Score")
     table.add_column("Metric")
     table.add_column("Value", justify="right")
     table.add_row("Score", str(result.score))
@@ -1538,11 +1547,11 @@ def _persist_den_execution_plan(
 def _print_execution_plan_start(plan: ExecutionPlan) -> None:
     body = "\n".join(
         [
-            f"[bold green on black]What we're doing:[/] {plan.what}",
-            f"[bold cyan on black]What we're doing it to:[/] {plan.subject}",
-            f"[bold yellow on black]What should be where when done:[/] {plan.expected_result}",
-            f"[bold green on black]Execution:[/] {plan.execution_summary}",
-            f"[bold yellow on black]Post audit:[/] {plan.post_audit_summary}",
+            f"[bold green on #101418]What we're doing:[/] {plan.what}",
+            f"[bold cyan on #101418]What we're doing it to:[/] {plan.subject}",
+            f"[bold yellow on #101418]What should be where when done:[/] {plan.expected_result}",
+            f"[bold green on #101418]Execution:[/] {plan.execution_summary}",
+            f"[bold yellow on #101418]Post audit:[/] {plan.post_audit_summary}",
         ]
     )
     console.print(Panel(body, title=f"RAWDOG Plan #{plan.plan_id}", border_style="green"))
@@ -1638,17 +1647,17 @@ def _print_plan_operation_review(
         Panel(
             "\n".join(
                 [
-                    "[bold green on black]No shell commands will be run.[/]",
+                    "[bold green on #101418]No shell commands will be run.[/]",
                     "RAWDOG uses Python filesystem APIs for copy, move, mkdir, stat, and SQLite writes.",
                     f"Operation manifest: {manifest_path}",
                 ]
             ),
             title="Filesystem Operation Review",
             border_style="yellow",
-            style="on black",
+            style=STYLE_ROW,
         )
     )
-    table = Table(title=f"Plan #{plan_id} Operations Preview", style="on black", row_styles=[STYLE_ROW])
+    table = _styled_table(title=f"Plan #{plan_id} Operations Preview", style=STYLE_ROW, row_styles=STYLE_ROWS)
     table.add_column("Row", justify="right")
     table.add_column("Operation")
     table.add_column("API")
@@ -1666,7 +1675,7 @@ def _print_plan_operation_review(
         )
     console.print(table)
     if len(rows) > limit:
-        console.print(f"[bold yellow on black]Showing first {limit} of {len(rows)} operations.[/]")
+        console.print(f"[bold yellow on #101418]Showing first {limit} of {len(rows)} operations.[/]")
     return manifest_path
 
 
@@ -1876,12 +1885,12 @@ def den(
         den_store = find_store_for_path(connection, destination_root, StoreKind.DEN)
     if den_store:
         console.print(
-            "[bold green on black]Established den:[/] "
+            "[bold green on #101418]Established den:[/] "
             f"{den_store.name} ({den_store.store_id}) at {den_store.root_path}"
         )
     else:
         console.print(
-            "[bold yellow on black]Unregistered den destination:[/] "
+            "[bold yellow on #101418]Unregistered den destination:[/] "
             "run `rawdog dens setup --root DESTINATION` to give this archive a portable store catalog."
         )
     effective_template = template or (loaded_workflow.folder_template if loaded_workflow else None)
@@ -1894,7 +1903,7 @@ def den(
     _print_layout_analysis(layout_analysis)
     if exclude_roots:
         console.print(
-            "[bold yellow on black]Destination is inside source:[/] "
+            "[bold yellow on #101418]Destination is inside source:[/] "
             "RAWDOG will exclude the destination subtree from source inventory."
         )
         for excluded_root in exclude_roots:
@@ -1926,7 +1935,7 @@ def den(
     execution_plan = _persist_den_execution_plan(config, plan)
     _print_execution_plan_start(execution_plan)
     summary = summarize_by_year(plan.rows)
-    table = Table(title="RAWDOG Den Plan")
+    table = _styled_table(title="RAWDOG Den Plan")
     table.add_column("Destination")
     table.add_column("Files", justify="right")
     table.add_column("GB", justify="right")
@@ -1944,7 +1953,7 @@ def den(
             "such as MMDDYYYY or YYYY.MM.DD to YYYYMMDD."
         )
     if summary:
-        year_table = Table(title="Copy Estimate")
+        year_table = _styled_table(title="Copy Estimate")
         year_table.add_column("Year")
         year_table.add_column("Files", justify="right")
         year_table.add_column("GB", justify="right")
@@ -1980,7 +1989,7 @@ def den(
         rows = list_execution_plan_rows(connection, execution_plan.plan_id)
     _print_plan_operation_review(config, execution_plan.plan_id, rows)
     confirmed = Prompt.ask(
-        f"[bold red on black]Execute this den plan? Type COMMIT PLAN {execution_plan.plan_id}[/]",
+        f"[bold red on #101418]Execute this den plan? Type COMMIT PLAN {execution_plan.plan_id}[/]",
         default="no",
         console=console,
     )
@@ -2000,7 +2009,7 @@ def den(
 def status() -> None:
     """Show configured paths, projects, and archive state summary."""
     _, config = _load_or_exit()
-    table = Table(title="RAWDOG Status")
+    table = _styled_table(title="RAWDOG Status")
     table.add_column("Setting")
     table.add_column("Value")
     table.add_row("Organization mode", config.organization_mode.value)
@@ -2017,7 +2026,7 @@ def status() -> None:
     table.add_row("Known stores", str(len(stores)))
     console.print(table)
     if latest_plans:
-        plan_table = Table(title="Recent Execution Plans")
+        plan_table = _styled_table(title="Recent Execution Plans")
         plan_table.add_column("ID")
         plan_table.add_column("Status")
         plan_table.add_column("What")
@@ -2092,7 +2101,7 @@ def junkyard(
     den_by_source: dict[Path, object] = {}
     for den_store in dens:
         den_by_source.update(list_store_files_by_original_source(den_store))
-    table = Table(title="RAWDOG Junkyard Report", style="on black", row_styles=[STYLE_ROW], expand=True)
+    table = _styled_table(title="RAWDOG Junkyard Report", style=STYLE_ROW, row_styles=STYLE_ROWS, expand=True)
     table.add_column("Yard File")
     table.add_column("Matched Den File")
     table.add_column("Bytes", justify="right")
@@ -2110,7 +2119,7 @@ def junkyard(
             table.add_row(str(item.path), str(record.store_path), str(item.size_bytes))
     console.print(table)
     console.print(
-        "[bold yellow on black]Report only:[/] "
+        "[bold yellow on #101418]Report only:[/] "
         f"{candidates} working files ({total_bytes / 1_000_000_000:.2f} GB) appear den-recorded. "
         "RAWDOG did not delete or move anything."
     )
@@ -2169,7 +2178,7 @@ def project_list(include_archived: bool = typer.Option(False, "--include-archive
     _, config = _load_or_exit()
     with session(config.database_path) as connection:
         projects = list_projects(connection, include_archived=include_archived)
-    table = Table(title="RAWDOG Projects")
+    table = _styled_table(title="RAWDOG Projects")
     table.add_column("ID")
     table.add_column("Name")
     table.add_column("Client")
@@ -2200,20 +2209,21 @@ def _setup_store(name: str, root: Path, store_kind: StoreKind, notes: str | None
         Panel(
             "\n".join(
                 [
-                    f"Name: {store.name}",
-                    f"Type: {store.store_kind.value}",
-                    f"Root: {store.root_path}",
-                    f"Store ID: {store.store_id}",
-                    f"Portable metadata: {store.root_path / '.rawdog'}",
-                    "App Support remembers this store path, and the store carries its own catalog.",
+                    f"[bold yellow on #101418]Name:[/] [bold green on #101418]{store.name}[/]",
+                    f"[bold yellow on #101418]Type:[/] [bold green on #101418]{store.store_kind.value}[/]",
+                    f"[bold yellow on #101418]Root:[/] [bold cyan on #101418]{store.root_path}[/]",
+                    f"[bold yellow on #101418]Store ID:[/] [bold green on #101418]{store.store_id}[/]",
+                    f"[bold yellow on #101418]Portable metadata:[/] [bold cyan on #101418]{store.root_path / '.rawdog'}[/]",
+                    "[bold green on #101418]App Support remembers this store path, and the store carries its own catalog.[/]",
                 ]
             ),
             title=f"RAWDOG {store.store_kind.value.title()} Store",
             border_style="green",
-            style="on black",
+            style=STYLE_ROW,
             expand=True,
         )
     )
+    console.print(f"[bold green on #101418]Registered {store.store_kind.value} store:[/] {store.name} -> {store.root_path}")
 
 
 @dens_app.command("setup")
@@ -2233,7 +2243,7 @@ def den_store_list() -> None:
     _, config = _load_or_exit()
     with session(config.database_path) as connection:
         stores = list_stores(connection, StoreKind.DEN)
-    table = Table(title="RAWDOG Dens", style="on black", row_styles=[STYLE_ROW], expand=True)
+    table = _styled_table(title="RAWDOG Dens", style=STYLE_ROW, row_styles=STYLE_ROWS, expand=True)
     table.add_column("Store ID")
     table.add_column("Name")
     table.add_column("Root")
@@ -2271,7 +2281,7 @@ def yard_list() -> None:
     _, config = _load_or_exit()
     with session(config.database_path) as connection:
         stores = list_stores(connection, StoreKind.YARD)
-    table = Table(title="RAWDOG Yards", style="on black", row_styles=[STYLE_ROW], expand=True)
+    table = _styled_table(title="RAWDOG Yards", style=STYLE_ROW, row_styles=STYLE_ROWS, expand=True)
     table.add_column("Store ID")
     table.add_column("Name")
     table.add_column("Root")
@@ -2336,7 +2346,7 @@ def profile_list() -> None:
     _, config = _load_or_exit()
     with session(config.database_path) as connection:
         profiles = list_profiles(connection)
-    table = Table(title="RAWDOG Import Profiles")
+    table = _styled_table(title="RAWDOG Import Profiles")
     table.add_column("ID")
     table.add_column("Name")
     table.add_column("Source")
@@ -2363,7 +2373,7 @@ def workflow_list() -> None:
     _, config = _load_or_exit()
     with session(config.database_path) as connection:
         workflows = list_workflows(connection)
-    table = Table(title="RAWDOG Consolidation Workflows")
+    table = _styled_table(title="RAWDOG Consolidation Workflows")
     table.add_column("ID")
     table.add_column("Name")
     table.add_column("Source")
@@ -2390,7 +2400,7 @@ def plans_list(limit: int = typer.Option(10, "--limit", min=1, max=50)) -> None:
     _, config = _load_or_exit()
     with session(config.database_path) as connection:
         plans = list_execution_plans(connection, limit=limit)
-    table = Table(title="RAWDOG Execution Plans")
+    table = _styled_table(title="RAWDOG Execution Plans")
     table.add_column("ID")
     table.add_column("Status")
     table.add_column("Kind")
@@ -2420,7 +2430,7 @@ def plans_show(
             raise typer.BadParameter(f"Unknown plan: {plan_id}")
         rows = list_execution_plan_rows(connection, plan_id)
     _print_execution_plan_start(plan)
-    table = Table(title=f"Plan #{plan.plan_id} Rows")
+    table = _styled_table(title=f"Plan #{plan.plan_id} Rows")
     table.add_column("Status")
     table.add_column("Audit")
     table.add_column("Files", justify="right")
@@ -2481,7 +2491,7 @@ def plans_resume(plan_id: int = typer.Argument(...)) -> None:
         rows = list_execution_plan_rows(connection, plan_id)
     _print_plan_operation_review(config, plan_id, rows)
     confirmed = Prompt.ask(
-        f"[bold red on black]Resume this execution plan? Type COMMIT PLAN {plan_id}[/]",
+        f"[bold red on #101418]Resume this execution plan? Type COMMIT PLAN {plan_id}[/]",
         default="no",
         console=console,
     )
@@ -2599,7 +2609,7 @@ def queue_list() -> None:
     _, config = _load_or_exit()
     with session(config.database_path) as connection:
         queues = list_queues(connection)
-    table = Table(title="RAWDOG Plan Queues")
+    table = _styled_table(title="RAWDOG Plan Queues")
     table.add_column("ID")
     table.add_column("Name")
     table.add_column("Status")
@@ -2618,7 +2628,7 @@ def queue_show(name: str = typer.Argument(...)) -> None:
         if not queue:
             raise typer.BadParameter(f"Unknown queue: {name}")
         steps = list_queue_steps(connection, queue.queue_id)
-    table = Table(title=f"RAWDOG Queue: {queue.name}")
+    table = _styled_table(title=f"RAWDOG Queue: {queue.name}")
     table.add_column("#")
     table.add_column("Kind")
     table.add_column("Action")
@@ -2716,7 +2726,7 @@ def queue_run(
                 f"Queue step #{step.step_order} is not safe: {step.step_kind.value}"
             )
 
-    table = Table(title=f"RAWDOG Queue Run: {queue.name}")
+    table = _styled_table(title=f"RAWDOG Queue Run: {queue.name}")
     table.add_column("#")
     table.add_column("Kind")
     table.add_column("Action")
@@ -2769,7 +2779,7 @@ def queue_run(
         return
 
     confirmed = Prompt.ask(
-        "[bold red on black]Execute this safe queue? Type yes[/]",
+        "[bold red on #101418]Execute this safe queue? Type yes[/]",
         default="no",
         console=console,
     )
