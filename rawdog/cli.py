@@ -58,6 +58,7 @@ from rawdog.models import (
     PlanStepKind,
     ProjectCreate,
     RawdogConfig,
+    Store,
     StoreCreate,
     StoreKind,
 )
@@ -92,6 +93,7 @@ from rawdog.stores import (
     get_store_by_name,
     list_store_files_by_original_source,
     list_stores,
+    mark_store_used,
     record_store_file,
 )
 from rawdog.workflows import (
@@ -173,18 +175,26 @@ def _print_init_guidance() -> None:
     )
 
 
+def _prompt(text: str) -> str:
+    return f"[bold yellow on black]{text}[/]"
+
+
+def _print_option(key: str, text: str) -> None:
+    console.print(f"[bold yellow on black]{key}[/] [green on black]{text}[/]")
+
+
 def _choose_path(label: str, *, browse_number_selection: bool = False) -> Path:
-    choices = standard_path_choices()
+    choices = _standard_path_choices(limit=9)
     while True:
         console.print(f"{label} [dim](Ctrl-C to exit)[/]:")
         for index, (name, path) in enumerate(choices, start=1):
-            console.print(f"{index}. {name}: {path}")
-        console.print("0. Other / type a path directly")
+            console.print(f"[bold yellow on black]{index}.[/] [green on black]{name}:[/] {path}")
+        _print_option("0.", "Other / type a path directly")
         console.print("[dim]Tip: enter b7 to browse option 7, or type a full path directly.[/]")
         prompt = "Choose a folder to browse, or type a path" if browse_number_selection else "Choose a path or type one"
-        selection = Prompt.ask(prompt, default="1", console=console).strip()
+        selection = Prompt.ask(_prompt(prompt), default="1", console=console).strip()
         if selection == "0":
-            return parse_user_path(Prompt.ask("Path", console=console))
+            return parse_user_path(Prompt.ask(_prompt("Path"), console=console))
         if selection.lower().startswith("b") and len(selection) > 1:
             try:
                 browse_index = int(selection[1:])
@@ -209,27 +219,166 @@ def _choose_path(label: str, *, browse_number_selection: bool = False) -> Path:
         console.print("[bold red on black]Invalid choice.[/] Try again.")
 
 
-def _browse_folder(start: Path) -> Path:
+def _choose_source_path(label: str) -> Path:
+    yards = _known_stores(StoreKind.YARD)
+    page = 0
+    while True:
+        console.print(f"{label} [dim](Ctrl-C to exit)[/]:")
+        if yards:
+            console.print("[bold green on black]Established RAWDOG yards[/]")
+            page_stores = _store_page(yards, page)
+            for index, store in enumerate(page_stores, start=1):
+                console.print(f"[bold yellow on black]{index}.[/] [green on black]{store.name}:[/] {store.root_path}")
+            if _has_next_store_page(yards, page):
+                _print_option("6.", "Next yards")
+        else:
+            console.print("[bold yellow on black]No RAWDOG yards registered yet.[/]")
+        _print_option("9.", "Explore common folders / volumes")
+        _print_option("0.", "Enter manual path")
+        selection = Prompt.ask(_prompt("Choose existing source folder"), default="9", console=console).strip()
+        if selection == "6" and yards and _has_next_store_page(yards, page):
+            page = _next_store_page(yards, page)
+            continue
+        if selection == "9":
+            return _choose_explored_source_path(label)
+        if selection == "0":
+            path = _manual_existing_directory("Source path")
+            if path:
+                return path
+            continue
+        try:
+            index = int(selection)
+        except ValueError:
+            console.print("[bold red on black]Invalid source choice.[/] Try again.")
+            continue
+        page_stores = _store_page(yards, page)
+        if 1 <= index <= len(page_stores):
+            store = page_stores[index - 1]
+            path = store.root_path
+            if path.exists() and path.is_dir():
+                _mark_store_used(store)
+                return path
+            console.print(f"[bold red on black]Source folder is not available:[/] {path}")
+            continue
+        console.print("[bold red on black]Invalid source choice.[/] Try again.")
+
+
+def _choose_explored_source_path(label: str) -> Path:
+    start = _choose_standard_root(f"{label} start")
+    return _browse_folder(start, confirm_label="Use this source folder", manual_mode="existing", max_children=6)
+
+
+def _choose_den_destination_path(label: str) -> Path:
+    _, config = _load_or_exit()
+    dens = _known_stores(StoreKind.DEN)
+    while True:
+        console.print(f"{label} [dim](Ctrl-C to exit)[/]:")
+        default_den = config.archive_root
+        if default_den:
+            console.print(f"[bold yellow on black]1.[/] [green on black]Default den from init:[/] {default_den}")
+        else:
+            console.print("[bold yellow on black]1.[/] [green on black]Default den from init:[/] [dim]not configured[/]")
+        _print_option("2.", "Pick a registered den")
+        _print_option("3.", "Pick a volume / drive / path")
+        _print_option("0.", "Enter manual path")
+        selection = Prompt.ask(
+            _prompt("Choose den destination"),
+            default="1" if default_den else "2",
+            console=console,
+        ).strip()
+        if selection == "1":
+            if not default_den:
+                console.print("[bold yellow on black]No default den configured.[/]")
+                continue
+            path = _confirm_destination_path(default_den)
+            if path:
+                _register_or_mark_store_path(path, StoreKind.DEN, "primary")
+                return path
+            continue
+        if selection == "2":
+            path = _pick_registered_store(dens, "den")
+            if path:
+                return path
+            continue
+        if selection == "3":
+            start = _choose_standard_root("Destination start")
+            return _browse_den_destination(start, dens)
+        if selection == "0":
+            path = _manual_destination_path("Destination path")
+            if path:
+                _register_or_mark_store_path(path, StoreKind.DEN, path.name or "den")
+                return path
+            continue
+        console.print("[bold red on black]Invalid den destination choice.[/] Try again.")
+
+
+def _choose_standard_root(label: str) -> Path:
+    choices = _standard_path_choices(limit=9)
+    while True:
+        console.print(f"{label} [dim](Ctrl-C to exit)[/]:")
+        for index, (name, path) in enumerate(choices, start=1):
+            console.print(f"[bold yellow on black]{index}.[/] [green on black]{name}:[/] {path}")
+        _print_option("0.", "Enter manual path")
+        selection = Prompt.ask(_prompt("Choose starting folder"), default="1", console=console).strip()
+        if selection == "0":
+            path = _manual_existing_directory("Starting path")
+            if path:
+                return path
+            continue
+        try:
+            index = int(selection)
+        except ValueError:
+            console.print("[bold red on black]Invalid path choice.[/] Try again.")
+            continue
+        if 1 <= index <= len(choices):
+            path = choices[index - 1][1]
+            if path.exists() and path.is_dir():
+                return path
+            console.print(f"[bold red on black]Folder is not available:[/] {path}")
+            continue
+        console.print("[bold red on black]Invalid path choice.[/] Try again.")
+
+
+def _browse_folder(
+    start: Path,
+    *,
+    confirm_label: str = "Use this folder",
+    manual_mode: str = "any",
+    max_children: int = 6,
+) -> Path:
     current = start.expanduser().resolve()
     while True:
         console.print(f"[bold cyan on black]Browsing:[/] {current}")
-        folders = _sorted_child_folders(current)
-        console.print(".".ljust(4) + "Use this folder")
-        console.print("..".ljust(4) + "Parent folder")
-        console.print("0".ljust(4) + "Type exact path")
+        folders = _sorted_child_folders(current)[:max_children]
         for index, (path, size_bytes) in enumerate(folders, start=1):
-            console.print(f"{str(index).ljust(4)}{path.name}  [dim]{_format_bytes(size_bytes)}[/]")
-        selection = Prompt.ask("Choose folder (Ctrl-C to exit)", default=".", console=console).strip()
-        if selection == ".":
+            console.print(f"[bold yellow on black]{index:<4}[/][green on black]{path.name}[/]  [dim]{_format_bytes(size_bytes)}[/]")
+        _print_option("8", "Parent folder")
+        _print_option("9", confirm_label)
+        _print_option("0", "Manual path")
+        selection = Prompt.ask(_prompt("Choose folder (Ctrl-C to exit)"), default="9", console=console).strip()
+        if selection in {".", "9"}:
             return current
-        if selection == "..":
+        if selection in {"..", "8"}:
             current = current.parent
             continue
         if selection == "0":
-            current = parse_user_path(Prompt.ask("Path", console=console))
+            if manual_mode == "existing":
+                path = _manual_existing_directory("Manual path")
+                if path:
+                    current = path
+                continue
+            if manual_mode == "destination":
+                path = _manual_destination_path("Manual destination")
+                if path:
+                    return path
+                continue
+            current = parse_user_path(Prompt.ask(_prompt("Path"), console=console)).expanduser().resolve()
             continue
         if selection.startswith(("/", "~", ".")):
-            current = parse_user_path(selection)
+            path = parse_user_path(selection).expanduser().resolve()
+            if manual_mode == "existing" and not _is_existing_directory(path):
+                continue
+            current = path
             continue
         try:
             index = int(selection)
@@ -240,6 +389,212 @@ def _browse_folder(start: Path) -> Path:
             current = folders[index - 1][0]
             continue
         console.print("[bold red on black]Invalid folder choice.[/] Try again.")
+
+
+def _browse_den_destination(start: Path, dens: list) -> Path:
+    current = start.expanduser().resolve()
+    while True:
+        console.print(f"[bold cyan on black]Browsing destination:[/] {current}")
+        dens_here = _stores_under_path(dens, current)
+        if dens_here:
+            console.print("[bold green on black]Known dens in this path[/]")
+            for index, store in enumerate(dens_here[:5], start=1):
+                console.print(f"[bold yellow on black]D{index}.[/] [green on black]{store.name}:[/] {store.root_path}")
+        folders = _sorted_child_folders(current)[:5]
+        for index, (path, size_bytes) in enumerate(folders, start=1):
+            console.print(f"[bold yellow on black]{index:<4}[/][green on black]{path.name}[/]  [dim]{_format_bytes(size_bytes)}[/]")
+        _print_option("7", "Select a known den in this path")
+        _print_option("8", "Parent folder")
+        _print_option("9", "Create / use DEN here")
+        _print_option("0", "Manual path")
+        selection = Prompt.ask(_prompt("Choose destination folder (Ctrl-C to exit)"), default="9", console=console).strip()
+        if selection == "7":
+            path = _pick_registered_store(dens_here, "den")
+            if path:
+                return path
+            continue
+        if selection == "8":
+            current = current.parent
+            continue
+        if selection == "9":
+            path = _confirm_destination_path(current)
+            if path:
+                _register_or_mark_store_path(path, StoreKind.DEN, path.name or "den")
+                return path
+            continue
+        if selection == "0":
+            path = _manual_destination_path("Destination path")
+            if path:
+                _register_or_mark_store_path(path, StoreKind.DEN, path.name or "den")
+                return path
+            continue
+        if selection.startswith(("/", "~", ".")):
+            path = _manual_destination_path("Destination path", initial=selection)
+            if path:
+                _register_or_mark_store_path(path, StoreKind.DEN, path.name or "den")
+                return path
+            continue
+        try:
+            index = int(selection)
+        except ValueError:
+            console.print("[bold red on black]Invalid destination choice.[/] Try again.")
+            continue
+        if 1 <= index <= len(folders):
+            current = folders[index - 1][0]
+            continue
+        console.print("[bold red on black]Invalid destination choice.[/] Try again.")
+
+
+def _standard_path_choices(*, limit: int | None = None) -> list[tuple[str, Path]]:
+    choices = standard_path_choices()
+    return choices[:limit] if limit else choices
+
+
+def _known_stores(store_kind: StoreKind) -> list[Store]:
+    try:
+        _, config = _load_or_exit()
+        with session(config.database_path) as connection:
+            return list_stores(connection, store_kind=store_kind)
+    except typer.BadParameter:
+        return []
+
+
+STORE_PICKER_PAGE_SIZE = 5
+
+
+def _store_page(stores: list[Store], page: int) -> list[Store]:
+    start = page * STORE_PICKER_PAGE_SIZE
+    return stores[start : start + STORE_PICKER_PAGE_SIZE]
+
+
+def _has_next_store_page(stores: list[Store], page: int) -> bool:
+    return (page + 1) * STORE_PICKER_PAGE_SIZE < len(stores)
+
+
+def _next_store_page(stores: list[Store], page: int) -> int:
+    next_page = page + 1
+    if next_page * STORE_PICKER_PAGE_SIZE >= len(stores):
+        return 0
+    return next_page
+
+
+def _mark_store_used(store: Store) -> None:
+    try:
+        _, config = _load_or_exit()
+        with session(config.database_path) as connection:
+            mark_store_used(connection, store.store_id)
+    except typer.BadParameter:
+        return
+
+
+def _mark_store_path_used(path: Path, store_kind: StoreKind) -> None:
+    try:
+        _, config = _load_or_exit()
+        with session(config.database_path) as connection:
+            store = find_store_for_path(connection, path, store_kind)
+            if store:
+                mark_store_used(connection, store.store_id)
+    except typer.BadParameter:
+        return
+
+
+def _register_or_mark_store_path(path: Path, store_kind: StoreKind, preferred_name: str) -> Store | None:
+    try:
+        _, config = _load_or_exit()
+        with session(config.database_path) as connection:
+            existing = find_store_for_path(connection, path, store_kind)
+            if existing:
+                return mark_store_used(connection, existing.store_id)
+            name = _available_store_name(connection, store_kind, preferred_name)
+            store = create_or_update_store(
+                connection,
+                StoreCreate(name=name, root_path=path, store_kind=store_kind),
+            )
+            return mark_store_used(connection, store.store_id)
+    except typer.BadParameter:
+        return None
+
+
+def _available_store_name(connection, store_kind: StoreKind, preferred_name: str) -> str:
+    base = preferred_name.strip() or store_kind.value
+    candidate = base
+    counter = 2
+    while get_store_by_name(connection, candidate, store_kind):
+        candidate = f"{base}-{counter}"
+        counter += 1
+    return candidate
+
+
+def _stores_under_path(stores: list[Store], root: Path) -> list[Store]:
+    resolved = root.expanduser().resolve()
+    return [
+        store
+        for store in stores
+        if store.root_path == resolved or resolved in store.root_path.parents
+    ]
+
+
+def _pick_registered_store(stores: list[Store], noun: str) -> Path | None:
+    if not stores:
+        console.print(f"[bold yellow on black]No registered RAWDOG {noun}s available here.[/]")
+        return None
+    page = 0
+    while True:
+        page_stores = _store_page(stores, page)
+        for index, store in enumerate(page_stores, start=1):
+            console.print(f"[bold yellow on black]{index}.[/] [green on black]{store.name}:[/] {store.root_path}")
+        if _has_next_store_page(stores, page):
+            _print_option("6.", f"Next {noun}s")
+        _print_option("0.", "Back")
+        selection = Prompt.ask(_prompt(f"Choose RAWDOG {noun}"), default="1", console=console).strip()
+        if selection == "0":
+            return None
+        if selection == "6" and _has_next_store_page(stores, page):
+            page = _next_store_page(stores, page)
+            continue
+        try:
+            index = int(selection)
+        except ValueError:
+            console.print("[bold red on black]Invalid store choice.[/] Try again.")
+            continue
+        if 1 <= index <= len(page_stores):
+            store = page_stores[index - 1]
+            _mark_store_used(store)
+            return store.root_path
+        console.print("[bold red on black]Invalid store choice.[/] Try again.")
+
+
+def _manual_existing_directory(label: str) -> Path | None:
+    path = parse_user_path(Prompt.ask(_prompt(label), console=console)).expanduser().resolve()
+    return path if _is_existing_directory(path) else None
+
+
+def _is_existing_directory(path: Path) -> bool:
+    if path.exists() and path.is_dir():
+        return True
+    console.print(f"[bold red on black]Folder must already exist:[/] {path}")
+    return False
+
+
+def _manual_destination_path(label: str, initial: str | None = None) -> Path | None:
+    raw = initial if initial is not None else Prompt.ask(_prompt(label), console=console)
+    return _confirm_destination_path(parse_user_path(raw).expanduser().resolve())
+
+
+def _confirm_destination_path(path: Path) -> Path | None:
+    if path.exists():
+        if path.is_dir():
+            return path
+        console.print(f"[bold red on black]Destination exists but is not a folder:[/] {path}")
+        return None
+    parent = path.parent
+    if not parent.exists() or not parent.is_dir():
+        console.print(f"[bold red on black]Parent folder does not exist:[/] {parent}")
+        return None
+    if _yes_no(f"Destination does not exist. Create {path}?", default=True):
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+    return None
 
 
 def _sorted_child_folders(root: Path) -> list[tuple[Path, int]]:
@@ -297,24 +652,33 @@ def _choose_store_path(label: str, store_kind: StoreKind) -> Path:
     if not stores:
         return _choose_path(label, browse_number_selection=True)
     noun = "den" if store_kind == StoreKind.DEN else "yard"
+    page = 0
     while True:
         console.print(f"{label} [dim](Ctrl-C to exit)[/]:")
         console.print(f"[bold green on black]Established RAWDOG {noun}s[/]")
-        for index, store in enumerate(stores, start=1):
-            console.print(f"{index}. {store.name}: {store.root_path}")
-        console.print("0. Other / browse common paths")
+        page_stores = _store_page(stores, page)
+        for index, store in enumerate(page_stores, start=1):
+            console.print(f"[bold yellow on black]{index}.[/] [green on black]{store.name}:[/] {store.root_path}")
+        if _has_next_store_page(stores, page):
+            _print_option("6.", f"Next {noun}s")
+        _print_option("0.", "Other / browse common paths")
         console.print("[dim]Tip: enter b1 to browse inside an established store.[/]")
-        selection = Prompt.ask("Choose store, browse, or type a path", default="1", console=console).strip()
+        selection = Prompt.ask(_prompt("Choose store, browse, or type a path"), default="1", console=console).strip()
         if selection == "0":
             return _choose_path(label, browse_number_selection=True)
+        if selection == "6" and _has_next_store_page(stores, page):
+            page = _next_store_page(stores, page)
+            continue
         if selection.lower().startswith("b") and len(selection) > 1:
             try:
                 browse_index = int(selection[1:])
             except ValueError:
                 console.print("[bold red on black]Invalid browse choice.[/] Use b plus a number, like b1.")
                 continue
-            if 1 <= browse_index <= len(stores):
-                return _browse_folder(stores[browse_index - 1].root_path)
+            if 1 <= browse_index <= len(page_stores):
+                store = page_stores[browse_index - 1]
+                _mark_store_used(store)
+                return _browse_folder(store.root_path)
             console.print("[bold red on black]Invalid browse choice.[/] Try again.")
             continue
         if selection.startswith(("/", "~", ".")):
@@ -324,8 +688,10 @@ def _choose_store_path(label: str, store_kind: StoreKind) -> Path:
         except ValueError:
             console.print("[bold red on black]Invalid choice.[/] Enter a number, b-number, or a path.")
             continue
-        if 1 <= index <= len(stores):
-            return stores[index - 1].root_path
+        if 1 <= index <= len(page_stores):
+            store = page_stores[index - 1]
+            _mark_store_used(store)
+            return store.root_path
         console.print("[bold red on black]Invalid choice.[/] Try again.")
 
 
@@ -600,7 +966,7 @@ def _home_init() -> None:
 
 
 def _home_fetch() -> None:
-    source = _choose_path("Import source", browse_number_selection=True)
+    source = _choose_source_path("Import source")
     destination = _choose_store_path("Import destination", StoreKind.YARD)
     project_name = _optional_prompt("Project name, or Enter for date/layout detection")
     detect_sessions = _yes_no("Detect sessions by time gaps?")
@@ -633,8 +999,8 @@ def _home_backup() -> None:
 
 def _home_den() -> None:
     _print_den_guidance()
-    source = _choose_path("Messy source", browse_number_selection=True)
-    destination = _choose_store_path("Clean destination", StoreKind.DEN)
+    source = _choose_source_path("Messy source")
+    destination = _choose_den_destination_path("Clean destination")
     layout_choice = Prompt.ask(
         "Layout",
         choices=["preserve", "preserve-dates", "date", "project"],
@@ -687,7 +1053,7 @@ def _print_den_guidance() -> None:
 
 
 def _home_inspect() -> None:
-    root = _choose_path("Folder to inspect", browse_number_selection=True)
+    root = _choose_source_path("Folder to inspect")
     action = Prompt.ask("Inspect action", choices=["sniff", "score"], default="sniff", console=console)
     if action == "score":
         score(root=root)
@@ -1740,12 +2106,18 @@ def den_store_list() -> None:
     table.add_column("Store ID")
     table.add_column("Name")
     table.add_column("Root")
+    table.add_column("Available")
+    table.add_column("Last Used")
+    table.add_column("Uses", justify="right")
     table.add_column("Updated")
     for store in stores:
         table.add_row(
             store.store_id,
             store.name,
             str(store.root_path),
+            "yes" if store.root_path.exists() else "missing",
+            store.last_used_at.isoformat() if store.last_used_at else "never",
+            str(store.use_count),
             store.updated_at.isoformat(),
         )
     console.print(table)
@@ -1772,12 +2144,18 @@ def yard_list() -> None:
     table.add_column("Store ID")
     table.add_column("Name")
     table.add_column("Root")
+    table.add_column("Available")
+    table.add_column("Last Used")
+    table.add_column("Uses", justify="right")
     table.add_column("Updated")
     for store in stores:
         table.add_row(
             store.store_id,
             store.name,
             str(store.root_path),
+            "yes" if store.root_path.exists() else "missing",
+            store.last_used_at.isoformat() if store.last_used_at else "never",
+            str(store.use_count),
             store.updated_at.isoformat(),
         )
     console.print(table)

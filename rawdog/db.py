@@ -169,6 +169,8 @@ def migrate(connection: sqlite3.Connection) -> None:
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             last_seen_at TEXT NOT NULL,
+            last_used_at TEXT,
+            use_count INTEGER NOT NULL DEFAULT 0,
             notes TEXT,
             UNIQUE(store_kind, name)
         );
@@ -279,6 +281,18 @@ def migrate(connection: sqlite3.Connection) -> None:
         table="imports",
         column="profile_id",
         definition="INTEGER REFERENCES import_profiles(profile_id)",
+    )
+    _add_column_if_missing(
+        connection,
+        table="stores",
+        column="last_used_at",
+        definition="TEXT",
+    )
+    _add_column_if_missing(
+        connection,
+        table="stores",
+        column="use_count",
+        definition="INTEGER NOT NULL DEFAULT 0",
     )
     connection.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS projects_folder_slug_unique "

@@ -8,6 +8,8 @@ from rawdog.stores import (
     create_or_update_store,
     find_store_for_path,
     list_store_files_by_original_source,
+    list_stores,
+    mark_store_used,
     record_store_file,
     store_db_path,
     store_json_path,
@@ -61,3 +63,29 @@ def test_store_records_den_file_by_original_source(tmp_path: Path) -> None:
 
     assert yard_file.resolve() in by_source
     assert by_source[yard_file.resolve()].store_path == den_file.resolve()
+
+
+def test_stores_track_last_used_and_keep_primary_first(tmp_path: Path) -> None:
+    database = tmp_path / "rawdog.sqlite"
+    primary_root = tmp_path / "primary"
+    recent_root = tmp_path / "recent"
+    primary_root.mkdir()
+    recent_root.mkdir()
+    initialize(database)
+
+    with session(database) as connection:
+        primary = create_or_update_store(
+            connection,
+            StoreCreate(name="primary", root_path=primary_root, store_kind=StoreKind.DEN),
+        )
+        recent = create_or_update_store(
+            connection,
+            StoreCreate(name="recent", root_path=recent_root, store_kind=StoreKind.DEN),
+        )
+        mark_store_used(connection, recent.store_id)
+        stores = list_stores(connection, StoreKind.DEN)
+
+    assert stores[0].store_id == primary.store_id
+    assert stores[1].store_id == recent.store_id
+    assert stores[1].last_used_at is not None
+    assert stores[1].use_count == 1

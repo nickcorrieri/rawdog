@@ -48,6 +48,72 @@ def test_choose_store_path_lists_established_den_first(tmp_path: Path, monkeypat
     assert picked == den_root.resolve()
 
 
+def test_choose_source_path_requires_existing_manual_path(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    monkeypatch.setattr(cli, "_known_stores", lambda store_kind: [])
+    monkeypatch.setattr(cli.Prompt, "ask", _answers("0", str(tmp_path / "missing"), "0", str(source)))
+
+    picked = cli._choose_source_path("Source")
+
+    assert picked == source.resolve()
+
+
+def test_choose_den_destination_uses_default_and_can_create_missing_path(tmp_path: Path, monkeypatch) -> None:
+    destination = tmp_path / "archive"
+    database = tmp_path / "rawdog.sqlite"
+    initialize(database)
+    config = build_config(OrganizationMode.PROJECT, archive_root=destination, database_path=database)
+    monkeypatch.setattr(cli, "_load_or_exit", lambda: (tmp_path / "config.json", config))
+    monkeypatch.setattr(cli, "_known_stores", lambda store_kind: [])
+    monkeypatch.setattr(cli, "_yes_no", lambda question, default=False: True)
+    monkeypatch.setattr(cli.Prompt, "ask", _answers("1"))
+
+    picked = cli._choose_den_destination_path("Destination")
+
+    assert picked == destination.resolve()
+    assert destination.exists()
+
+
+def test_browse_den_destination_can_select_known_den_under_current_path(tmp_path: Path, monkeypatch) -> None:
+    den_root = tmp_path / "archive"
+    den_root.mkdir()
+    store = StoreCreate(name="primary", root_path=den_root, store_kind=StoreKind.DEN)
+    database = tmp_path / "rawdog.sqlite"
+    initialize(database)
+    with session(database) as connection:
+        den = create_or_update_store(connection, store)
+    config = build_config(OrganizationMode.PROJECT, database_path=database)
+    monkeypatch.setattr(cli, "_load_or_exit", lambda: (tmp_path / "config.json", config))
+    monkeypatch.setattr(cli.Prompt, "ask", _answers("7", "1"))
+
+    picked = cli._browse_den_destination(tmp_path, [den])
+
+    assert picked == den_root.resolve()
+
+
+def test_choose_source_path_paginates_registered_yards(tmp_path: Path, monkeypatch) -> None:
+    database = tmp_path / "rawdog.sqlite"
+    initialize(database)
+    with session(database) as connection:
+        for index in range(7):
+            root = tmp_path / f"yard-{index}"
+            root.mkdir()
+            create_or_update_store(
+                connection,
+                StoreCreate(name=f"yard-{index}", root_path=root, store_kind=StoreKind.YARD),
+            )
+        yards = [store for store in cli.list_stores(connection, StoreKind.YARD) if store.name != "primary"]
+    config = build_config(OrganizationMode.PROJECT, database_path=database)
+    monkeypatch.setattr(cli, "_load_or_exit", lambda: (tmp_path / "config.json", config))
+    monkeypatch.setattr(cli, "_known_stores", lambda store_kind: yards)
+    monkeypatch.setattr(cli.Prompt, "ask", _answers("6", "1"))
+
+    picked = cli._choose_source_path("Source")
+
+    assert picked == yards[5].root_path
+
+
 def _answers(*values: str):
     answers = iter(values)
 

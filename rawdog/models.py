@@ -343,6 +343,8 @@ class Store:
     created_at: datetime
     updated_at: datetime
     last_seen_at: datetime
+    last_used_at: datetime | None = None
+    use_count: int = 0
     notes: str | None = None
 
 

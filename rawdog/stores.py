@@ -65,13 +65,19 @@ def create_or_update_store(connection: sqlite3.Connection, payload: StoreCreate)
 
 
 def list_stores(connection: sqlite3.Connection, store_kind: StoreKind | None = None) -> list[Store]:
+    order = """
+        ORDER BY
+            CASE WHEN lower(name) = 'primary' THEN 0 ELSE 1 END,
+            COALESCE(last_used_at, updated_at) DESC,
+            name ASC
+    """
     if store_kind:
         rows = connection.execute(
-            "SELECT * FROM stores WHERE store_kind = ? ORDER BY updated_at DESC, name ASC",
+            f"SELECT * FROM stores WHERE store_kind = ? {order}",
             (store_kind.value,),
         ).fetchall()
     else:
-        rows = connection.execute("SELECT * FROM stores ORDER BY updated_at DESC, name ASC").fetchall()
+        rows = connection.execute(f"SELECT * FROM stores {order}").fetchall()
     return [row_to_store(row) for row in rows]
 
 
@@ -105,6 +111,23 @@ def find_store_for_path(
         if resolved == store.root_path or store.root_path in resolved.parents:
             return store
     return None
+
+
+def mark_store_used(connection: sqlite3.Connection, store_id: str) -> Store:
+    now = _now()
+    connection.execute(
+        """
+        UPDATE stores
+        SET last_used_at = ?,
+            last_seen_at = ?,
+            updated_at = ?,
+            use_count = use_count + 1
+        WHERE store_id = ?
+        """,
+        (now, now, now, store_id),
+    )
+    row = connection.execute("SELECT * FROM stores WHERE store_id = ?", (store_id,)).fetchone()
+    return row_to_store(row)
 
 
 def record_store_file(
@@ -182,6 +205,8 @@ def row_to_store(row: sqlite3.Row) -> Store:
         created_at=datetime.fromisoformat(row["created_at"]),
         updated_at=datetime.fromisoformat(row["updated_at"]),
         last_seen_at=datetime.fromisoformat(row["last_seen_at"]),
+        last_used_at=datetime.fromisoformat(row["last_used_at"]) if row["last_used_at"] else None,
+        use_count=row["use_count"],
         notes=row["notes"],
     )
 
