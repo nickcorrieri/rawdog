@@ -251,6 +251,7 @@ Initial CLI commands:
 - `rawdog queue run`
 - `rawdog plans list`
 - `rawdog plans show`
+- `rawdog plans ops`
 - `rawdog plans resume`
 
 ## Incremental Build Order

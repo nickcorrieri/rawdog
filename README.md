@@ -119,6 +119,7 @@ rawdog queue show
 rawdog queue run
 rawdog plans list
 rawdog plans show
+rawdog plans ops
 rawdog plans resume
 ```
 
@@ -194,6 +195,7 @@ rawdog queue run old_drive_cleanup
 rawdog queue run old_drive_cleanup --commit
 rawdog plans list
 rawdog plans show 1
+rawdog plans ops 1
 rawdog plans resume 1
 ```
 
@@ -238,8 +240,15 @@ rawdog junkyard --yard primary --den primary
 ```
 
 If RAWDOG is interrupted, rerun `rawdog plans list`, inspect the latest started
-or incomplete plan, then resume it explicitly with `rawdog plans resume PLAN_ID`.
+or incomplete plan, review its filesystem manifest with `rawdog plans ops PLAN_ID`,
+then resume it explicitly with `rawdog plans resume PLAN_ID`.
 Rows already copied, moved, skipped, or held for review are not blindly repeated.
+
+RAWDOG does not shell out to hidden `cp`, `mv`, or `rm` commands for plan
+execution. It writes an operation manifest for each persisted plan showing the
+Python filesystem APIs it will use, such as `Path.mkdir`, `shutil.copy2`, and
+`os.rename`, plus the source, destination, partial path, and safety rule for
+each row. Commit and resume prompts require `COMMIT PLAN <id>` after this review.
 
 `.partial` files are temporary transfer artifacts created only under the
 destination root during copy. They are not original RAW files, are ignored during

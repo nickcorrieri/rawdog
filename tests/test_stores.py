@@ -1,5 +1,6 @@
 # Author: Nicholas Corrieri
 
+import sqlite3
 from pathlib import Path
 
 from rawdog.db import initialize, session
@@ -89,3 +90,32 @@ def test_stores_track_last_used_and_keep_primary_first(tmp_path: Path) -> None:
     assert stores[1].store_id == recent.store_id
     assert stores[1].last_used_at is not None
     assert stores[1].use_count == 1
+
+
+def test_store_migration_adds_usage_columns_to_existing_database(tmp_path: Path) -> None:
+    database = tmp_path / "rawdog.sqlite"
+    with sqlite3.connect(database) as connection:
+        connection.row_factory = sqlite3.Row
+        connection.execute(
+            """
+            CREATE TABLE stores (
+                store_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                store_kind TEXT NOT NULL,
+                root_path TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                notes TEXT,
+                UNIQUE(store_kind, name)
+            )
+            """
+        )
+
+    initialize(database)
+
+    with session(database) as connection:
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(stores)")}
+
+    assert "last_used_at" in columns
+    assert "use_count" in columns

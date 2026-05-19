@@ -78,6 +78,7 @@ from rawdog.queue import (
     list_queue_steps,
     list_queues,
 )
+from rawdog.reports import write_operation_manifest
 from rawdog.safety import (
     SafetyError,
     ensure_consolidation_roots,
@@ -137,6 +138,7 @@ def _load_or_exit() -> tuple[Path, RawdogConfig]:
     if not config_path.exists():
         raise typer.BadParameter(_init_guidance_text())
     config = load_config(config_path)
+    initialize(config.database_path)
     return config_path, config
 
 
@@ -1546,6 +1548,128 @@ def _print_execution_plan_start(plan: ExecutionPlan) -> None:
     console.print(Panel(body, title=f"RAWDOG Plan #{plan.plan_id}", border_style="green"))
 
 
+def _operation_manifest_path(config: RawdogConfig, plan_id: int) -> Path:
+    return config.database_path.parent / "plans" / f"plan-{plan_id}-ops.csv"
+
+
+def _operation_manifest_rows(rows: list[ExecutionPlanRow]) -> list[dict[str, object]]:
+    return [_operation_manifest_row(row) for row in rows]
+
+
+def _operation_manifest_row(row: ExecutionPlanRow) -> dict[str, object]:
+    partial_path = row.destination_path.with_name(row.destination_path.name + ".partial")
+    if row.status == "collision":
+        return {
+            "plan_id": row.plan_id,
+            "row_id": row.row_id,
+            "operation": "hold_collision",
+            "source_path": row.source_path,
+            "destination_path": row.destination_path,
+            "partial_path": "",
+            "size_bytes": row.size_bytes,
+            "python_api": "none",
+            "safety_rule": "destination exists with same name but different size; skip and review",
+            "status": row.status,
+            "will_write": "no",
+        }
+    if row.status.startswith("skip"):
+        return {
+            "plan_id": row.plan_id,
+            "row_id": row.row_id,
+            "operation": "skip",
+            "source_path": row.source_path,
+            "destination_path": row.destination_path,
+            "partial_path": "",
+            "size_bytes": row.size_bytes,
+            "python_api": "none",
+            "safety_rule": "already represented or excluded by plan",
+            "status": row.status,
+            "will_write": "no",
+        }
+    if row.transfer_action == DenTransferAction.MOVE:
+        return {
+            "plan_id": row.plan_id,
+            "row_id": row.row_id,
+            "operation": "same_filesystem_move",
+            "source_path": row.source_path,
+            "destination_path": row.destination_path,
+            "partial_path": "",
+            "size_bytes": row.size_bytes,
+            "python_api": "Path.mkdir + os.rename",
+            "safety_rule": "destination root containment; same filesystem; no overwrite",
+            "status": row.status,
+            "will_write": "yes" if row.status in {"plan_copy", "planned", "failed"} else "no",
+        }
+    return {
+        "plan_id": row.plan_id,
+        "row_id": row.row_id,
+        "operation": "copy_with_partial",
+        "source_path": row.source_path,
+        "destination_path": row.destination_path,
+        "partial_path": partial_path,
+        "size_bytes": row.size_bytes,
+        "python_api": "Path.mkdir + shutil.copy2 + os.rename",
+        "safety_rule": "destination root containment; no overwrite; partial staging",
+        "status": row.status,
+        "will_write": "yes" if row.status in {"plan_copy", "planned", "failed"} else "no",
+    }
+
+
+def _write_plan_operation_manifest(
+    config: RawdogConfig,
+    plan_id: int,
+    rows: list[ExecutionPlanRow],
+    export_path: Path | None = None,
+) -> Path:
+    path = export_path or _operation_manifest_path(config, plan_id)
+    return write_operation_manifest(path, _operation_manifest_rows(rows))
+
+
+def _print_plan_operation_review(
+    config: RawdogConfig,
+    plan_id: int,
+    rows: list[ExecutionPlanRow],
+    *,
+    limit: int = 20,
+    export_path: Path | None = None,
+) -> Path:
+    manifest_path = _write_plan_operation_manifest(config, plan_id, rows, export_path)
+    console.print(
+        Panel(
+            "\n".join(
+                [
+                    "[bold green on black]No shell commands will be run.[/]",
+                    "RAWDOG uses Python filesystem APIs for copy, move, mkdir, stat, and SQLite writes.",
+                    f"Operation manifest: {manifest_path}",
+                ]
+            ),
+            title="Filesystem Operation Review",
+            border_style="yellow",
+            style="on black",
+        )
+    )
+    table = Table(title=f"Plan #{plan_id} Operations Preview", style="on black", row_styles=[STYLE_ROW])
+    table.add_column("Row", justify="right")
+    table.add_column("Operation")
+    table.add_column("API")
+    table.add_column("Source")
+    table.add_column("Destination")
+    table.add_column("Write")
+    for item in _operation_manifest_rows(rows[:limit]):
+        table.add_row(
+            str(item["row_id"]),
+            str(item["operation"]),
+            str(item["python_api"]),
+            str(item["source_path"]),
+            str(item["destination_path"]),
+            str(item["will_write"]),
+        )
+    console.print(table)
+    if len(rows) > limit:
+        console.print(f"[bold yellow on black]Showing first {limit} of {len(rows)} operations.[/]")
+    return manifest_path
+
+
 def _audit_execution_row(row: ExecutionPlanRow, status: str) -> str:
     if status in {"copied", "moved", "skipped_existing_same_name_size"}:
         if not row.destination_path.exists():
@@ -1843,17 +1967,24 @@ def den(
         "confirming they are not conflicting originals.",
     )
     if dry_run:
+        with session(config.database_path) as connection:
+            rows = list_execution_plan_rows(connection, execution_plan.plan_id)
+        manifest_path = _write_plan_operation_manifest(config, execution_plan.plan_id, rows)
         console.print(
             f"Plan #{execution_plan.plan_id} written to the database. "
             "Re-run with --commit to execute after reviewing."
         )
+        console.print(f"Operation manifest written: {manifest_path}")
         return
+    with session(config.database_path) as connection:
+        rows = list_execution_plan_rows(connection, execution_plan.plan_id)
+    _print_plan_operation_review(config, execution_plan.plan_id, rows)
     confirmed = Prompt.ask(
-        "[bold red on black]Execute this den plan? Type yes[/]",
+        f"[bold red on black]Execute this den plan? Type COMMIT PLAN {execution_plan.plan_id}[/]",
         default="no",
         console=console,
     )
-    if confirmed.lower() != "yes":
+    if confirmed != f"COMMIT PLAN {execution_plan.plan_id}":
         console.print("Plan not executed.")
         return
     finished_plan = _execute_persisted_plan(config, execution_plan.plan_id)
@@ -2277,7 +2408,10 @@ def plans_list(limit: int = typer.Option(10, "--limit", min=1, max=50)) -> None:
 
 
 @plans_app.command("show")
-def plans_show(plan_id: int = typer.Argument(...)) -> None:
+def plans_show(
+    plan_id: int = typer.Argument(...),
+    ops: bool = typer.Option(False, "--ops", help="Also show filesystem operation preview."),
+) -> None:
     """Show one persisted execution plan and its row summary."""
     _, config = _load_or_exit()
     with session(config.database_path) as connection:
@@ -2310,6 +2444,25 @@ def plans_show(plan_id: int = typer.Argument(...)) -> None:
         "keep the plan paused, inspect these paths, and only resume after you understand why RAWDOG "
         "held or failed these rows.",
     )
+    if ops:
+        _print_plan_operation_review(config, plan_id, rows)
+
+
+@plans_app.command("ops")
+def plans_ops(
+    plan_id: int = typer.Argument(...),
+    limit: int = typer.Option(50, "--limit", min=1, max=500, help="Rows to preview in terminal."),
+    export: Path | None = typer.Option(None, "--export", "-o", help="Optional CSV export path."),
+) -> None:
+    """Review exact Python filesystem operations for a persisted plan."""
+    _, config = _load_or_exit()
+    with session(config.database_path) as connection:
+        plan = get_execution_plan(connection, plan_id)
+        if plan is None:
+            raise typer.BadParameter(f"Unknown plan: {plan_id}")
+        rows = list_execution_plan_rows(connection, plan_id)
+    _print_execution_plan_start(plan)
+    _print_plan_operation_review(config, plan_id, rows, limit=limit, export_path=export)
 
 
 @plans_app.command("resume")
@@ -2324,12 +2477,15 @@ def plans_resume(plan_id: int = typer.Argument(...)) -> None:
     if plan.status == ExecutionPlanStatus.DONE:
         console.print("Plan is already done.")
         return
+    with session(config.database_path) as connection:
+        rows = list_execution_plan_rows(connection, plan_id)
+    _print_plan_operation_review(config, plan_id, rows)
     confirmed = Prompt.ask(
-        "[bold red on black]Resume this execution plan? Type yes[/]",
+        f"[bold red on black]Resume this execution plan? Type COMMIT PLAN {plan_id}[/]",
         default="no",
         console=console,
     )
-    if confirmed.lower() != "yes":
+    if confirmed != f"COMMIT PLAN {plan_id}":
         console.print("Plan not resumed.")
         return
     finished = _execute_persisted_plan(config, plan_id)

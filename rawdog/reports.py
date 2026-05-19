@@ -23,3 +23,23 @@ def write_copy_size_estimate(path: Path, rows: Iterable[dict[str, object]]) -> P
         ["year", "files_to_copy", "total_bytes", "estimated_gb"],
         rows,
     )
+
+
+def write_operation_manifest(path: Path, rows: Iterable[dict[str, object]]) -> Path:
+    return write_csv(
+        path,
+        [
+            "plan_id",
+            "row_id",
+            "operation",
+            "source_path",
+            "destination_path",
+            "partial_path",
+            "size_bytes",
+            "python_api",
+            "safety_rule",
+            "status",
+            "will_write",
+        ],
+        rows,
+    )
