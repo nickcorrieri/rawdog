@@ -1848,25 +1848,35 @@ def _print_plan_operation_review(
             style=STYLE_PANEL,
         )
     )
-    table = _styled_table(title=f"Plan #{plan_id} Operations Preview", style=STYLE_PANEL, row_styles=STYLE_ROWS)
-    table.add_column("Row", justify="right")
-    table.add_column("Operation")
-    table.add_column("API")
-    table.add_column("Source")
-    table.add_column("Destination")
-    table.add_column("Write")
+    table = _styled_table(
+        title=f"Plan #{plan_id} Operations Preview",
+        style=STYLE_PANEL,
+        row_styles=STYLE_ROWS,
+        expand=True,
+    )
+    table.add_column("Row", justify="right", width=7, no_wrap=True)
+    table.add_column("Operation", width=18)
+    table.add_column("Write", justify="center", width=5, no_wrap=True)
+    table.add_column("Full Paths", overflow="fold")
     for item in _operation_manifest_rows(rows[:limit]):
+        details = "\n".join(
+            [
+                f"API: {item['python_api']}",
+                f"Source: {item['source_path']}",
+                f"Destination: {item['destination_path']}",
+                f"Partial: {item['partial_path'] or '-'}",
+                f"Rule: {item['safety_rule']}",
+            ]
+        )
         table.add_row(
             str(item["row_id"]),
             str(item["operation"]),
-            str(item["python_api"]),
-            str(item["source_path"]),
-            str(item["destination_path"]),
             str(item["will_write"]),
+            details,
         )
     console.print(table)
     if len(rows) > limit:
-        console.print(f"[bold yellow]Showing first {limit} of {len(rows)} operations.[/]")
+        console.print(f"[bold bright_yellow on black]Showing first {limit} of {len(rows)} operations.[/]")
     return manifest_path
 
 
