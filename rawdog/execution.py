@@ -103,6 +103,37 @@ def list_execution_plans(connection: sqlite3.Connection, limit: int = 10) -> lis
     return [row_to_plan(row) for row in rows]
 
 
+def list_execution_plans_for_prune(
+    connection: sqlite3.Connection,
+    *,
+    keep: int,
+    before: datetime | None = None,
+    include_done: bool = False,
+) -> list[ExecutionPlan]:
+    rows = connection.execute(
+        "SELECT * FROM execution_plans ORDER BY updated_at DESC, plan_id DESC"
+    ).fetchall()
+    plans = [row_to_plan(row) for row in rows]
+    protected_ids = {plan.plan_id for plan in plans[:keep]}
+    allowed_statuses = {ExecutionPlanStatus.PLANNED}
+    if include_done:
+        allowed_statuses.add(ExecutionPlanStatus.DONE)
+    prunable: list[ExecutionPlan] = []
+    for plan in plans:
+        if plan.plan_id in protected_ids:
+            continue
+        if plan.status not in allowed_statuses:
+            continue
+        if before is not None and plan.updated_at >= before:
+            continue
+        prunable.append(plan)
+    return prunable
+
+
+def delete_execution_plan(connection: sqlite3.Connection, plan_id: int) -> None:
+    connection.execute("DELETE FROM execution_plans WHERE plan_id = ?", (plan_id,))
+
+
 def list_execution_plan_rows(
     connection: sqlite3.Connection,
     plan_id: int,

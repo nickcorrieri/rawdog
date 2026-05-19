@@ -200,6 +200,7 @@ rawdog plans list
 rawdog plans show 1
 rawdog plans ops 1
 rawdog plans resume 1
+rawdog plans prune --dry-run --keep 20
 ```
 
 `den` layouts are explicit about whether RAWDOG preserves existing folders or
@@ -221,6 +222,19 @@ rawdog den /Volumes/WD_BLACK/102EOSR7 \
   --layout project-dates \
   --project Soccer \
   --group-by month
+```
+
+If a project source spans many capture dates, RAWDOG warns that it may contain
+multiple projects. Scope the project explicitly when needed:
+
+```bash
+rawdog den /Volumes/WD_BLACK/102EOSR7 \
+  --dest /Volumes/WD_BLACK/RAW_DEN \
+  --layout project-dates \
+  --project Soccer \
+  --group-by month \
+  --start-date 2026-01-01 \
+  --end-date 2026-01-31
 ```
 
 Saved consolidation workflows can be reused:
@@ -278,6 +292,15 @@ If RAWDOG is interrupted, rerun `rawdog plans list`, inspect the latest started
 or incomplete plan, review its filesystem manifest with `rawdog plans ops PLAN_ID`,
 then press `r` from the operation review or run `rawdog plans run PLAN_ID`.
 Rows already copied, moved, skipped, or held for review are not blindly repeated.
+
+Old dry-run plans can be pruned from the local RAWDOG database. Prune is
+conservative by default: it removes only old `planned` plans, never `started`,
+`failed`, or `needs_review` plans.
+
+```bash
+rawdog plans prune --dry-run --keep 20
+rawdog plans prune --commit --keep 20
+```
 
 RAWDOG does not shell out to hidden `cp`, `mv`, or `rm` commands for plan
 execution. It writes an operation manifest for each persisted plan showing the

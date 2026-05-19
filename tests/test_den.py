@@ -1,5 +1,7 @@
 # Author: Nicholas Corrieri
 
+import os
+from datetime import UTC, datetime
 from pathlib import Path
 
 from rawdog.den import build_den_plan, score_items, summarize_by_year
@@ -173,6 +175,35 @@ def test_den_project_dates_can_group_project_by_day(tmp_path: Path) -> None:
     assert plan.rows[0].destination_path == (
         destination / f"{captured_at.year:04d}" / f"Soccer-{captured_at:%Y%m%d}" / "IMG_0001.CR3"
     )
+
+
+def test_den_can_scope_project_plan_by_capture_date(tmp_path: Path) -> None:
+    source = tmp_path / "102EOSR7"
+    destination = tmp_path / "archive"
+    source.mkdir()
+    destination.mkdir()
+    january = source / "IMG_0001.CR3"
+    february = source / "IMG_0002.CR3"
+    january.write_bytes(b"jan")
+    february.write_bytes(b"feb")
+    jan_ts = datetime(2026, 1, 15, tzinfo=UTC).timestamp()
+    feb_ts = datetime(2026, 2, 15, tzinfo=UTC).timestamp()
+    os.utime(january, (jan_ts, jan_ts))
+    os.utime(february, (feb_ts, feb_ts))
+
+    plan = build_den_plan(
+        source,
+        destination,
+        project_name="Soccer",
+        layout_mode=DenLayoutMode.PROJECT_DATES,
+        folder_template="YYYY/PROJECT-YYYYMM",
+        start_date=datetime(2026, 2, 1, tzinfo=UTC).date(),
+        end_date=datetime(2026, 2, 28, tzinfo=UTC).date(),
+    )
+
+    assert len(plan.rows) == 1
+    assert plan.rows[0].source_path == february
+    assert "Soccer-202602" in plan.rows[0].destination_path.parts
 
 
 def test_den_preserve_dates_keeps_date_folder_label_and_file_name(tmp_path: Path) -> None:

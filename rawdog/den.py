@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 from rawdog.copier import append_only_copy, append_only_move
@@ -74,12 +74,15 @@ def build_den_plan(
     transfer_action: DenTransferAction = DenTransferAction.COPY,
     folder_template: str = "YYYY/YYYY-MM",
     exclude_roots: list[Path] | None = None,
+    start_date: date | None = None,
+    end_date: date | None = None,
     limit: int | None = None,
 ) -> DenPlan:
     source_root = source_root.expanduser().resolve()
     destination_root = destination_root.expanduser().resolve()
     excluded_roots = [path.expanduser().resolve() for path in (exclude_roots or [])]
     items = scan_raw_files(source_root, exclude_roots=excluded_roots, limit=limit)
+    items = _filter_items_by_capture_date(items, start_date=start_date, end_date=end_date)
     earliest = min((capture_time_fallback(item.path) for item in items), default=datetime.now(UTC))
     if layout_mode in {
         DenLayoutMode.PRESERVE,
@@ -157,6 +160,10 @@ def summarize_by_year(rows: list[DenPlanRow]) -> list[dict[str, object]]:
     return [summary[key] for key in sorted(summary)]
 
 
+def capture_date_counts(items: list[InventoryItem]) -> Counter[date]:
+    return Counter(capture_time_fallback(item.path).date() for item in items)
+
+
 def score_items(items: list[InventoryItem]) -> LibraryScore:
     total_bytes = sum(item.size_bytes for item in items)
     name_counts = Counter(item.path.name for item in items)
@@ -185,6 +192,25 @@ def score_items(items: list[InventoryItem]) -> LibraryScore:
         year_count=len(years),
         notes=notes,
     )
+
+
+def _filter_items_by_capture_date(
+    items: list[InventoryItem],
+    *,
+    start_date: date | None,
+    end_date: date | None,
+) -> list[InventoryItem]:
+    if start_date is None and end_date is None:
+        return items
+    filtered = []
+    for item in items:
+        captured_on = capture_time_fallback(item.path).date()
+        if start_date is not None and captured_on < start_date:
+            continue
+        if end_date is not None and captured_on > end_date:
+            continue
+        filtered.append(item)
+    return filtered
 
 
 def _plan_row(

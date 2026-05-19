@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import typer
@@ -22,15 +22,23 @@ from rawdog.config import (
 )
 from rawdog.copier import append_only_copy, append_only_move
 from rawdog.db import initialize, session
-from rawdog.den import DenPlan, build_den_plan, score_items, summarize_by_year
+from rawdog.den import (
+    DenPlan,
+    build_den_plan,
+    capture_date_counts,
+    score_items,
+    summarize_by_year,
+)
 from rawdog.drives import parse_user_path, standard_path_choices
 from rawdog.execution import (
     add_execution_plan_rows,
     create_execution_plan,
+    delete_execution_plan,
     get_execution_plan,
     get_latest_execution_plan,
     list_execution_plan_rows,
     list_execution_plans,
+    list_execution_plans_for_prune,
     mark_execution_plan_finished,
     mark_execution_plan_started,
     update_execution_plan_row,
@@ -113,14 +121,14 @@ app = typer.Typer(
     no_args_is_help=False,
 )
 
-STYLE_TEXT = "grey85"
-STYLE_TITLE = "bold green"
-STYLE_ACTION = "bold yellow"
-STYLE_SAFE = "bold green"
-STYLE_WARN = "bold red"
-STYLE_PATH = "bold cyan"
-STYLE_ROW = "grey85 on grey11"
-STYLE_ROW_ALT = "grey85 on grey15"
+STYLE_TEXT = "bright_white on black"
+STYLE_TITLE = "bold bright_green on black"
+STYLE_ACTION = "bold bright_yellow on black"
+STYLE_SAFE = "bold bright_green on black"
+STYLE_WARN = "bold bright_red on black"
+STYLE_PATH = "bold bright_cyan on black"
+STYLE_ROW = "bright_white on black"
+STYLE_ROW_ALT = "bright_white on grey11"
 STYLE_ROWS = [STYLE_ROW, STYLE_ROW_ALT]
 STYLE_PANEL = STYLE_TEXT
 console = Console(force_terminal=True, color_system="256", style=STYLE_TEXT)
@@ -183,16 +191,18 @@ def _print_init_guidance() -> None:
 
 
 def _prompt(text: str) -> str:
-    return f"[bold yellow]{text}[/]"
+    return f"[bold bright_yellow on black]{text}[/]"
 
 
 def _print_option(key: str, text: str) -> None:
-    console.print(f"[bold yellow]{key}[/] [green]{text}[/]")
+    console.print(f"[bold bright_yellow on black]{key}[/] [bright_green on black]{text}[/]")
 
 
 def _styled_table(*args, **kwargs) -> Table:
     kwargs.setdefault("style", STYLE_PANEL)
     kwargs.setdefault("row_styles", STYLE_ROWS)
+    kwargs.setdefault("border_style", "bright_green")
+    kwargs.setdefault("header_style", "bold bright_white on black")
     return Table(*args, **kwargs)
 
 
@@ -777,10 +787,10 @@ def _print_layout_analysis(analysis: LayoutAnalysis) -> None:
     table.add_row("Confidence", f"{analysis.confidence}%")
     console.print(table)
     for signal in analysis.signals:
-        console.print(f"- {signal}")
+        console.print(f"[bright_white on black]- {signal}[/]")
     console.print(
-        "[bold yellow]Operator confirmation required:[/] "
-        "RAWDOG suggests layout behavior but never silently reorganizes."
+        "[bold bright_yellow on black]Operator confirmation required:[/] "
+        "[bright_white on black]RAWDOG suggests layout behavior but never silently reorganizes.[/]"
     )
 
 
@@ -926,6 +936,10 @@ def _yes_no(label: str, default: bool = False) -> bool:
         console.print("[bold red]Please answer y or n.[/]")
 
 
+def _parse_cli_date(value: str) -> date:
+    return date.fromisoformat(value.strip())
+
+
 def _run_home_choice(choice: str) -> None:
     if choice == "1":
         _home_init()
@@ -1029,6 +1043,11 @@ def _home_den() -> None:
         console=console,
     )
     project_name = _optional_prompt("Project name, or Enter to skip")
+    start_date, end_date = (
+        _choose_project_date_scope(source, [destination] if destination_inside_source else [])
+        if layout in {DenLayoutMode.PROJECT, DenLayoutMode.PROJECT_DATES}
+        else (None, None)
+    )
     dry_run = not _yes_no("Commit now? Dry-run is safer.", default=False)
     den(
         source=source,
@@ -1039,6 +1058,8 @@ def _home_den() -> None:
         action=DenTransferAction(action_choice),
         template=None,
         group_by=group_by,
+        start_date=start_date,
+        end_date=end_date,
         limit=None,
         dry_run=dry_run,
     )
@@ -1105,6 +1126,86 @@ def _den_template_for_grouping(layout: DenLayoutMode, group_by: DateGroupMode | 
     if layout == DenLayoutMode.PROJECT_DATES:
         return "YYYY/PROJECT-YYYYMMDD" if group_by == DateGroupMode.DAY else "YYYY/PROJECT-YYYYMM"
     return "YYYY/YYYYMMDD" if group_by == DateGroupMode.DAY else "YYYY/YYYY-MM"
+
+
+def _choose_project_date_scope(
+    source_root: Path,
+    exclude_roots: list[Path],
+) -> tuple[date | None, date | None]:
+    items = scan_raw_files(source_root, exclude_roots=exclude_roots)
+    counts = capture_date_counts(items)
+    if len(counts) <= 2:
+        return None, None
+    dates = sorted(counts)
+    console.print(
+        Panel(
+            "\n".join(
+                [
+                    f"[bold yellow]This source spans {len(dates)} capture dates.[/]",
+                    f"First date: {dates[0].isoformat()}",
+                    f"Last date: {dates[-1].isoformat()}",
+                    "",
+                    "If this is one project, keep all dates.",
+                    "If this card/folder contains multiple projects, scope this plan to a date range.",
+                ]
+            ),
+            title="Project Scope Check",
+            border_style="yellow",
+            style=STYLE_PANEL,
+        )
+    )
+    if not _yes_no("Scope this project plan to a date range?", default=False):
+        return None, None
+    while True:
+        start_raw = Prompt.ask("Start date YYYY-MM-DD", default=dates[0].isoformat(), console=console)
+        end_raw = Prompt.ask("End date YYYY-MM-DD", default=dates[-1].isoformat(), console=console)
+        try:
+            start = _parse_cli_date(start_raw)
+            end = _parse_cli_date(end_raw)
+        except ValueError as exc:
+            console.print(f"[bold red]Invalid date:[/] {exc}")
+            continue
+        if start > end:
+            console.print("[bold red]Start date must be before or equal to end date.[/]")
+            continue
+        return start, end
+
+
+def _print_project_scope_warning(
+    source_root: Path,
+    exclude_roots: list[Path],
+    *,
+    start_date: date | None,
+    end_date: date | None,
+) -> None:
+    if start_date is not None or end_date is not None:
+        console.print(
+            "[bold green]Project date scope:[/] "
+            f"{start_date.isoformat() if start_date else 'beginning'} -> "
+            f"{end_date.isoformat() if end_date else 'end'}"
+        )
+        return
+    items = scan_raw_files(source_root, exclude_roots=exclude_roots)
+    counts = capture_date_counts(items)
+    if len(counts) <= 2:
+        return
+    dates = sorted(counts)
+    console.print(
+        Panel(
+            "\n".join(
+                [
+                    f"This project source spans {len(dates)} capture dates.",
+                    f"First date: {dates[0].isoformat()}",
+                    f"Last date: {dates[-1].isoformat()}",
+                    "If this is not one project, rerun with --start-date and --end-date, "
+                    "or split into separate project plans.",
+                ]
+            ),
+            title="Project Scope Review",
+            border_style="yellow",
+            style=STYLE_PANEL,
+        )
+    )
 
 
 def _print_den_layout_guidance(options: list[tuple[str, DenLayoutMode]] | None = None) -> None:
@@ -1637,14 +1738,14 @@ def _persist_den_execution_plan(
 def _print_execution_plan_start(plan: ExecutionPlan) -> None:
     body = "\n".join(
         [
-            f"[bold green]What we're doing:[/] {plan.what}",
-            f"[bold cyan]What we're doing it to:[/] {plan.subject}",
-            f"[bold yellow]What should be where when done:[/] {plan.expected_result}",
-            f"[bold green]Execution:[/] {plan.execution_summary}",
-            f"[bold yellow]Post audit:[/] {plan.post_audit_summary}",
+            f"[bold bright_green on black]What we're doing:[/] [bright_white on black]{plan.what}[/]",
+            f"[bold bright_cyan on black]What we're doing it to:[/] [bright_white on black]{plan.subject}[/]",
+            f"[bold bright_yellow on black]What should be where when done:[/] [bright_white on black]{plan.expected_result}[/]",
+            f"[bold bright_green on black]Execution:[/] [bright_white on black]{plan.execution_summary}[/]",
+            f"[bold bright_yellow on black]Post audit:[/] [bright_white on black]{plan.post_audit_summary}[/]",
         ]
     )
-    console.print(Panel(body, title=f"RAWDOG Plan #{plan.plan_id}", border_style="green"))
+    console.print(Panel(body, title=f"RAWDOG Plan #{plan.plan_id}", border_style="bright_green", style=STYLE_PANEL))
 
 
 def _operation_manifest_path(config: RawdogConfig, plan_id: int) -> Path:
@@ -1981,6 +2082,16 @@ def den(
         "--group-by",
         help="Generated date grouping for date/project-dates layouts: month or day.",
     ),
+    start_date: str | None = typer.Option(
+        None,
+        "--start-date",
+        help="Only include files captured on or after this date.",
+    ),
+    end_date: str | None = typer.Option(
+        None,
+        "--end-date",
+        help="Only include files captured on or before this date.",
+    ),
     limit: int | None = typer.Option(None, "--limit", min=1, help="Limit the planning scan for review."),
     dry_run: bool = typer.Option(True, "--dry-run/--commit", help="Preview before execution."),
 ) -> None:
@@ -1995,6 +2106,13 @@ def den(
     destination_value = destination or (loaded_workflow.destination_root if loaded_workflow else None)
     if source_value is None or destination_value is None:
         raise typer.BadParameter("--workflow with saved paths, or source and --dest, are required.")
+    try:
+        start_date_value = _parse_cli_date(start_date) if start_date else None
+        end_date_value = _parse_cli_date(end_date) if end_date else None
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    if start_date_value and end_date_value and start_date_value > end_date_value:
+        raise typer.BadParameter("--start-date must be before or equal to --end-date.")
     source_root = parse_user_path(str(source_value))
     destination_root = parse_user_path(str(destination_value))
     effective_layout = loaded_workflow.layout_mode if loaded_workflow and not source else layout
@@ -2049,6 +2167,13 @@ def den(
     )
     layout_analysis = analyze_source_layout(source_root, exclude_roots=exclude_roots, limit=limit)
     _print_layout_analysis(layout_analysis)
+    if effective_layout in {DenLayoutMode.PROJECT, DenLayoutMode.PROJECT_DATES}:
+        _print_project_scope_warning(
+            source_root,
+            exclude_roots,
+            start_date=start_date_value,
+            end_date=end_date_value,
+        )
     if exclude_roots:
         console.print(
             "[bold yellow]Destination is inside source:[/] "
@@ -2064,6 +2189,8 @@ def den(
         transfer_action=effective_action,
         folder_template=effective_template,
         exclude_roots=exclude_roots,
+        start_date=start_date_value,
+        end_date=end_date_value,
         limit=limit,
     )
     if workflow_name:
@@ -2556,6 +2683,67 @@ def plans_list(limit: int = typer.Option(10, "--limit", min=1, max=50)) -> None:
             plan.updated_at.isoformat(),
         )
     console.print(table)
+
+
+@plans_app.command("prune")
+def plans_prune(
+    keep: int = typer.Option(20, "--keep", min=0, help="Keep this many newest plans."),
+    before: str | None = typer.Option(None, "--before", help="Only prune plans updated before YYYY-MM-DD."),
+    include_done: bool = typer.Option(False, "--include-done", help="Also allow completed plans to be pruned."),
+    dry_run: bool = typer.Option(True, "--dry-run/--commit", help="Preview before pruning."),
+) -> None:
+    """Prune old persisted plans. Conservative by default: planned dry-runs only."""
+    _, config = _load_or_exit()
+    try:
+        before_dt = (
+            datetime.combine(_parse_cli_date(before), datetime.min.time(), tzinfo=UTC)
+            if before
+            else None
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    with session(config.database_path) as connection:
+        plans = list_execution_plans_for_prune(
+            connection,
+            keep=keep,
+            before=before_dt,
+            include_done=include_done,
+        )
+    table = _styled_table(title="RAWDOG Plans Prune Preview")
+    table.add_column("ID", justify="right")
+    table.add_column("Status")
+    table.add_column("Updated")
+    table.add_column("What")
+    for plan in plans:
+        table.add_row(str(plan.plan_id), plan.status.value, plan.updated_at.isoformat(), plan.what)
+    console.print(table)
+    console.print(
+        "[bold yellow]Safety:[/] prune never removes started, failed, or needs-review plans. "
+        "By default it removes only planned dry-run plans."
+    )
+    if not plans:
+        console.print("No prunable plans found.")
+        return
+    if dry_run:
+        console.print("Dry run only. Re-run with --commit to prune these plans.")
+        return
+    confirmed = Prompt.ask(
+        "[bold red]Delete these plan records and operation manifests? Type PRUNE PLANS[/]",
+        default="no",
+        console=console,
+    )
+    if confirmed != "PRUNE PLANS":
+        console.print("Plans not pruned.")
+        return
+    removed_manifests = 0
+    with session(config.database_path) as connection:
+        for plan in plans:
+            delete_execution_plan(connection, plan.plan_id)
+            manifest = _operation_manifest_path(config, plan.plan_id)
+            if manifest.exists():
+                manifest.unlink()
+                removed_manifests += 1
+    console.print(f"Pruned {len(plans)} plans and {removed_manifests} operation manifests.")
 
 
 @plans_app.command("show")
