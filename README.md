@@ -229,7 +229,9 @@ rawdog queue run same_drive_cleanup --commit
 Move still refuses overwrites and collisions.
 
 Camera-generated folders such as `DCIM`, `100CANON`, `102EOSR7`, `NIKON`, or
-`SONY` are treated as camera dump structure, not project folders.
+`SONY` are treated as camera dump structure, not project folders. This applies
+even when the selected source itself is the camera folder, such as
+`/Volumes/WD_BLACK/102EOSR7`.
 
 `junkyard` is report-only. It compares registered yard files against registered
 den catalogs and reports working files that appear safe to review for removal
@@ -241,7 +243,7 @@ rawdog junkyard --yard primary --den primary
 
 If RAWDOG is interrupted, rerun `rawdog plans list`, inspect the latest started
 or incomplete plan, review its filesystem manifest with `rawdog plans ops PLAN_ID`,
-then resume it explicitly with `rawdog plans resume PLAN_ID`.
+then press `r` from the operation review or run `rawdog plans run PLAN_ID`.
 Rows already copied, moved, skipped, or held for review are not blindly repeated.
 
 RAWDOG does not shell out to hidden `cp`, `mv`, or `rm` commands for plan

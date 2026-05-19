@@ -32,6 +32,18 @@ def test_camera_model_folder_is_not_project_layout(tmp_path: Path) -> None:
     assert analysis.organized_files == 0
 
 
+def test_selected_camera_model_folder_is_detected_as_raw_dump(tmp_path: Path) -> None:
+    source = tmp_path / "102EOSR7"
+    _raw(source / "IMG_0001.CR3")
+    _raw(source / "IMG_0002.CR3")
+
+    analysis = analyze_source_layout(source)
+
+    assert analysis.recommendation == "ddd"
+    assert analysis.raw_dump_files == 2
+    assert analysis.organized_files == 0
+
+
 def test_detects_existing_project_layout(tmp_path: Path) -> None:
     _raw(tmp_path / "2026" / "Wedding_Smith" / "IMG_0001.CR3")
     _raw(tmp_path / "2026" / "Wedding_Smith" / "IMG_0002.CR3")

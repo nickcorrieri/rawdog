@@ -22,6 +22,7 @@ def test_build_den_plan_for_date_destination(tmp_path: Path) -> None:
     assert plan.files_to_transfer == 1
     assert plan.bytes_to_transfer == 3
     assert plan.rows[0].destination_path.name == "IMG_0001.CR3"
+    assert plan.destination_folder == destination
 
 
 def test_build_den_plan_can_plan_move(tmp_path: Path) -> None:
@@ -62,6 +63,46 @@ def test_den_can_preserve_structure_but_normalize_date_folders(tmp_path: Path) -
     plan = build_den_plan(source, destination, layout_mode=DenLayoutMode.PRESERVE_DATES)
 
     assert plan.rows[0].destination_path == destination / "Trips" / "20260516" / "IMG_0001.CR3"
+
+
+def test_den_preserve_dates_routes_selected_camera_folder_by_date(tmp_path: Path) -> None:
+    source = tmp_path / "102EOSR7"
+    destination = tmp_path / "archive"
+    raw = source / "IMG_0001.CR3"
+    source.mkdir()
+    destination.mkdir()
+    raw.write_bytes(b"raw")
+
+    plan = build_den_plan(
+        source,
+        destination,
+        layout_mode=DenLayoutMode.PRESERVE_DATES,
+        folder_template="YYYY/YYYYMMDD",
+    )
+
+    assert plan.rows[0].destination_path.parent.parent == destination / "2026"
+    assert plan.rows[0].destination_path.name == "IMG_0001.CR3"
+    assert "102EOSR7" not in plan.rows[0].destination_path.parts
+
+
+def test_den_date_layout_drops_dcim_camera_folder_wrappers(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "archive"
+    raw = source / "DCIM" / "100CANON" / "IMG_0001.CR3"
+    raw.parent.mkdir(parents=True)
+    destination.mkdir()
+    raw.write_bytes(b"raw")
+
+    plan = build_den_plan(
+        source,
+        destination,
+        layout_mode=DenLayoutMode.DATE,
+        folder_template="YYYY/YYYYMMDD",
+    )
+
+    assert plan.rows[0].destination_path.name == "IMG_0001.CR3"
+    assert "DCIM" not in plan.rows[0].destination_path.parts
+    assert "100CANON" not in plan.rows[0].destination_path.parts
 
 
 def test_den_preserve_dates_keeps_date_folder_label_and_file_name(tmp_path: Path) -> None:

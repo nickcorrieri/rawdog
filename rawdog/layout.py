@@ -78,7 +78,7 @@ def analyze_source_layout(
             confidence=100,
             signals=["No RAW files found."],
         )
-    raw_dump_files = sum(1 for item in items if _looks_like_camera_dump(item))
+    raw_dump_files = sum(1 for item in items if _looks_like_camera_dump(root, item))
     organized_files = sum(1 for item in items if _looks_organized(item))
     raw_ratio = raw_dump_files / len(items)
     organized_ratio = organized_files / len(items)
@@ -125,7 +125,9 @@ def analyze_source_layout(
     )
 
 
-def _looks_like_camera_dump(item: InventoryItem) -> bool:
+def _looks_like_camera_dump(root: Path, item: InventoryItem) -> bool:
+    if _is_camera_dump_part(root.name):
+        return True
     if any(_is_camera_dump_part(part) for part in item.relative_path.parts[:-1]):
         return True
     return bool(CAMERA_FILENAME_RE.match(item.path.stem)) and not _looks_organized(item)
@@ -145,3 +147,7 @@ def _looks_organized(item: InventoryItem) -> bool:
 def _is_camera_dump_part(part: str) -> bool:
     normalized = part.lower()
     return normalized in CAMERA_DUMP_PARTS or bool(CAMERA_DUMP_FOLDER_RE.match(part))
+
+
+def is_camera_dump_part(part: str) -> bool:
+    return _is_camera_dump_part(part)

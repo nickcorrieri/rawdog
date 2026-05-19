@@ -10,6 +10,7 @@ from pathlib import Path
 from rawdog.copier import append_only_copy, append_only_move
 from rawdog.datefolders import normalize_date_folder_parts
 from rawdog.inventory import InventoryItem, scan_raw_files
+from rawdog.layout import is_camera_dump_part
 from rawdog.metadata import capture_time_fallback
 from rawdog.models import DenLayoutMode, DenTransferAction
 from rawdog.planner import default_date_only_destination, default_project_destination
@@ -76,7 +77,7 @@ def build_den_plan(
     excluded_roots = [path.expanduser().resolve() for path in (exclude_roots or [])]
     items = scan_raw_files(source_root, exclude_roots=excluded_roots, limit=limit)
     earliest = min((capture_time_fallback(item.path) for item in items), default=datetime.now(UTC))
-    if layout_mode in {DenLayoutMode.PRESERVE, DenLayoutMode.PRESERVE_DATES}:
+    if layout_mode in {DenLayoutMode.PRESERVE, DenLayoutMode.PRESERVE_DATES, DenLayoutMode.DATE}:
         destination_folder = destination_root
     elif layout_mode == DenLayoutMode.PROJECT or project_name:
         destination_folder = default_project_destination(
@@ -85,15 +86,15 @@ def build_den_plan(
             earliest,
             folder_template,
         )
-    else:
-        destination_folder = default_date_only_destination(destination_root, earliest, folder_template)
 
     rows = [
         _plan_row(
             source_root,
+            destination_root,
             destination_folder,
             item,
-            normalize_date_folders=layout_mode == DenLayoutMode.PRESERVE_DATES,
+            layout_mode=layout_mode,
+            folder_template=folder_template,
         )
         for item in items
     ]
@@ -178,17 +179,25 @@ def score_items(items: list[InventoryItem]) -> LibraryScore:
 
 def _plan_row(
     source_root: Path,
+    destination_root: Path,
     destination_folder: Path,
     item: InventoryItem,
     *,
-    normalize_date_folders: bool = False,
+    layout_mode: DenLayoutMode,
+    folder_template: str,
 ) -> DenPlanRow:
-    relative_path = (
-        _normalize_relative_date_folders(item.relative_path)
-        if normalize_date_folders
-        else item.relative_path
-    )
-    destination = destination_folder / relative_path
+    if layout_mode == DenLayoutMode.DATE or (
+        layout_mode == DenLayoutMode.PRESERVE_DATES
+        and _is_camera_dump_relative_path(source_root, item.relative_path)
+    ):
+        captured_at = capture_time_fallback(item.path)
+        destination = default_date_only_destination(destination_root, captured_at, folder_template) / item.path.name
+    elif layout_mode == DenLayoutMode.PRESERVE_DATES:
+        destination = destination_folder / _normalize_relative_date_folders(item.relative_path)
+    elif layout_mode == DenLayoutMode.PROJECT:
+        destination = destination_folder / item.path.name
+    else:
+        destination = destination_folder / item.relative_path
     status = "plan_copy"
     if destination.exists():
         if destination.name == item.path.name and destination.stat().st_size == item.size_bytes:
@@ -201,6 +210,13 @@ def _plan_row(
         size_bytes=item.size_bytes,
         status=status,
     )
+
+
+def _is_camera_dump_relative_path(source_root: Path, relative_path: Path) -> bool:
+    if is_camera_dump_part(source_root.name):
+        return True
+    parent_parts = relative_path.parts[:-1]
+    return bool(parent_parts) and all(is_camera_dump_part(part) for part in parent_parts)
 
 
 def _normalize_relative_date_folders(relative_path: Path) -> Path:
