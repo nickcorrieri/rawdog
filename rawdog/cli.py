@@ -9,6 +9,15 @@ from pathlib import Path
 import typer
 from rich.console import Console
 from rich.panel import Panel
+from rich.progress import (
+    BarColumn,
+    Progress,
+    SpinnerColumn,
+    TaskProgressColumn,
+    TextColumn,
+    TimeElapsedColumn,
+    TimeRemainingColumn,
+)
 from rich.prompt import Prompt
 from rich.table import Table
 from rich.text import Text
@@ -663,6 +672,46 @@ def _format_bytes(size_bytes: int) -> str:
             return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
         value /= 1000
     return f"{value:.1f} TB"
+
+
+def _format_duration(seconds: float) -> str:
+    minutes = max(1, round(seconds / 60))
+    if minutes < 60:
+        return f"{minutes} min"
+    hours = minutes // 60
+    remainder = minutes % 60
+    return f"{hours} hr {remainder} min" if remainder else f"{hours} hr"
+
+
+def _same_filesystem_best_effort(source_root: Path, destination_root: Path) -> bool:
+    try:
+        return source_root.stat().st_dev == destination_root.stat().st_dev
+    except OSError:
+        return False
+
+
+def _print_big_job_warning(plan: DenPlan, source_root: Path, destination_root: Path, action: DenTransferAction) -> None:
+    if plan.files_to_transfer < 1000 and plan.bytes_to_transfer < 50_000_000_000:
+        return
+    estimates = []
+    for mbps in (30, 50, 80, 120):
+        seconds = plan.bytes_to_transfer / (mbps * 1_000_000)
+        estimates.append(f"{mbps} MB/s: {_format_duration(seconds)}")
+    lines = [
+        f"Queued: {plan.files_to_transfer} files / {_format_bytes(plan.bytes_to_transfer)}",
+        "Copy estimates are rough and depend on drive speed, cable, filesystem, and current load.",
+        "Estimated transfer time: " + " | ".join(estimates),
+    ]
+    if action == DenTransferAction.COPY and _same_filesystem_best_effort(source_root, destination_root):
+        lines.append(
+            "Source and destination appear to be on the same filesystem; copy may be slower because the "
+            "drive is reading and writing at the same time."
+        )
+        lines.append(
+            "For reviewed same-drive consolidation, --action move is faster and preserves Finder Created date."
+        )
+    lines.append("During commit, RAWDOG updates progress by file and bytes copied.")
+    console.print(Panel("\n".join(lines), title="Large Job", border_style="bright_yellow", style=STYLE_PANEL))
 
 
 def _choose_store_path(label: str, store_kind: StoreKind) -> Path:
@@ -2027,85 +2076,146 @@ def _execute_persisted_plan(config: RawdogConfig, plan_id: int) -> ExecutionPlan
     failed = 0
     review_paths: list[Path] = []
     failed_paths: list[Path] = []
-    for row in rows:
-        if row.status not in {"plan_copy", "planned", "failed"}:
-            audit_status = _audit_execution_row(row, row.status)
-            if audit_status.startswith("needs") or audit_status.endswith("missing"):
-                review += 1
-                review_paths.append(row.destination_path)
-            if row.status.startswith("skip"):
-                skipped += 1
-            with session(config.database_path) as connection:
-                if audit_status == "destination_verified":
-                    store = find_store_for_path(connection, row.destination_path, StoreKind.DEN)
-                    if store:
-                        record_store_file(
-                            store,
-                            store_path=row.destination_path,
-                            original_source_path=row.source_path,
-                            size_bytes=row.size_bytes,
-                            execution_plan_id=plan_id,
-                            execution_row_id=row.row_id,
+    total_bytes = sum(row.size_bytes for row in rows if row.status in {"plan_copy", "planned", "failed"})
+    console.print(
+        Panel(
+            "\n".join(
+                [
+                    f"Rows: {len(rows)}",
+                    f"Bytes queued: {_format_bytes(total_bytes)}",
+                    "Progress updates after every file and during copy byte transfer.",
+                ]
+            ),
+            title=f"Executing Plan #{plan_id}",
+            border_style="bright_green",
+            style=STYLE_PANEL,
+        )
+    )
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[bold bright_green on black]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        TextColumn("[bright_white on black]{task.fields[status]}"),
+        TimeElapsedColumn(),
+        TimeRemainingColumn(),
+        console=console,
+    ) as progress:
+        file_task = progress.add_task("Files", total=len(rows), status="starting")
+        byte_task = progress.add_task("Bytes", total=total_bytes or 1, status=_format_bytes(0))
+        bytes_advanced_total = 0
+        for row in rows:
+            progress.update(
+                file_task,
+                status=(
+                    f"{transferred} copied / {skipped} skipped / {failed} failed - "
+                    f"{row.source_path.name} -> {row.destination_path.parent}"
+                ),
+            )
+            row_bytes_advanced = 0
+
+            def advance_bytes(amount: int) -> None:
+                nonlocal bytes_advanced_total, row_bytes_advanced
+                row_bytes_advanced += amount
+                bytes_advanced_total += amount
+                progress.advance(byte_task, amount)
+                progress.update(byte_task, status=_format_bytes(bytes_advanced_total))
+
+            if row.status not in {"plan_copy", "planned", "failed"}:
+                audit_status = _audit_execution_row(row, row.status)
+                if audit_status.startswith("needs") or audit_status.endswith("missing"):
+                    review += 1
+                    review_paths.append(row.destination_path)
+                if row.status.startswith("skip"):
+                    skipped += 1
+                with session(config.database_path) as connection:
+                    if audit_status == "destination_verified":
+                        store = find_store_for_path(connection, row.destination_path, StoreKind.DEN)
+                        if store:
+                            record_store_file(
+                                store,
+                                store_path=row.destination_path,
+                                original_source_path=row.source_path,
+                                size_bytes=row.size_bytes,
+                                execution_plan_id=plan_id,
+                                execution_row_id=row.row_id,
+                            )
+                    update_execution_plan_row(
+                        connection,
+                        row.row_id,
+                        status=row.status,
+                        audit_status=audit_status,
+                    )
+                progress.advance(file_task, 1)
+                continue
+            try:
+                if plan.destination_root is None:
+                    raise SafetyError("execution plan is missing destination root")
+                if (
+                    row.transfer_action == DenTransferAction.MOVE
+                    and not row.source_path.exists()
+                    and row.destination_path.exists()
+                    and row.destination_path.stat().st_size == row.size_bytes
+                ):
+                    status = "moved"
+                    advance_bytes(row.size_bytes)
+                else:
+                    status = (
+                        append_only_move(row.source_path, row.destination_path, plan.destination_root)
+                        if row.transfer_action == DenTransferAction.MOVE
+                        else append_only_copy(
+                            row.source_path,
+                            row.destination_path,
+                            plan.destination_root,
+                            progress_callback=advance_bytes,
                         )
-                update_execution_plan_row(
-                    connection,
-                    row.row_id,
-                    status=row.status,
-                    audit_status=audit_status,
-                )
-            continue
-        try:
-            if plan.destination_root is None:
-                raise SafetyError("execution plan is missing destination root")
-            if (
-                row.transfer_action == DenTransferAction.MOVE
-                and not row.source_path.exists()
-                and row.destination_path.exists()
-                and row.destination_path.stat().st_size == row.size_bytes
-            ):
-                status = "moved"
-            else:
-                status = (
-                    append_only_move(row.source_path, row.destination_path, plan.destination_root)
-                    if row.transfer_action == DenTransferAction.MOVE
-                    else append_only_copy(row.source_path, row.destination_path, plan.destination_root)
-                )
-            audit_status = _audit_execution_row(row, status)
-            if status in {"copied", "moved"}:
-                transferred += 1
-            elif status.startswith("skipped"):
-                skipped += 1
-            if audit_status.startswith("needs") or audit_status.endswith("missing"):
-                review += 1
-                review_paths.append(row.destination_path)
-            with session(config.database_path) as connection:
-                if audit_status == "destination_verified":
-                    store = find_store_for_path(connection, row.destination_path, StoreKind.DEN)
-                    if store:
-                        record_store_file(
-                            store,
-                            store_path=row.destination_path,
-                            original_source_path=row.source_path,
-                            size_bytes=row.size_bytes,
-                            execution_plan_id=plan_id,
-                            execution_row_id=row.row_id,
-                        )
-                update_execution_plan_row(
-                    connection,
-                    row.row_id,
-                    status=status,
-                    audit_status=audit_status,
-                )
-        except Exception as exc:
-            failed += 1
-            failed_paths.append(row.destination_path)
-            with session(config.database_path) as connection:
-                update_execution_plan_row(
-                    connection,
-                    row.row_id,
-                    status="failed",
-                    audit_status="not_audited",
-                    error=str(exc),
+                    )
+                    if status == "moved" and row_bytes_advanced == 0:
+                        advance_bytes(row.size_bytes)
+                if row_bytes_advanced < row.size_bytes and status.startswith("skipped"):
+                    advance_bytes(row.size_bytes - row_bytes_advanced)
+                audit_status = _audit_execution_row(row, status)
+                if status in {"copied", "moved"}:
+                    transferred += 1
+                elif status.startswith("skipped"):
+                    skipped += 1
+                if audit_status.startswith("needs") or audit_status.endswith("missing"):
+                    review += 1
+                    review_paths.append(row.destination_path)
+                with session(config.database_path) as connection:
+                    if audit_status == "destination_verified":
+                        store = find_store_for_path(connection, row.destination_path, StoreKind.DEN)
+                        if store:
+                            record_store_file(
+                                store,
+                                store_path=row.destination_path,
+                                original_source_path=row.source_path,
+                                size_bytes=row.size_bytes,
+                                execution_plan_id=plan_id,
+                                execution_row_id=row.row_id,
+                            )
+                    update_execution_plan_row(
+                        connection,
+                        row.row_id,
+                        status=status,
+                        audit_status=audit_status,
+                    )
+            except Exception as exc:
+                failed += 1
+                failed_paths.append(row.destination_path)
+                with session(config.database_path) as connection:
+                    update_execution_plan_row(
+                        connection,
+                        row.row_id,
+                        status="failed",
+                        audit_status="not_audited",
+                        error=str(exc),
+                    )
+            finally:
+                progress.advance(file_task, 1)
+                progress.update(
+                    file_task,
+                    status=f"{transferred} copied / {skipped} skipped / {failed} failed",
                 )
 
     final_status = ExecutionPlanStatus.DONE
@@ -2325,6 +2435,7 @@ def den(
     collisions = sum(1 for row in plan.rows if row.status == "collision")
     console.print(f"Skipped existing: {skipped}")
     console.print(f"Collisions needing review: {collisions}")
+    _print_big_job_warning(plan, source_root, destination_root, effective_action)
     collision_paths = [row.destination_path for row in plan.rows if row.status == "collision"]
     _print_ai_review_prompt(
         "destination collisions",

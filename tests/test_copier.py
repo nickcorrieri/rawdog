@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+import rawdog.copier as copier
 from rawdog.copier import append_only_copy, append_only_move
 from rawdog.safety import SafetyError
 
@@ -34,6 +35,39 @@ def test_append_only_copy_success_removes_partial(tmp_path: Path) -> None:
     assert status == "copied"
     assert destination.read_bytes() == b"raw"
     assert not destination.with_name(destination.name + ".partial").exists()
+
+
+def test_append_only_copy_reports_progress_bytes(tmp_path: Path) -> None:
+    source = tmp_path / "source.CR3"
+    destination = tmp_path / "archive" / "source.CR3"
+    source.write_bytes(b"rawdata")
+    destination.parent.mkdir()
+    chunks: list[int] = []
+
+    status = append_only_copy(
+        source,
+        destination,
+        tmp_path / "archive",
+        progress_callback=chunks.append,
+    )
+
+    assert status == "copied"
+    assert sum(chunks) == len(b"rawdata")
+    assert destination.read_bytes() == b"rawdata"
+
+
+def test_append_only_copy_attempts_birthtime_preservation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = tmp_path / "source.CR3"
+    destination = tmp_path / "archive" / "source.CR3"
+    source.write_bytes(b"raw")
+    destination.parent.mkdir()
+    calls: list[tuple[Path, Path]] = []
+    monkeypatch.setattr(copier, "_preserve_macos_birthtime", lambda src, dst: calls.append((src, dst)))
+
+    status = append_only_copy(source, destination, tmp_path / "archive")
+
+    assert status == "copied"
+    assert calls == [(source, destination)]
 
 
 def test_append_only_copy_timestamps_new_date_folders(tmp_path: Path) -> None:

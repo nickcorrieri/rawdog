@@ -292,6 +292,18 @@ If RAWDOG is interrupted, rerun `rawdog plans list`, inspect the latest started
 or incomplete plan, review its filesystem manifest with `rawdog plans ops PLAN_ID`,
 then press `r` from the operation review or run `rawdog plans run PLAN_ID`.
 Rows already copied, moved, skipped, or held for review are not blindly repeated.
+During execution, RAWDOG shows live progress for total files, total bytes, the
+current source/destination, elapsed time, and copied/skipped/failed counts.
+For large copy jobs, RAWDOG prints a rough time estimate before commit so the
+operator can decide whether to run now or leave the plan queued.
+
+For same-drive consolidation, `--action move` uses an atomic filesystem rename
+and usually preserves Finder Created date because the original file record moves.
+For copy mode, RAWDOG copies to `.partial`, renames into place, then immediately
+attempts to preserve macOS Finder Created date on that completed destination file
+before continuing to the next file. This is best-effort because creation time is
+filesystem-specific; RAWDOG still preserves modified time and records the source,
+destination, and capture-date-derived plan in its database and manifest.
 
 Old dry-run plans can be pruned from the local RAWDOG database. Prune is
 conservative by default: it removes only old `planned` plans, never `started`,

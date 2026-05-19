@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import ctypes
 import os
 import shutil
+import sys
+from collections.abc import Callable
 from pathlib import Path
 
 from rawdog.compare import same_name_and_size
@@ -16,6 +19,7 @@ def append_only_copy(
     destination: Path,
     archive_root: Path,
     dry_run: bool = False,
+    progress_callback: Callable[[int], None] | None = None,
 ) -> str:
     ensure_archive_destination(destination, archive_root)
     if destination.exists():
@@ -32,14 +36,84 @@ def append_only_copy(
     if partial.exists():
         return "skipped_existing_partial"
     try:
-        shutil.copy2(source, partial)
+        _copy2_with_progress(source, partial, progress_callback=progress_callback)
         os.rename(partial, destination)
+        _preserve_macos_birthtime(source, destination)
         _timestamp_created_date_dirs(created_dirs)
     except Exception:
         if partial.exists():
             partial.unlink()
         raise
     return "copied"
+
+
+def _copy2_with_progress(
+    source: Path,
+    destination: Path,
+    *,
+    progress_callback: Callable[[int], None] | None = None,
+    chunk_size: int = 1024 * 1024,
+) -> None:
+    if progress_callback is None:
+        shutil.copy2(source, destination)
+        return
+    with source.open("rb") as source_handle, destination.open("wb") as destination_handle:
+        while True:
+            chunk = source_handle.read(chunk_size)
+            if not chunk:
+                break
+            destination_handle.write(chunk)
+            progress_callback(len(chunk))
+    shutil.copystat(source, destination)
+
+
+def _preserve_macos_birthtime(source: Path, destination: Path) -> None:
+    if sys.platform != "darwin":
+        return
+    birthtime = getattr(source.stat(), "st_birthtime", None)
+    if birthtime is None:
+        return
+    try:
+        _set_macos_birthtime(destination, birthtime)
+    except OSError:
+        return
+
+
+def _set_macos_birthtime(path: Path, timestamp: float) -> None:
+    class AttrList(ctypes.Structure):
+        _fields_ = [
+            ("bitmapcount", ctypes.c_ushort),
+            ("reserved", ctypes.c_ushort),
+            ("commonattr", ctypes.c_uint),
+            ("volattr", ctypes.c_uint),
+            ("dirattr", ctypes.c_uint),
+            ("fileattr", ctypes.c_uint),
+            ("forkattr", ctypes.c_uint),
+        ]
+
+    class Timespec(ctypes.Structure):
+        _fields_ = [
+            ("tv_sec", ctypes.c_long),
+            ("tv_nsec", ctypes.c_long),
+        ]
+
+    attr_bit_map_count = 5
+    attr_cmn_crtime = 0x00000200
+    fsopt_no_follow = 0x00000001
+    attr_list = AttrList(attr_bit_map_count, 0, attr_cmn_crtime, 0, 0, 0, 0)
+    seconds = int(timestamp)
+    nanoseconds = int((timestamp - seconds) * 1_000_000_000)
+    timespec = Timespec(seconds, nanoseconds)
+    libc = ctypes.CDLL("libc.dylib", use_errno=True)
+    result = libc.setattrlist(
+        os.fsencode(path),
+        ctypes.byref(attr_list),
+        ctypes.byref(timespec),
+        ctypes.sizeof(timespec),
+        fsopt_no_follow,
+    )
+    if result != 0:
+        raise OSError(ctypes.get_errno(), "failed to preserve macOS creation time", str(path))
 
 
 def append_only_move(
