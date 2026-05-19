@@ -1277,6 +1277,30 @@ def _home_status() -> None:
     for plan in plans:
         table.add_row(str(plan.plan_id), plan.status.value, plan.what)
     console.print(table)
+    if not _yes_no("Review operation paths for a recent plan?", default=False):
+        return
+    plan_ids = {str(plan.plan_id): plan.plan_id for plan in plans}
+    plan_choice = Prompt.ask(
+        "Plan ID",
+        choices=list(plan_ids),
+        default=str(plans[0].plan_id),
+        console=console,
+    )
+    mode = Prompt.ask(
+        "Review mode",
+        choices=["concise", "verbose"],
+        default="concise",
+        console=console,
+    )
+    with session(config.database_path) as connection:
+        rows = list_execution_plan_rows(connection, plan_ids[plan_choice])
+    _print_plan_operation_review(
+        config,
+        plan_ids[plan_choice],
+        rows,
+        limit=50,
+        verbose=mode == "verbose",
+    )
 
 
 def _home_store_setup() -> None:
@@ -1832,6 +1856,7 @@ def _print_plan_operation_review(
     *,
     limit: int = 20,
     export_path: Path | None = None,
+    verbose: bool = False,
 ) -> Path:
     manifest_path = _write_plan_operation_manifest(config, plan_id, rows, export_path)
     console.print(
@@ -1848,8 +1873,9 @@ def _print_plan_operation_review(
             style=STYLE_PANEL,
         )
     )
+    _print_destination_folder_summary(rows)
     table = _styled_table(
-        title=f"Plan #{plan_id} Operations Preview",
+        title=f"Plan #{plan_id} {'Verbose ' if verbose else ''}Operations Preview",
         style=STYLE_PANEL,
         row_styles=STYLE_ROWS,
         expand=True,
@@ -1857,17 +1883,20 @@ def _print_plan_operation_review(
     table.add_column("Row", justify="right", width=7, no_wrap=True)
     table.add_column("Operation", width=18)
     table.add_column("Write", justify="center", width=5, no_wrap=True)
-    table.add_column("Full Paths", overflow="fold")
+    table.add_column("Full Paths" if verbose else "Path", overflow="fold")
     for item in _operation_manifest_rows(rows[:limit]):
-        details = "\n".join(
-            [
-                f"API: {item['python_api']}",
-                f"Source: {item['source_path']}",
-                f"Destination: {item['destination_path']}",
-                f"Partial: {item['partial_path'] or '-'}",
-                f"Rule: {item['safety_rule']}",
-            ]
-        )
+        if verbose:
+            details = "\n".join(
+                [
+                    f"API: {item['python_api']}",
+                    f"Source: {item['source_path']}",
+                    f"Destination: {item['destination_path']}",
+                    f"Partial: {item['partial_path'] or '-'}",
+                    f"Rule: {item['safety_rule']}",
+                ]
+            )
+        else:
+            details = f"{item['source_path']} -> {item['destination_path']}"
         table.add_row(
             str(item["row_id"]),
             str(item["operation"]),
@@ -1878,6 +1907,26 @@ def _print_plan_operation_review(
     if len(rows) > limit:
         console.print(f"[bold bright_yellow on black]Showing first {limit} of {len(rows)} operations.[/]")
     return manifest_path
+
+
+def _print_destination_folder_summary(rows: list[ExecutionPlanRow], *, limit: int = 10) -> None:
+    counts: dict[Path, int] = {}
+    bytes_by_folder: dict[Path, int] = {}
+    for row in rows:
+        if row.status not in {"plan_copy", "planned", "failed"}:
+            continue
+        folder = row.destination_path.parent
+        counts[folder] = counts.get(folder, 0) + 1
+        bytes_by_folder[folder] = bytes_by_folder.get(folder, 0) + row.size_bytes
+    if not counts:
+        return
+    table = _styled_table(title=f"Top {min(limit, len(counts))} Destination Folders", expand=True)
+    table.add_column("Files", justify="right", width=7)
+    table.add_column("GB", justify="right", width=8)
+    table.add_column("Folder", overflow="fold")
+    for folder, count in sorted(counts.items(), key=lambda item: item[1], reverse=True)[:limit]:
+        table.add_row(str(count), f"{bytes_by_folder[folder] / 1_000_000_000:.2f}", str(folder))
+    console.print(table)
 
 
 def _prompt_run_reviewed_plan(config: RawdogConfig, plan_id: int) -> None:
@@ -1902,15 +1951,15 @@ def _prompt_dry_run_plan_next(config: RawdogConfig, plan_id: int) -> None:
         return
     while True:
         choice = Prompt.ask(
-            f"[bold bright_yellow on black]Next for dry-run plan #{plan_id}: v = view paths, r = run, p = pause[/]",
-            choices=["v", "r", "p"],
-            default="v",
+            f"[bold bright_yellow on black]Next for dry-run plan #{plan_id}: c = concise paths, v = verbose, r = run, p = pause[/]",
+            choices=["c", "v", "r", "p"],
+            default="c",
             console=console,
         )
-        if choice == "v":
+        if choice in {"c", "v"}:
             with session(config.database_path) as connection:
                 rows = list_execution_plan_rows(connection, plan_id)
-            _print_plan_operation_review(config, plan_id, rows, limit=50)
+            _print_plan_operation_review(config, plan_id, rows, limit=50, verbose=choice == "v")
             continue
         if choice == "r":
             _confirm_and_execute_plan(config, plan_id, action="Run")
@@ -2826,6 +2875,7 @@ def plans_ops(
     plan_id: int = typer.Argument(...),
     limit: int = typer.Option(50, "--limit", min=1, max=500, help="Rows to preview in terminal."),
     export: Path | None = typer.Option(None, "--export", "-o", help="Optional CSV export path."),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show API, partial path, and safety rule details."),
 ) -> None:
     """Review exact Python filesystem operations for a persisted plan."""
     _, config = _load_or_exit()
@@ -2835,7 +2885,7 @@ def plans_ops(
             raise typer.BadParameter(f"Unknown plan: {plan_id}")
         rows = list_execution_plan_rows(connection, plan_id)
     _print_execution_plan_start(plan)
-    _print_plan_operation_review(config, plan_id, rows, limit=limit, export_path=export)
+    _print_plan_operation_review(config, plan_id, rows, limit=limit, export_path=export, verbose=verbose)
     _prompt_run_reviewed_plan(config, plan_id)
 
 
