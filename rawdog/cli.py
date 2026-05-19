@@ -1886,6 +1886,29 @@ def _prompt_run_reviewed_plan(config: RawdogConfig, plan_id: int) -> None:
         console.print(f"Plan #{plan_id} left paused.")
 
 
+def _prompt_dry_run_plan_next(config: RawdogConfig, plan_id: int) -> None:
+    if not sys.stdin.isatty():
+        console.print(f"[bold bright_yellow on black]Next:[/] run `rawdog plans ops {plan_id}` to inspect paths.")
+        return
+    while True:
+        choice = Prompt.ask(
+            f"[bold bright_yellow on black]Next for dry-run plan #{plan_id}: v = view paths, r = run, p = pause[/]",
+            choices=["v", "r", "p"],
+            default="v",
+            console=console,
+        )
+        if choice == "v":
+            with session(config.database_path) as connection:
+                rows = list_execution_plan_rows(connection, plan_id)
+            _print_plan_operation_review(config, plan_id, rows, limit=50)
+            continue
+        if choice == "r":
+            _confirm_and_execute_plan(config, plan_id, action="Run")
+            return
+        console.print(f"Plan #{plan_id} left paused. Review later with `rawdog plans ops {plan_id}`.")
+        return
+
+
 def _confirm_and_execute_plan(
     config: RawdogConfig,
     plan_id: int,
@@ -2256,9 +2279,10 @@ def den(
         manifest_path = _write_plan_operation_manifest(config, execution_plan.plan_id, rows)
         console.print(
             f"Plan #{execution_plan.plan_id} written to the database. "
-            "Re-run with --commit to execute after reviewing."
+            "Review operation paths before executing."
         )
         console.print(f"Operation manifest written: {manifest_path}")
+        _prompt_dry_run_plan_next(config, execution_plan.plan_id)
         return
     _confirm_and_execute_plan(config, execution_plan.plan_id, action="Execute")
     with session(config.database_path) as connection:
