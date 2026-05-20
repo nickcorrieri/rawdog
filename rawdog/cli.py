@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 import sqlite3
 import sys
 from datetime import UTC, date, datetime
@@ -131,14 +132,14 @@ app = typer.Typer(
     no_args_is_help=False,
 )
 
-STYLE_TEXT = "bright_white on grey7"
-STYLE_TITLE = "bold bright_green on grey7"
+STYLE_TEXT = "bright_white on black"
+STYLE_TITLE = "bold bright_green on black"
 STYLE_ACTION = "bold black on bright_yellow"
-STYLE_SAFE = "bold bright_green on grey7"
+STYLE_SAFE = "bold bright_green on black"
 STYLE_WARN = "bold bright_white on dark_red"
-STYLE_PATH = "bold bright_cyan on grey7"
+STYLE_PATH = "bold bright_cyan on black"
 STYLE_MUTED = "bright_white on grey15"
-STYLE_ROW = "bright_white on grey7"
+STYLE_ROW = "bright_white on black"
 STYLE_ROW_ALT = "bright_white on grey11"
 STYLE_ROW_HEADER = "bold bright_white on grey15"
 STYLE_ROW_SELECTED = "bold black on bright_yellow"
@@ -211,14 +212,19 @@ def _print_option(key: str, text: str) -> None:
     _print_full_row([(key, STYLE_ROW_SELECTED), (" ", STYLE_ROW), (text, STYLE_ROW)], style=STYLE_ROW)
 
 
+def _terminal_width() -> int:
+    return max(console.width, shutil.get_terminal_size((console.width, 24)).columns)
+
+
 def _print_full_row(parts: list[tuple[str, str]], *, style: str = STYLE_ROW) -> None:
     row = Text(style=style)
     for value, part_style in parts:
         row.append(value, style=part_style)
-    lines = row.wrap(console, console.width, overflow="fold")
+    width = _terminal_width()
+    lines = row.wrap(console, width, overflow="fold")
     for line in lines or [row]:
-        if line.cell_len < console.width:
-            line.append(" " * (console.width - line.cell_len), style=style)
+        if line.cell_len < width:
+            line.append(" " * (width - line.cell_len), style=style)
         console.print(line, overflow="crop", no_wrap=True)
 
 
@@ -231,7 +237,7 @@ def _print_path_option(index: str, name: str, path: Path) -> None:
         [
             (f"{index}.", STYLE_ROW_SELECTED),
             (" ", STYLE_ROW),
-            (f"{name}: ", "bold bright_white on grey7"),
+            (f"{name}: ", "bold bright_white on black"),
             (str(path), STYLE_PATH),
         ],
         style=STYLE_ROW,
@@ -252,7 +258,7 @@ def _print_folder_option(index: str, name: str, size_bytes: int | None = None) -
         [
             (f"{index}.", STYLE_ROW_SELECTED),
             (" ", STYLE_ROW),
-            (name, "bold bright_white on grey7"),
+            (name, "bold bright_white on black"),
             (size, STYLE_MUTED),
         ],
         style=STYLE_ROW,
@@ -264,6 +270,8 @@ def _styled_table(*args, **kwargs) -> Table:
     kwargs.setdefault("row_styles", STYLE_ROWS)
     kwargs.setdefault("border_style", "bright_green")
     kwargs.setdefault("header_style", STYLE_ROW_HEADER)
+    kwargs.setdefault("expand", True)
+    kwargs.setdefault("width", _terminal_width())
     return Table(*args, **kwargs)
 
 
@@ -365,7 +373,7 @@ def _choose_den_destination_path(label: str) -> Path:
                 [
                     ("1.", STYLE_ROW_SELECTED),
                     (" ", STYLE_ROW),
-                    ("Default den from init: ", "bold bright_white on grey7"),
+                    ("Default den from init: ", "bold bright_white on black"),
                     ("not configured", STYLE_MUTED),
                 ],
                 style=STYLE_ROW,
@@ -1883,11 +1891,11 @@ def _persist_den_execution_plan(
 def _print_execution_plan_start(plan: ExecutionPlan) -> None:
     body = "\n".join(
         [
-            f"[bold bright_green on grey7]What we're doing:[/] [bright_white on grey7]{plan.what}[/]",
-            f"[bold bright_cyan on grey7]What we're doing it to:[/] [bright_white on grey7]{plan.subject}[/]",
-            f"[bold black on bright_yellow]What should be where when done:[/] [bright_white on grey7]{plan.expected_result}[/]",
-            f"[bold bright_green on grey7]Execution:[/] [bright_white on grey7]{plan.execution_summary}[/]",
-            f"[bold black on bright_yellow]Post audit:[/] [bright_white on grey7]{plan.post_audit_summary}[/]",
+            f"[bold bright_green on black]What we're doing:[/] [bright_white on black]{plan.what}[/]",
+            f"[bold bright_cyan on black]What we're doing it to:[/] [bright_white on black]{plan.subject}[/]",
+            f"[bold black on bright_yellow]What should be where when done:[/] [bright_white on black]{plan.expected_result}[/]",
+            f"[bold bright_green on black]Execution:[/] [bright_white on black]{plan.execution_summary}[/]",
+            f"[bold black on bright_yellow]Post audit:[/] [bright_white on black]{plan.post_audit_summary}[/]",
         ]
     )
     console.print(Panel(body, title=f"RAWDOG Plan #{plan.plan_id}", border_style="bright_green", style=STYLE_PANEL))
@@ -2106,12 +2114,24 @@ def _confirm_and_execute_plan(
         return
     if not review_already_shown:
         _print_plan_operation_review(config, plan_id, rows)
+    commit_phrase = f"COMMIT PLAN {plan_id}"
+    _print_full_row(
+        [
+            ("WRITE ACTION: ", STYLE_WARN),
+            (f"type {commit_phrase} to execute this plan", STYLE_WARN),
+        ],
+        style=STYLE_WARN,
+    )
+    _print_full_row(
+        [("Anything else leaves the plan paused.", STYLE_ROW_SELECTED)],
+        style=STYLE_ROW_SELECTED,
+    )
     confirmed = Prompt.ask(
-        f"[bold red]{action} this execution plan? Type COMMIT PLAN {plan_id}[/]",
+        _prompt(f"{action} this execution plan"),
         default="no",
         console=console,
     )
-    if confirmed != f"COMMIT PLAN {plan_id}":
+    if confirmed != commit_phrase:
         console.print("Plan not executed.")
         return
     finished = _execute_persisted_plan(config, plan_id)
@@ -2165,10 +2185,10 @@ def _execute_persisted_plan(config: RawdogConfig, plan_id: int) -> ExecutionPlan
     )
     with Progress(
         SpinnerColumn(),
-        TextColumn("[bold bright_green on grey7]{task.description}"),
+        TextColumn("[bold bright_green on black]{task.description}"),
         BarColumn(),
         TaskProgressColumn(),
-        TextColumn("[bright_white on grey7]{task.fields[status]}"),
+        TextColumn("[bright_white on black]{task.fields[status]}"),
         TimeElapsedColumn(),
         TimeRemainingColumn(),
         console=console,
