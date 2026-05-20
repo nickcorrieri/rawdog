@@ -3,6 +3,7 @@
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from rawdog import cli
 from rawdog.db import initialize, session
 from rawdog.execution import (
     add_execution_plan_rows,
@@ -139,3 +140,37 @@ def test_delete_execution_plan_cascades_rows(tmp_path: Path) -> None:
         rows = list_execution_plan_rows(connection, plan.plan_id)
 
     assert rows == []
+
+
+def test_plan_review_filter_includes_failed_skipped_and_review_rows(tmp_path: Path) -> None:
+    rows = [
+        _row(1, "copied", "destination_verified"),
+        _row(2, "failed", "not_audited", error="disk full"),
+        _row(3, "skipped_existing_same_name_size", "not_applicable"),
+        _row(4, "planned", "destination_missing"),
+        _row(5, "planned", "needs_partial_review"),
+    ]
+
+    review_rows = [row for row in rows if cli._needs_plan_review(row)]
+
+    assert [row.row_id for row in review_rows] == [2, 3, 4, 5]
+
+
+def _row(
+    row_id: int,
+    status: str,
+    audit_status: str | None,
+    *,
+    error: str | None = None,
+):
+    return cli.ExecutionPlanRow(
+        row_id=row_id,
+        plan_id=10,
+        source_path=Path(f"/source/{row_id}.CR3"),
+        destination_path=Path(f"/dest/{row_id}.CR3"),
+        size_bytes=3,
+        transfer_action=DenTransferAction.COPY,
+        status=status,
+        audit_status=audit_status,
+        error=error,
+    )

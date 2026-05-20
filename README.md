@@ -134,6 +134,7 @@ rawdog queue run
 rawdog plans list
 rawdog plans show
 rawdog plans ops
+rawdog plans review
 rawdog plans resume
 rawdog plans active
 rawdog plans active-clear --force
@@ -335,6 +336,10 @@ destination, and capture-date-derived plan in its database and manifest.
 Old dry-run plans can be pruned from the local RAWDOG database. Prune is
 conservative by default: it removes only old `planned` plans, never `started`,
 `failed`, or `needs_review` plans.
+
+Use `rawdog plans review <id>` to inspect failed, skipped, held, and
+review-needed rows 20 at a time. Press Enter for the next page or `0` to stop
+inspection.
 
 ```bash
 rawdog plans prune --dry-run --keep 20

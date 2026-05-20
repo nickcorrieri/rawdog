@@ -963,26 +963,74 @@ def _destination_inside_source(source_root: Path, destination_root: Path) -> boo
     return source in destination.parents
 
 
-def _print_ai_review_prompt(title: str, paths: list[Path], suggestion: str) -> None:
-    if not paths:
+def _print_ai_review_prompt(
+    title: str,
+    paths: list[Path],
+    suggestion: str,
+    *,
+    plan_id: int | None = None,
+    rows: list[ExecutionPlanRow] | None = None,
+) -> None:
+    if not paths and not rows:
         return
-    shown_paths = paths[:8]
+    shown_rows = (rows or [])[:6]
+    shown_paths = paths[:8] if not shown_rows else []
     prompt_lines = [
         "This is what is going on:",
         f"RAWDOG found: {title}.",
         "",
-        "Relevant paths:",
-        *[f"- {path}" for path in shown_paths],
+        "Meaning:",
+        f"- {suggestion}",
+        "- RAWDOG has paused any cleanup-style decision for these rows.",
+        "- Do not delete or remove originals based only on this warning.",
+        "",
     ]
-    if len(paths) > len(shown_paths):
-        prompt_lines.append(f"- ...and {len(paths) - len(shown_paths)} more paths.")
+    if plan_id is not None:
+        prompt_lines.extend(
+            [
+                "Useful RAWDOG commands:",
+                f"- rawdog plans show {plan_id}",
+                f"- rawdog plans review {plan_id}",
+                f"- rawdog plans show {plan_id} --ops",
+                f"- rawdog plans ops {plan_id} --verbose --limit 100",
+                "",
+            ]
+        )
+    if shown_rows:
+        prompt_lines.append("Example rows to review:")
+        for row in shown_rows:
+            reason = _review_reason(row)
+            prompt_lines.extend(
+                [
+                    f"- Row #{row.row_id}: {reason}",
+                    f"  Source: {row.source_path}",
+                    f"  Destination: {row.destination_path}",
+                ]
+            )
+            if row.error:
+                prompt_lines.append(f"  Error: {row.error}")
+        if rows and len(rows) > len(shown_rows):
+            prompt_lines.append(f"- ...and {len(rows) - len(shown_rows)} more rows.")
+        prompt_lines.append("")
+    elif shown_paths:
+        prompt_lines.extend(["Relevant paths:", *[f"- {path}" for path in shown_paths]])
+        if len(paths) > len(shown_paths):
+            prompt_lines.append(f"- ...and {len(paths) - len(shown_paths)} more paths.")
+        prompt_lines.append("")
     prompt_lines.extend(
         [
+            "Decision options:",
+            "- Resume: only after the source, destination, mount, free space, and permissions look correct.",
+            "- Leave paused: safest choice if anything is unclear.",
+            "- Manually inspect: compare source and destination size/path before deciding.",
+            "- Skip: acceptable only when the destination copy is intentionally already present.",
+            "- Retry/resume: useful for mount, cable, free-space, or permission failures after fixing the cause.",
             "",
-            "I need help deciding what to do before taking any semi-destructive action.",
-            f"RAWDOG suggests: {suggestion}",
-            "Please help me validate whether I should keep, copy, move, skip, or manually inspect these files.",
-            "Do not suggest deleting originals unless I explicitly confirm I have verified backups.",
+            "Prompt to paste into ChatGPT/AI:",
+            "I need help reviewing a RAWDOG archival plan before taking any cleanup action.",
+            "Use the row IDs, source paths, destination paths, statuses, audit reasons, and errors below.",
+            "Help me decide whether to resume, leave paused, skip, retry, or manually inspect each group.",
+            "Do not suggest deleting originals unless I explicitly confirm verified backups.",
         ]
     )
     console.print(
@@ -991,6 +1039,39 @@ def _print_ai_review_prompt(title: str, paths: list[Path], suggestion: str) -> N
             title=f"Ask ChatGPT / AI Review Prompt: {title}",
             border_style="yellow",
         )
+    )
+
+
+def _review_reason(row: ExecutionPlanRow) -> str:
+    parts = [f"status={row.status}"]
+    if row.audit_status:
+        parts.append(f"audit={row.audit_status}")
+    if row.status == "failed":
+        parts.append("transfer failed before RAWDOG could verify the destination")
+    elif row.status in {"collision", "skipped_collision"}:
+        parts.append("same filename exists at destination with a different size")
+    elif row.status == "skipped_existing_partial":
+        parts.append("pre-existing .partial file requires manual review")
+    elif row.audit_status == "destination_missing":
+        parts.append("destination file is missing after transfer/audit")
+    elif row.audit_status == "size_mismatch":
+        parts.append("destination size does not match source")
+    elif row.audit_status and row.audit_status.startswith("needs"):
+        parts.append("manual review required before cleanup")
+    return "; ".join(parts)
+
+
+def _needs_plan_review(row: ExecutionPlanRow) -> bool:
+    audit_status = row.audit_status or ""
+    return (
+        row.status == "failed"
+        or row.status.startswith("skip")
+        or row.status.startswith("skipped")
+        or row.status in {"collision", "skipped_existing_partial"}
+        or audit_status.startswith("needs")
+        or audit_status.endswith("missing")
+        or audit_status == "size_mismatch"
+        or bool(row.error)
     )
 
 
@@ -2338,8 +2419,8 @@ def _execute_persisted_plan_unlocked(
     skipped = 0
     review = 0
     failed = 0
-    review_paths: list[Path] = []
-    failed_paths: list[Path] = []
+    review_rows: list[ExecutionPlanRow] = []
+    failed_rows: list[ExecutionPlanRow] = []
     total_bytes = sum(row.size_bytes for row in rows if row.status in {"plan_copy", "planned", "failed"})
     console.print(
         Panel(
@@ -2389,7 +2470,7 @@ def _execute_persisted_plan_unlocked(
                 audit_status = _audit_execution_row(row, row.status)
                 if audit_status.startswith("needs") or audit_status.endswith("missing"):
                     review += 1
-                    review_paths.append(row.destination_path)
+                    review_rows.append(row)
                 if row.status.startswith("skip"):
                     skipped += 1
                 with session(config.database_path) as connection:
@@ -2445,7 +2526,7 @@ def _execute_persisted_plan_unlocked(
                     skipped += 1
                 if audit_status.startswith("needs") or audit_status.endswith("missing"):
                     review += 1
-                    review_paths.append(row.destination_path)
+                    review_rows.append(row)
                 with session(config.database_path) as connection:
                     if audit_status == "destination_verified":
                         store = find_store_for_path(connection, row.destination_path, StoreKind.DEN)
@@ -2466,7 +2547,7 @@ def _execute_persisted_plan_unlocked(
                     )
             except Exception as exc:
                 failed += 1
-                failed_paths.append(row.destination_path)
+                failed_rows.append(row)
                 with session(config.database_path) as connection:
                     update_execution_plan_row(
                         connection,
@@ -2506,15 +2587,19 @@ def _execute_persisted_plan_unlocked(
         raise typer.BadParameter(f"Unknown plan: {plan_id}")
     _print_ai_review_prompt(
         "rows needing manual review",
-        review_paths,
+        [row.destination_path for row in review_rows],
         "do not move or clean these rows automatically; inspect the listed destination paths and "
         "compare against the matching source files first.",
+        plan_id=plan_id,
+        rows=review_rows,
     )
     _print_ai_review_prompt(
         "failed transfer rows",
-        failed_paths,
+        [row.destination_path for row in failed_rows],
         "pause execution, check mount state/free space/permissions, then resume the persisted plan "
         "only after the storage issue is understood.",
+        plan_id=plan_id,
+        rows=failed_rows,
     )
     return finished
 
@@ -3328,15 +3413,16 @@ def plans_show(
     review_paths = [
         row.destination_path
         for row in rows
-        if row.status in {"collision", "failed", "skipped_existing_partial"}
-        or (row.audit_status or "").startswith("needs")
-        or (row.audit_status or "").endswith("missing")
+        if _needs_plan_review(row)
     ]
+    review_rows = [row for row in rows if _needs_plan_review(row)]
     _print_ai_review_prompt(
         "persisted plan review items",
         review_paths,
         "keep the plan paused, inspect these paths, and only resume after you understand why RAWDOG "
         "held or failed these rows.",
+        plan_id=plan_id,
+        rows=review_rows,
     )
     if ops:
         _print_plan_operation_review(config, plan_id, rows)
@@ -3463,6 +3549,75 @@ def plans_skipped(
         _print_notice(f"Showing first {limit} of {len(skipped_rows)} skipped rows.", style=STYLE_ROW_SELECTED)
     if not skipped_rows:
         _print_notice("No skipped rows found for this plan.", style=STYLE_SAFE)
+
+
+def _print_plan_review_rows(plan_id: int, rows: list[ExecutionPlanRow], *, start: int, page_size: int) -> None:
+    page_rows = rows[start : start + page_size]
+    table = _styled_table(
+        title=f"Plan #{plan_id} Review Rows {start + 1}-{start + len(page_rows)} of {len(rows)}",
+        style=STYLE_PANEL,
+        row_styles=STYLE_ROWS,
+        expand=True,
+    )
+    table.add_column("Row", justify="right", no_wrap=True)
+    table.add_column("Status", no_wrap=True)
+    table.add_column("Audit", no_wrap=True)
+    table.add_column("Reason", overflow="fold")
+    table.add_column("Source", overflow="fold")
+    table.add_column("Destination", overflow="fold")
+    table.add_column("Error", overflow="fold")
+    for row in page_rows:
+        table.add_row(
+            str(row.row_id),
+            row.status,
+            row.audit_status or "",
+            _review_reason(row),
+            str(row.source_path),
+            str(row.destination_path),
+            row.error or "",
+        )
+    console.print(table)
+
+
+@plans_app.command("review")
+def plans_review(
+    plan_id: int = typer.Argument(...),
+    page_size: int = typer.Option(20, "--limit", min=1, max=100, help="Rows per page."),
+) -> None:
+    """Interactively inspect failed, skipped, held, and review-needed rows for a plan."""
+    _, config = _load_or_exit()
+    with session(config.database_path) as connection:
+        plan = get_execution_plan(connection, plan_id)
+        if plan is None:
+            raise typer.BadParameter(f"Unknown plan: {plan_id}")
+        rows = list_execution_plan_rows(connection, plan_id)
+    review_rows = [row for row in rows if _needs_plan_review(row)]
+    _print_execution_plan_start(plan)
+    if not review_rows:
+        _print_notice("No failed, skipped, held, or review-needed rows found.", style=STYLE_SAFE)
+        return
+    offset = 0
+    while True:
+        _print_plan_review_rows(plan_id, review_rows, start=offset, page_size=page_size)
+        next_offset = offset + page_size
+        if next_offset >= len(review_rows):
+            _print_notice("End of review rows.", style=STYLE_SAFE)
+            return
+        if not sys.stdin.isatty():
+            _print_notice(
+                f"Showing first {page_size} of {len(review_rows)} review rows. Re-run in a terminal to page.",
+                style=STYLE_ROW_SELECTED,
+            )
+            return
+        choice = Prompt.ask(
+            _prompt("Press Enter for next page, or 0 to quit inspection"),
+            default="",
+            console=console,
+        ).strip()
+        if choice == "0":
+            _print_notice("Inspection stopped.", style=STYLE_ROW_SELECTED)
+            return
+        offset = next_offset
 
 
 @plans_app.command("ops")
