@@ -1881,8 +1881,8 @@ def _operation_manifest_row(row: ExecutionPlanRow) -> dict[str, object]:
         "destination_path": row.destination_path,
         "partial_path": partial_path,
         "size_bytes": row.size_bytes,
-        "python_api": "Path.mkdir + shutil.copy2 + os.rename",
-        "safety_rule": "destination root containment; no overwrite; partial staging",
+        "python_api": "Path.mkdir + Python file copy/shutil.copystat + os.rename + macOS setattrlist best-effort",
+        "safety_rule": "destination root containment; no overwrite; partial staging; best-effort created-date preservation",
         "status": row.status,
         "will_write": "yes" if row.status in {"plan_copy", "planned", "failed"} else "no",
     }

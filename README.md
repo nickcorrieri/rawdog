@@ -316,8 +316,9 @@ rawdog plans prune --commit --keep 20
 
 RAWDOG does not shell out to hidden `cp`, `mv`, or `rm` commands for plan
 execution. It writes an operation manifest for each persisted plan showing the
-Python filesystem APIs it will use, such as `Path.mkdir`, `shutil.copy2`, and
-`os.rename`, plus the source, destination, partial path, and safety rule for
+Python filesystem APIs it will use, such as `Path.mkdir`, Python file copy,
+`shutil.copystat`, `os.rename`, and macOS `setattrlist` best-effort metadata
+preservation, plus the source, destination, partial path, and safety rule for
 each row. Commit and resume prompts require `COMMIT PLAN <id>` after this review.
 
 `.partial` files are temporary transfer artifacts created only under the

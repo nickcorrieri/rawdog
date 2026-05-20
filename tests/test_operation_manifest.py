@@ -21,7 +21,10 @@ def test_operation_manifest_documents_copy_python_apis(tmp_path: Path) -> None:
     item = _operation_manifest_row(row)
 
     assert item["operation"] == "copy_with_partial"
-    assert item["python_api"] == "Path.mkdir + shutil.copy2 + os.rename"
+    assert item["python_api"] == (
+        "Path.mkdir + Python file copy/shutil.copystat + os.rename + macOS setattrlist best-effort"
+    )
+    assert "best-effort created-date preservation" in item["safety_rule"]
     assert item["partial_path"] == tmp_path / "den" / "IMG_0001.CR3.partial"
     assert item["will_write"] == "yes"
 
