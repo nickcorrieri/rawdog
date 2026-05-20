@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 import sys
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -130,14 +131,17 @@ app = typer.Typer(
     no_args_is_help=False,
 )
 
-STYLE_TEXT = "bright_white on black"
-STYLE_TITLE = "bold bright_green on black"
-STYLE_ACTION = "bold bright_yellow on black"
-STYLE_SAFE = "bold bright_green on black"
-STYLE_WARN = "bold bright_red on black"
-STYLE_PATH = "bold bright_cyan on black"
-STYLE_ROW = "bright_white on black"
+STYLE_TEXT = "bright_white on grey7"
+STYLE_TITLE = "bold bright_green on grey7"
+STYLE_ACTION = "bold black on bright_yellow"
+STYLE_SAFE = "bold bright_green on grey7"
+STYLE_WARN = "bold bright_white on dark_red"
+STYLE_PATH = "bold bright_cyan on grey7"
+STYLE_MUTED = "bright_white on grey15"
+STYLE_ROW = "bright_white on grey7"
 STYLE_ROW_ALT = "bright_white on grey11"
+STYLE_ROW_HEADER = "bold bright_white on grey15"
+STYLE_ROW_SELECTED = "bold black on bright_yellow"
 STYLE_ROWS = [STYLE_ROW, STYLE_ROW_ALT]
 STYLE_PANEL = STYLE_TEXT
 console = Console(force_terminal=True, color_system="256", style=STYLE_TEXT)
@@ -200,29 +204,77 @@ def _print_init_guidance() -> None:
 
 
 def _prompt(text: str) -> str:
-    return f"[bold bright_yellow on black]{text}[/]"
+    return f"[bold black on bright_yellow]{text}[/]"
 
 
 def _print_option(key: str, text: str) -> None:
-    console.print(f"[bold bright_yellow on black]{key}[/] [bright_green on black]{text}[/]")
+    _print_full_row([(key, STYLE_ROW_SELECTED), (" ", STYLE_ROW), (text, STYLE_ROW)], style=STYLE_ROW)
+
+
+def _print_full_row(parts: list[tuple[str, str]], *, style: str = STYLE_ROW) -> None:
+    row = Text(style=style)
+    for value, part_style in parts:
+        row.append(value, style=part_style)
+    lines = row.wrap(console, console.width, overflow="fold")
+    for line in lines or [row]:
+        if line.cell_len < console.width:
+            line.append(" " * (console.width - line.cell_len), style=style)
+        console.print(line, overflow="crop", no_wrap=True)
+
+
+def _print_section_row(text: str, *, style: str = STYLE_ROW_HEADER) -> None:
+    _print_full_row([(text, style)], style=style)
+
+
+def _print_path_option(index: str, name: str, path: Path) -> None:
+    _print_full_row(
+        [
+            (f"{index}.", STYLE_ROW_SELECTED),
+            (" ", STYLE_ROW),
+            (f"{name}: ", "bold bright_white on grey7"),
+            (str(path), STYLE_PATH),
+        ],
+        style=STYLE_ROW,
+    )
+
+
+def _print_notice(text: str, *, style: str = STYLE_MUTED) -> None:
+    _print_full_row([(text, style)], style=style)
+
+
+def _print_error(text: str) -> None:
+    _print_full_row([(text, STYLE_WARN)], style=STYLE_WARN)
+
+
+def _print_folder_option(index: str, name: str, size_bytes: int | None = None) -> None:
+    size = f"  {_format_bytes(size_bytes)}" if size_bytes is not None else ""
+    _print_full_row(
+        [
+            (f"{index}.", STYLE_ROW_SELECTED),
+            (" ", STYLE_ROW),
+            (name, "bold bright_white on grey7"),
+            (size, STYLE_MUTED),
+        ],
+        style=STYLE_ROW,
+    )
 
 
 def _styled_table(*args, **kwargs) -> Table:
     kwargs.setdefault("style", STYLE_PANEL)
     kwargs.setdefault("row_styles", STYLE_ROWS)
     kwargs.setdefault("border_style", "bright_green")
-    kwargs.setdefault("header_style", "bold bright_white on black")
+    kwargs.setdefault("header_style", STYLE_ROW_HEADER)
     return Table(*args, **kwargs)
 
 
 def _choose_path(label: str, *, browse_number_selection: bool = False) -> Path:
     choices = _standard_path_choices(limit=9)
     while True:
-        console.print(f"{label} [dim](Ctrl-C to exit)[/]:")
+        _print_section_row(f"{label} (Ctrl-C to exit)")
         for index, (name, path) in enumerate(choices, start=1):
-            console.print(f"[bold yellow]{index}.[/] [green]{name}:[/] {path}")
+            _print_path_option(str(index), name, path)
         _print_option("0.", "Other / type a path directly")
-        console.print("[dim]Tip: enter b7 to browse option 7, or type a full path directly.[/]")
+        _print_notice("Tip: enter b7 to browse option 7, or type a full path directly.")
         prompt = "Choose a folder to browse, or type a path" if browse_number_selection else "Choose a path or type one"
         selection = Prompt.ask(_prompt(prompt), default="1", console=console).strip()
         if selection == "0":
@@ -255,16 +307,16 @@ def _choose_source_path(label: str) -> Path:
     yards = _known_stores(StoreKind.YARD)
     page = 0
     while True:
-        console.print(f"{label} [dim](Ctrl-C to exit)[/]:")
+        _print_section_row(f"{label} (Ctrl-C to exit)")
         if yards:
-            console.print("[bold green]Established RAWDOG yards[/]")
+            _print_notice("Established RAWDOG yards", style=STYLE_SAFE)
             page_stores = _store_page(yards, page)
             for index, store in enumerate(page_stores, start=1):
-                console.print(f"[bold yellow]{index}.[/] [green]{store.name}:[/] {store.root_path}")
+                _print_path_option(str(index), store.name, store.root_path)
             if _has_next_store_page(yards, page):
                 _print_option("6.", "Next yards")
         else:
-            console.print("[bold yellow]No RAWDOG yards registered yet.[/]")
+            _print_notice("No RAWDOG yards registered yet.", style=STYLE_ROW_SELECTED)
         _print_option("9.", "Explore common folders / volumes")
         _print_option("0.", "Enter manual path")
         selection = Prompt.ask(_prompt("Choose existing source folder"), default="9", console=console).strip()
@@ -304,12 +356,20 @@ def _choose_den_destination_path(label: str) -> Path:
     _, config = _load_or_exit()
     dens = _known_stores(StoreKind.DEN)
     while True:
-        console.print(f"{label} [dim](Ctrl-C to exit)[/]:")
+        _print_section_row(f"{label} (Ctrl-C to exit)")
         default_den = config.archive_root
         if default_den:
-            console.print(f"[bold yellow]1.[/] [green]Default den from init:[/] {default_den}")
+            _print_path_option("1", "Default den from init", default_den)
         else:
-            console.print("[bold yellow]1.[/] [green]Default den from init:[/] [dim]not configured[/]")
+            _print_full_row(
+                [
+                    ("1.", STYLE_ROW_SELECTED),
+                    (" ", STYLE_ROW),
+                    ("Default den from init: ", "bold bright_white on grey7"),
+                    ("not configured", STYLE_MUTED),
+                ],
+                style=STYLE_ROW,
+            )
         _print_option("2.", "Pick a registered den")
         _print_option("3.", "Pick a volume / drive / path")
         _print_option("0.", "Enter manual path")
@@ -347,9 +407,9 @@ def _choose_den_destination_path(label: str) -> Path:
 def _choose_standard_root(label: str) -> Path:
     choices = _standard_path_choices(limit=9)
     while True:
-        console.print(f"{label} [dim](Ctrl-C to exit)[/]:")
+        _print_section_row(f"{label} (Ctrl-C to exit)")
         for index, (name, path) in enumerate(choices, start=1):
-            console.print(f"[bold yellow]{index}.[/] [green]{name}:[/] {path}")
+            _print_path_option(str(index), name, path)
         _print_option("0.", "Enter manual path")
         selection = Prompt.ask(_prompt("Choose starting folder"), default="1", console=console).strip()
         if selection == "0":
@@ -360,15 +420,15 @@ def _choose_standard_root(label: str) -> Path:
         try:
             index = int(selection)
         except ValueError:
-            console.print("[bold red]Invalid path choice.[/] Try again.")
+            _print_error("Invalid path choice. Try again.")
             continue
         if 1 <= index <= len(choices):
             path = choices[index - 1][1]
             if path.exists() and path.is_dir():
                 return path
-            console.print(f"[bold red]Folder is not available:[/] {path}")
+            _print_error(f"Folder is not available: {path}")
             continue
-        console.print("[bold red]Invalid path choice.[/] Try again.")
+        _print_error("Invalid path choice. Try again.")
 
 
 def _browse_folder(
@@ -380,10 +440,10 @@ def _browse_folder(
 ) -> Path:
     current = start.expanduser().resolve()
     while True:
-        console.print(f"[bold cyan]Browsing:[/] {current}")
+        _print_full_row([("Browsing: ", STYLE_ROW_HEADER), (str(current), STYLE_PATH)], style=STYLE_ROW_HEADER)
         folders = _sorted_child_folders(current)[:max_children]
         for index, (path, size_bytes) in enumerate(folders, start=1):
-            console.print(f"[bold yellow]{index:<4}[/][green]{path.name}[/]  [dim]{_format_bytes(size_bytes)}[/]")
+            _print_folder_option(str(index), path.name, size_bytes)
         _print_option("8", "Parent folder")
         _print_option("9", confirm_label)
         _print_option("0", "Manual path")
@@ -415,26 +475,26 @@ def _browse_folder(
         try:
             index = int(selection)
         except ValueError:
-            console.print("[bold red]Invalid folder choice.[/] Try again.")
+            _print_error("Invalid folder choice. Try again.")
             continue
         if 1 <= index <= len(folders):
             current = folders[index - 1][0]
             continue
-        console.print("[bold red]Invalid folder choice.[/] Try again.")
+        _print_error("Invalid folder choice. Try again.")
 
 
 def _browse_den_destination(start: Path, dens: list) -> Path:
     current = start.expanduser().resolve()
     while True:
-        console.print(f"[bold cyan]Browsing destination:[/] {current}")
+        _print_full_row([("Browsing destination: ", STYLE_ROW_HEADER), (str(current), STYLE_PATH)], style=STYLE_ROW_HEADER)
         dens_here = _stores_under_path(dens, current)
         if dens_here:
-            console.print("[bold green]Known dens in this path[/]")
+            _print_notice("Known dens in this path", style=STYLE_SAFE)
             for index, store in enumerate(dens_here[:5], start=1):
-                console.print(f"[bold yellow]D{index}.[/] [green]{store.name}:[/] {store.root_path}")
+                _print_path_option(f"D{index}", store.name, store.root_path)
         folders = _sorted_child_folders(current)[:5]
         for index, (path, size_bytes) in enumerate(folders, start=1):
-            console.print(f"[bold yellow]{index:<4}[/][green]{path.name}[/]  [dim]{_format_bytes(size_bytes)}[/]")
+            _print_folder_option(str(index), path.name, size_bytes)
         _print_option("7", "Select a known den in this path")
         _print_option("8", "Parent folder")
         _print_option("9", "Create / use DEN here")
@@ -469,12 +529,12 @@ def _browse_den_destination(start: Path, dens: list) -> Path:
         try:
             index = int(selection)
         except ValueError:
-            console.print("[bold red]Invalid destination choice.[/] Try again.")
+            _print_error("Invalid destination choice. Try again.")
             continue
         if 1 <= index <= len(folders):
             current = folders[index - 1][0]
             continue
-        console.print("[bold red]Invalid destination choice.[/] Try again.")
+        _print_error("Invalid destination choice. Try again.")
 
 
 def _standard_path_choices(*, limit: int | None = None) -> list[tuple[str, Path]]:
@@ -568,13 +628,13 @@ def _stores_under_path(stores: list[Store], root: Path) -> list[Store]:
 
 def _pick_registered_store(stores: list[Store], noun: str) -> Path | None:
     if not stores:
-        console.print(f"[bold yellow]No registered RAWDOG {noun}s available here.[/]")
+        _print_notice(f"No registered RAWDOG {noun}s available here.", style=STYLE_ROW_SELECTED)
         return None
     page = 0
     while True:
         page_stores = _store_page(stores, page)
         for index, store in enumerate(page_stores, start=1):
-            console.print(f"[bold yellow]{index}.[/] [green]{store.name}:[/] {store.root_path}")
+            _print_path_option(str(index), store.name, store.root_path)
         if _has_next_store_page(stores, page):
             _print_option("6.", f"Next {noun}s")
         _print_option("0.", "Back")
@@ -587,13 +647,13 @@ def _pick_registered_store(stores: list[Store], noun: str) -> Path | None:
         try:
             index = int(selection)
         except ValueError:
-            console.print("[bold red]Invalid store choice.[/] Try again.")
+            _print_error("Invalid store choice. Try again.")
             continue
         if 1 <= index <= len(page_stores):
             store = page_stores[index - 1]
             _mark_store_used(store)
             return store.root_path
-        console.print("[bold red]Invalid store choice.[/] Try again.")
+        _print_error("Invalid store choice. Try again.")
 
 
 def _manual_existing_directory(label: str) -> Path | None:
@@ -604,7 +664,7 @@ def _manual_existing_directory(label: str) -> Path | None:
 def _is_existing_directory(path: Path) -> bool:
     if path.exists() and path.is_dir():
         return True
-    console.print(f"[bold red]Folder must already exist:[/] {path}")
+    _print_error(f"Folder must already exist: {path}")
     return False
 
 
@@ -617,11 +677,11 @@ def _confirm_destination_path(path: Path) -> Path | None:
     if path.exists():
         if path.is_dir():
             return path
-        console.print(f"[bold red]Destination exists but is not a folder:[/] {path}")
+        _print_error(f"Destination exists but is not a folder: {path}")
         return None
     parent = path.parent
     if not parent.exists() or not parent.is_dir():
-        console.print(f"[bold red]Parent folder does not exist:[/] {parent}")
+        _print_error(f"Parent folder does not exist: {parent}")
         return None
     if _yes_no(f"Destination does not exist. Create {path}?", default=True):
         path.mkdir(parents=True, exist_ok=True)
@@ -633,7 +693,7 @@ def _sorted_child_folders(root: Path) -> list[tuple[Path, int]]:
     try:
         children = [path for path in root.iterdir() if path.is_dir()]
     except OSError as exc:
-        console.print(f"[bold red]Cannot read folder:[/] {exc}")
+        _print_error(f"Cannot read folder: {exc}")
         return []
     return sorted(
         ((path, _estimate_folder_size(path)) for path in children),
@@ -726,15 +786,15 @@ def _choose_store_path(label: str, store_kind: StoreKind) -> Path:
     noun = "den" if store_kind == StoreKind.DEN else "yard"
     page = 0
     while True:
-        console.print(f"{label} [dim](Ctrl-C to exit)[/]:")
-        console.print(f"[bold green]Established RAWDOG {noun}s[/]")
+        _print_section_row(f"{label} (Ctrl-C to exit)")
+        _print_notice(f"Established RAWDOG {noun}s", style=STYLE_SAFE)
         page_stores = _store_page(stores, page)
         for index, store in enumerate(page_stores, start=1):
-            console.print(f"[bold yellow]{index}.[/] [green]{store.name}:[/] {store.root_path}")
+            _print_path_option(str(index), store.name, store.root_path)
         if _has_next_store_page(stores, page):
             _print_option("6.", f"Next {noun}s")
         _print_option("0.", "Other / browse common paths")
-        console.print("[dim]Tip: enter b1 to browse inside an established store.[/]")
+        _print_notice("Tip: enter b1 to browse inside an established store.")
         selection = Prompt.ask(_prompt("Choose store, browse, or type a path"), default="1", console=console).strip()
         if selection == "0":
             return _choose_path(label, browse_number_selection=True)
@@ -745,37 +805,37 @@ def _choose_store_path(label: str, store_kind: StoreKind) -> Path:
             try:
                 browse_index = int(selection[1:])
             except ValueError:
-                console.print("[bold red]Invalid browse choice.[/] Use b plus a number, like b1.")
+                _print_error("Invalid browse choice. Use b plus a number, like b1.")
                 continue
             if 1 <= browse_index <= len(page_stores):
                 store = page_stores[browse_index - 1]
                 _mark_store_used(store)
                 return _browse_folder(store.root_path)
-            console.print("[bold red]Invalid browse choice.[/] Try again.")
+            _print_error("Invalid browse choice. Try again.")
             continue
         if selection.startswith(("/", "~", ".")):
             return parse_user_path(selection)
         try:
             index = int(selection)
         except ValueError:
-            console.print("[bold red]Invalid choice.[/] Enter a number, b-number, or a path.")
+            _print_error("Invalid choice. Enter a number, b-number, or a path.")
             continue
         if 1 <= index <= len(page_stores):
             store = page_stores[index - 1]
             _mark_store_used(store)
             return store.root_path
-        console.print("[bold red]Invalid choice.[/] Try again.")
+        _print_error("Invalid choice. Try again.")
 
 
 def _choose_project_root(label: str, folder_name: str) -> Path:
     base = _choose_path(f"{label} base location")
     while True:
-        console.print(f"[bold cyan]Selected base:[/] {base}")
-        console.print("1. Search for existing folder under this base")
-        console.print(f"2. Create {folder_name} here")
-        console.print("3. Use this root directly")
-        console.print("4. Enter exact path")
-        console.print("0. Pick a different base")
+        _print_full_row([("Selected base: ", STYLE_ROW_HEADER), (str(base), STYLE_PATH)], style=STYLE_ROW_HEADER)
+        _print_option("1.", "Search for existing folder under this base")
+        _print_option("2.", f"Create {folder_name} here")
+        _print_option("3.", "Use this root directly")
+        _print_option("4.", "Enter exact path")
+        _print_option("0.", "Pick a different base")
         choice = Prompt.ask(
             "Choose folder action (Ctrl-C to exit)",
             choices=["0", "1", "2", "3", "4"],
@@ -788,15 +848,15 @@ def _choose_project_root(label: str, folder_name: str) -> Path:
         if choice == "1":
             found = _search_folders(base, Prompt.ask("Folder name search", console=console).strip())
             if not found:
-                console.print("[bold yellow]No matching folders found.[/]")
+                _print_notice("No matching folders found.", style=STYLE_ROW_SELECTED)
                 continue
             for index, path in enumerate(found, start=1):
-                console.print(f"{index}. {path}")
+                _print_path_option(str(index), path.name, path)
             picked = Prompt.ask("Choose folder", default="1", console=console).strip()
             try:
                 return found[int(picked) - 1]
             except (ValueError, IndexError):
-                console.print("[bold red]Invalid choice.[/] Try again.")
+                _print_error("Invalid choice. Try again.")
                 continue
         if choice == "2":
             target = base / folder_name
@@ -836,10 +896,13 @@ def _print_layout_analysis(analysis: LayoutAnalysis) -> None:
     table.add_row("Confidence", f"{analysis.confidence}%")
     console.print(table)
     for signal in analysis.signals:
-        console.print(f"[bright_white on black]- {signal}[/]")
-    console.print(
-        "[bold bright_yellow on black]Operator confirmation required:[/] "
-        "[bright_white on black]RAWDOG suggests layout behavior but never silently reorganizes.[/]"
+        _print_notice(f"- {signal}", style=STYLE_ROW)
+    _print_full_row(
+        [
+            ("Operator confirmation required: ", STYLE_ROW_SELECTED),
+            ("RAWDOG suggests layout behavior but never silently reorganizes.", STYLE_ROW_SELECTED),
+        ],
+        style=STYLE_ROW_SELECTED,
     )
 
 
@@ -924,32 +987,35 @@ def _show_home_menu() -> None:
         table.add_row("9", "Den / yard setup", "Register archive and working stores")
         table.add_row("0", "Quit", "Exit RAWDOG")
         console.print(table)
-        console.print(
-            "[bold red]Preview-first:[/] fetch, breed, and den do not write archive files "
-            "unless you explicitly choose [bold yellow]commit[/]."
+        _print_full_row(
+            [
+                ("Preview-first: ", STYLE_WARN),
+                ("fetch, breed, and den do not write archive files unless you explicitly choose commit.", STYLE_WARN),
+            ],
+            style=STYLE_WARN,
         )
         if not _is_initialized():
             _print_init_guidance()
         _print_latest_plan_hint()
         choice = Prompt.ask(
-            "[bold yellow]CHOOSE AN OPTION[/]",
+            _prompt("CHOOSE AN OPTION"),
             choices=["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"],
             default="0",
             console=console,
         )
         if choice == "0":
-            console.print("[bold green]Goodbye.[/]")
+            _print_notice("Goodbye.", style=STYLE_SAFE)
             return
         try:
             _run_home_choice(choice)
         except typer.BadParameter as exc:
-            console.print(f"[bold red]Error:[/] {exc}")
+            _print_error(f"Error: {exc}")
         except SafetyError as exc:
-            console.print(f"[bold red]Safety stop:[/] {exc}")
+            _print_error(f"Safety stop: {exc}")
         except KeyboardInterrupt:
-            console.print("\n[bold yellow]Cancelled.[/]")
+            _print_notice("Cancelled.", style=STYLE_ROW_SELECTED)
         Prompt.ask(
-            "[bold yellow]Press Enter to return to RAWDOG[/]",
+            _prompt("Press Enter to return to RAWDOG"),
             console=console,
         )
 
@@ -960,11 +1026,14 @@ def _print_latest_plan_hint() -> None:
         with session(config.database_path) as connection:
             latest_plan = get_latest_execution_plan(connection)
         if latest_plan:
-            console.print(
-                "[bold yellow]Last plan:[/] "
-                f"#{latest_plan.plan_id} {latest_plan.status.value} - {latest_plan.what}"
+            _print_full_row(
+                [
+                    ("Last plan: ", STYLE_ROW_SELECTED),
+                    (f"#{latest_plan.plan_id} {latest_plan.status.value} - {latest_plan.what}", STYLE_ROW_SELECTED),
+                ],
+                style=STYLE_ROW_SELECTED,
             )
-    except typer.BadParameter:
+    except (typer.BadParameter, OSError, sqlite3.Error):
         pass
 
 
@@ -1145,9 +1214,12 @@ def _layout_generates_date_groups(layout: DenLayoutMode) -> bool:
 
 def _choose_date_grouping(layout: DenLayoutMode) -> DateGroupMode:
     if layout == DenLayoutMode.PRESERVE_DATES:
-        console.print(
-            "[bold yellow]Date grouping only applies to camera-dump rows.[/] "
-            "Existing meaningful/date folders are still preserved or normalized."
+        _print_full_row(
+            [
+                ("Date grouping only applies to camera-dump rows. ", STYLE_ROW_SELECTED),
+                ("Existing meaningful/date folders are still preserved or normalized.", STYLE_ROW_SELECTED),
+            ],
+            style=STYLE_ROW_SELECTED,
         )
     table = _styled_table(title="Date Grouping")
     table.add_column("Option", justify="right", style=STYLE_ACTION)
@@ -1811,11 +1883,11 @@ def _persist_den_execution_plan(
 def _print_execution_plan_start(plan: ExecutionPlan) -> None:
     body = "\n".join(
         [
-            f"[bold bright_green on black]What we're doing:[/] [bright_white on black]{plan.what}[/]",
-            f"[bold bright_cyan on black]What we're doing it to:[/] [bright_white on black]{plan.subject}[/]",
-            f"[bold bright_yellow on black]What should be where when done:[/] [bright_white on black]{plan.expected_result}[/]",
-            f"[bold bright_green on black]Execution:[/] [bright_white on black]{plan.execution_summary}[/]",
-            f"[bold bright_yellow on black]Post audit:[/] [bright_white on black]{plan.post_audit_summary}[/]",
+            f"[bold bright_green on grey7]What we're doing:[/] [bright_white on grey7]{plan.what}[/]",
+            f"[bold bright_cyan on grey7]What we're doing it to:[/] [bright_white on grey7]{plan.subject}[/]",
+            f"[bold black on bright_yellow]What should be where when done:[/] [bright_white on grey7]{plan.expected_result}[/]",
+            f"[bold bright_green on grey7]Execution:[/] [bright_white on grey7]{plan.execution_summary}[/]",
+            f"[bold black on bright_yellow]Post audit:[/] [bright_white on grey7]{plan.post_audit_summary}[/]",
         ]
     )
     console.print(Panel(body, title=f"RAWDOG Plan #{plan.plan_id}", border_style="bright_green", style=STYLE_PANEL))
@@ -1954,7 +2026,7 @@ def _print_plan_operation_review(
         )
     console.print(table)
     if len(rows) > limit:
-        console.print(f"[bold bright_yellow on black]Showing first {limit} of {len(rows)} operations.[/]")
+        _print_notice(f"Showing first {limit} of {len(rows)} operations.", style=STYLE_ROW_SELECTED)
     return manifest_path
 
 
@@ -1980,10 +2052,10 @@ def _print_destination_folder_summary(rows: list[ExecutionPlanRow], *, limit: in
 
 def _prompt_run_reviewed_plan(config: RawdogConfig, plan_id: int) -> None:
     if not sys.stdin.isatty():
-        console.print(f"[bold yellow]Next:[/] run `rawdog plans run {plan_id}` to execute this reviewed plan.")
+        _print_notice(f"Next: run `rawdog plans run {plan_id}` to execute this reviewed plan.", style=STYLE_ROW_SELECTED)
         return
     choice = Prompt.ask(
-        f"[bold yellow]Next for plan #{plan_id}: r = run, p = pause[/]",
+        _prompt(f"Next for plan #{plan_id}: r = run, p = pause"),
         choices=["r", "p"],
         default="p",
         console=console,
@@ -1991,16 +2063,16 @@ def _prompt_run_reviewed_plan(config: RawdogConfig, plan_id: int) -> None:
     if choice == "r":
         _confirm_and_execute_plan(config, plan_id, action="Run", review_already_shown=True)
     else:
-        console.print(f"Plan #{plan_id} left paused.")
+        _print_notice(f"Plan #{plan_id} left paused.")
 
 
 def _prompt_dry_run_plan_next(config: RawdogConfig, plan_id: int) -> None:
     if not sys.stdin.isatty():
-        console.print(f"[bold bright_yellow on black]Next:[/] run `rawdog plans ops {plan_id}` to inspect paths.")
+        _print_notice(f"Next: run `rawdog plans ops {plan_id}` to inspect paths.", style=STYLE_ROW_SELECTED)
         return
     while True:
         choice = Prompt.ask(
-            f"[bold bright_yellow on black]Next for dry-run plan #{plan_id}: c = concise paths, v = verbose, r = run, p = pause[/]",
+            _prompt(f"Next for dry-run plan #{plan_id}: c = concise paths, v = verbose, r = run, p = pause"),
             choices=["c", "v", "r", "p"],
             default="c",
             console=console,
@@ -2013,7 +2085,7 @@ def _prompt_dry_run_plan_next(config: RawdogConfig, plan_id: int) -> None:
         if choice == "r":
             _confirm_and_execute_plan(config, plan_id, action="Run")
             return
-        console.print(f"Plan #{plan_id} left paused. Review later with `rawdog plans ops {plan_id}`.")
+        _print_notice(f"Plan #{plan_id} left paused. Review later with `rawdog plans ops {plan_id}`.")
         return
 
 
@@ -2093,10 +2165,10 @@ def _execute_persisted_plan(config: RawdogConfig, plan_id: int) -> ExecutionPlan
     )
     with Progress(
         SpinnerColumn(),
-        TextColumn("[bold bright_green on black]{task.description}"),
+        TextColumn("[bold bright_green on grey7]{task.description}"),
         BarColumn(),
         TaskProgressColumn(),
-        TextColumn("[bright_white on black]{task.fields[status]}"),
+        TextColumn("[bright_white on grey7]{task.fields[status]}"),
         TimeElapsedColumn(),
         TimeRemainingColumn(),
         console=console,
