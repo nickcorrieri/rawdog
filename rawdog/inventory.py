@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from rawdog.metadata import capture_time_fallback, is_raw_file
+from rawdog.metadata import capture_time_fallback, is_camera_capture_file
 
 DEFAULT_SKIPPED_DIRS = {
     ".DocumentRevisions-V100",
@@ -47,7 +47,7 @@ def scan_raw_files(
         )
         for filename in sorted(filenames):
             path = current_path / filename
-            if _is_excluded(path, resolved_excludes) or not path.is_file() or not is_raw_file(path):
+            if _is_excluded(path, resolved_excludes) or not path.is_file() or not is_camera_capture_file(path):
                 continue
             stat = path.stat()
             items.append(
@@ -61,6 +61,7 @@ def scan_raw_files(
             if limit is not None and len(items) >= limit:
                 return items
     return items
+
 
 
 def earliest_raw_capture_time(

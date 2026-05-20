@@ -106,7 +106,7 @@ def analyze_source_layout(
             organized_files=0,
             recommendation="empty",
             confidence=100,
-            signals=["No RAW files found."],
+            signals=["No RAW or camera video files found."],
         )
     raw_dump_files = sum(1 for item in items if _looks_like_camera_dump(root, item))
     organized_files = sum(1 for item in items if _looks_organized(item))
@@ -114,10 +114,10 @@ def analyze_source_layout(
     organized_ratio = organized_files / len(items)
     folders = Counter(str(item.relative_path.parent) for item in items)
     signals: list[str] = [
-        f"{len(items)} RAW files scanned.",
+        f"{len(items)} RAW/camera video files scanned.",
         f"{raw_dump_files} files look like camera-dump layout.",
         f"{organized_files} files look semi-organized.",
-        f"{len(folders)} folders contain RAW files.",
+        f"{len(folders)} folders contain RAW/camera video files.",
     ]
     if folders:
         largest_folder_count = folders.most_common(1)[0][1]

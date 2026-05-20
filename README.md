@@ -140,8 +140,13 @@ rawdog plans resume
 ## Cleanup Consolidation
 
 For old folders or drives that need to be gathered into a RAWDOG structure, use
-`den`. It scans RAW files, builds a copy estimate, skips already-present
+`den`. It scans RAW and camera video files, builds a copy estimate, skips already-present
 same-name/same-size files, and reports collisions for review.
+
+RAWDOG remains RAW-first, but it also carries camera video files commonly written
+beside stills by DSLRs, mirrorless bodies, action cameras, and cinema cameras:
+`.mov`, `.mp4`, `.m4v`, `.mts`, `.m2ts`, `.mxf`, `.avi`, `.3gp`, `.mod`,
+`.tod`, `.insv`, `.crm`, `.braw`, and `.r3d`.
 
 ```bash
 rawdog dens setup primary --root /Volumes/Archive
@@ -342,7 +347,7 @@ preservation, plus the source, destination, partial path, and safety rule for
 each row. Commit and resume prompts require `COMMIT PLAN <id>` after this review.
 
 `.partial` files are temporary transfer artifacts created only under the
-destination root during copy. They are not original RAW files, are ignored during
+destination root during copy. They are not original RAW/camera video files, are ignored during
 source inventory, and are never merged into archive state. A stale `.partial`
 blocks that destination row and requires review; RAWDOG does not auto-delete
 pre-existing `.partial` files. If RAWDOG creates a `.partial` during the current

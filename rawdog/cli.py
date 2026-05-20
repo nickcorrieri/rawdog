@@ -931,7 +931,7 @@ def _print_layout_analysis(analysis: LayoutAnalysis) -> None:
     table = _styled_table(title="Source Layout Detection")
     table.add_column("Metric")
     table.add_column("Value", justify="right")
-    table.add_row("RAW files", str(analysis.file_count))
+    table.add_row("RAW/video files", str(analysis.file_count))
     table.add_row("Camera-dump files", str(analysis.raw_dump_files))
     table.add_row("Semi-organized files", str(analysis.organized_files))
     table.add_row("Recommendation", analysis.recommendation)
@@ -1697,7 +1697,7 @@ def fetch(
         help="Preview before copying.",
     ),
 ) -> None:
-    """Fetch RAW files from an SD card or import source into the working library."""
+    """Fetch RAW and camera video files from an SD card or import source into the working library."""
     _, config = _load_or_exit()
     loaded_profile = None
     with session(config.database_path) as connection:
@@ -1940,7 +1940,7 @@ def sniff(roots: list[Path] | None = typer.Argument(None, help="Folders or volum
         raise typer.BadParameter("No roots provided and no default roots are configured.")
     table = _styled_table(title="RAWDOG Sniff")
     table.add_column("Root")
-    table.add_column("RAW files", justify="right")
+    table.add_column("RAW/video files", justify="right")
     table.add_column("GB", justify="right")
     table.add_column("Earliest", justify="right")
     for root in sniff_roots:
@@ -1973,7 +1973,7 @@ def score(root: Path = typer.Argument(..., help="Folder or volume to score.")) -
     table.add_column("Metric")
     table.add_column("Value", justify="right")
     table.add_row("Score", str(result.score))
-    table.add_row("RAW files", str(result.file_count))
+    table.add_row("RAW/video files", str(result.file_count))
     table.add_row("GB", f"{result.total_bytes / 1_000_000_000:.2f}")
     table.add_row("Duplicate names", str(result.duplicate_names))
     table.add_row("Years", str(result.year_count))
@@ -1990,7 +1990,7 @@ def _persist_den_execution_plan(
 ) -> ExecutionPlan:
     skipped = sum(1 for row in plan.rows if row.status.startswith("skip"))
     collisions = sum(1 for row in plan.rows if row.status == "collision")
-    what = f"{plan.transfer_action.value} RAW files into a RAWDOG destination"
+    what = f"{plan.transfer_action.value} RAW/camera video files into a RAWDOG destination"
     subject = f"{plan.source_root} -> {plan.destination_root}"
     expected = (
         f"{plan.files_to_transfer} files should be at {plan.destination_folder}; "
@@ -2000,7 +2000,7 @@ def _persist_den_execution_plan(
     if plan.excluded_roots:
         expected += " Excluded from source scan: " + ", ".join(str(path) for path in plan.excluded_roots) + "."
     if plan.limited_to:
-        expected += f" Limited preview: first {plan.limited_to} RAW files only."
+        expected += f" Limited preview: first {plan.limited_to} RAW/camera video files only."
     with session(config.database_path) as connection:
         execution_plan = create_execution_plan(
             connection,

@@ -270,7 +270,7 @@ def test_score_items_reports_empty_source() -> None:
     score = score_items([])
 
     assert score.score == 0
-    assert score.notes == ["No RAW files found."]
+    assert score.notes == ["No RAW or camera video files found."]
 
 
 def test_score_items_counts_raw_files(tmp_path: Path) -> None:
