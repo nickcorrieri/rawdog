@@ -114,6 +114,27 @@ def test_choose_source_path_paginates_registered_yards(tmp_path: Path, monkeypat
     assert picked == yards[5].root_path
 
 
+def test_known_stores_repairs_configured_working_root_kind(tmp_path: Path, monkeypatch) -> None:
+    database = tmp_path / "rawdog.sqlite"
+    working_root = tmp_path / "RAW_YARD"
+    working_root.mkdir()
+    initialize(database)
+    with session(database) as connection:
+        create_or_update_store(
+            connection,
+            StoreCreate(name="RAW_YARD", root_path=working_root, store_kind=StoreKind.DEN),
+        )
+    config = build_config(OrganizationMode.PROJECT, working_root=working_root, database_path=database)
+    monkeypatch.setattr(cli, "_load_or_exit", lambda: (tmp_path / "config.json", config))
+
+    stores = cli._known_stores(StoreKind.YARD)
+
+    assert [store.root_path for store in stores] == [working_root.resolve()]
+    with session(database) as connection:
+        den_rows = cli.list_stores(connection, StoreKind.DEN)
+    assert den_rows == []
+
+
 def _answers(*values: str):
     answers = iter(values)
 

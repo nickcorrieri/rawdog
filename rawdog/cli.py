@@ -555,9 +555,34 @@ def _known_stores(store_kind: StoreKind) -> list[Store]:
     try:
         _, config = _load_or_exit()
         with session(config.database_path) as connection:
-            return list_stores(connection, store_kind=store_kind)
+            return _list_configured_stores(connection, config, store_kind)
     except typer.BadParameter:
         return []
+
+
+def _list_configured_stores(connection, config: RawdogConfig, store_kind: StoreKind) -> list[Store]:
+    _ensure_configured_store_registered(connection, config, store_kind)
+    return list_stores(connection, store_kind=store_kind)
+
+
+def _ensure_configured_store_registered(connection, config: RawdogConfig, store_kind: StoreKind) -> None:
+    configured_root = config.working_root if store_kind == StoreKind.YARD else config.archive_root
+    if configured_root is None:
+        return
+    root_path = configured_root.expanduser().resolve()
+    if not root_path.exists() or not root_path.is_dir():
+        return
+    opposite_root = config.archive_root if store_kind == StoreKind.YARD else config.working_root
+    if opposite_root and opposite_root.expanduser().resolve() == root_path:
+        return
+    row = connection.execute("SELECT name, store_kind FROM stores WHERE root_path = ?", (str(root_path),)).fetchone()
+    if row and row["store_kind"] == store_kind.value:
+        return
+    name = row["name"] if row else "primary"
+    create_or_update_store(
+        connection,
+        StoreCreate(name=name, root_path=root_path, store_kind=store_kind),
+    )
 
 
 STORE_PICKER_PAGE_SIZE = 5
@@ -795,7 +820,7 @@ def _choose_store_path(label: str, store_kind: StoreKind) -> Path:
     try:
         _, config = _load_or_exit()
         with session(config.database_path) as connection:
-            stores = list_stores(connection, store_kind=store_kind)
+            stores = _list_configured_stores(connection, config, store_kind)
     except typer.BadParameter:
         stores = []
     if not stores:
@@ -2775,14 +2800,14 @@ def junkyard(
                 raise typer.BadParameter(f"Unknown yard: {yard_name}")
             yards = [yard_store]
         else:
-            yards = list_stores(connection, StoreKind.YARD)
+            yards = _list_configured_stores(connection, config, StoreKind.YARD)
         if den_name:
             den_store = get_store_by_name(connection, den_name, StoreKind.DEN)
             if den_store is None:
                 raise typer.BadParameter(f"Unknown den: {den_name}")
             dens = [den_store]
         else:
-            dens = list_stores(connection, StoreKind.DEN)
+            dens = _list_configured_stores(connection, config, StoreKind.DEN)
     den_by_source: dict[Path, object] = {}
     for den_store in dens:
         den_by_source.update(list_store_files_by_original_source(den_store))
@@ -3004,7 +3029,7 @@ def den_store_list() -> None:
     """List den archive stores."""
     _, config = _load_or_exit()
     with session(config.database_path) as connection:
-        stores = list_stores(connection, StoreKind.DEN)
+        stores = _list_configured_stores(connection, config, StoreKind.DEN)
     table = _styled_table(title="RAWDOG Dens", style=STYLE_PANEL, row_styles=STYLE_ROWS, expand=True)
     table.add_column("Store ID")
     table.add_column("Name")
@@ -3042,7 +3067,7 @@ def yard_list() -> None:
     """List yard working stores."""
     _, config = _load_or_exit()
     with session(config.database_path) as connection:
-        stores = list_stores(connection, StoreKind.YARD)
+        stores = _list_configured_stores(connection, config, StoreKind.YARD)
     table = _styled_table(title="RAWDOG Yards", style=STYLE_PANEL, row_styles=STYLE_ROWS, expand=True)
     table.add_column("Store ID")
     table.add_column("Name")

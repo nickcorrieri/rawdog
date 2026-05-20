@@ -33,7 +33,15 @@ def store_db_path(root_path: Path) -> Path:
 
 def create_or_update_store(connection: sqlite3.Connection, payload: StoreCreate) -> Store:
     root_path = payload.root_path.expanduser().resolve()
-    store_id = _read_store_id(root_path) or f"{payload.store_kind.value}_{uuid.uuid4().hex[:12]}"
+    existing_row = connection.execute(
+        "SELECT store_id, name FROM stores WHERE root_path = ?",
+        (str(root_path),),
+    ).fetchone()
+    store_id = (
+        existing_row["store_id"]
+        if existing_row
+        else _read_store_id(root_path) or f"{payload.store_kind.value}_{uuid.uuid4().hex[:12]}"
+    )
     now = _now()
     _write_store_identity(root_path, store_id, payload.name, payload.store_kind, now)
     _initialize_store_db(root_path)

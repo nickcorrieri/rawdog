@@ -1,5 +1,6 @@
 # Author: Nicholas Corrieri
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -90,6 +91,33 @@ def test_stores_track_last_used_and_keep_primary_first(tmp_path: Path) -> None:
     assert stores[1].store_id == recent.store_id
     assert stores[1].last_used_at is not None
     assert stores[1].use_count == 1
+
+
+def test_store_setup_repairs_existing_root_kind_and_portable_metadata(tmp_path: Path) -> None:
+    database = tmp_path / "rawdog.sqlite"
+    root = tmp_path / "yard"
+    root.mkdir()
+    initialize(database)
+
+    with session(database) as connection:
+        den = create_or_update_store(
+            connection,
+            StoreCreate(name="RAW_YARD", root_path=root, store_kind=StoreKind.DEN),
+        )
+        repaired = create_or_update_store(
+            connection,
+            StoreCreate(name="RAW_YARD", root_path=root, store_kind=StoreKind.YARD),
+        )
+        yards = list_stores(connection, StoreKind.YARD)
+        dens = list_stores(connection, StoreKind.DEN)
+
+    portable = json.loads(store_json_path(root).read_text())
+
+    assert repaired.store_id == den.store_id
+    assert repaired.store_kind == StoreKind.YARD
+    assert [store.root_path for store in yards] == [root.resolve()]
+    assert dens == []
+    assert portable["store_kind"] == "yard"
 
 
 def test_store_migration_adds_usage_columns_to_existing_database(tmp_path: Path) -> None:
