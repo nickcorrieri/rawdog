@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "rawdog"
-version = "0.2.15"
+version = "0.2.16"
 description = "RAW photo managing tool that can fetch, copy, and audit your RAW libraries."
 readme = "README.md"
 requires-python = ">=3.12"

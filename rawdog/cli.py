@@ -118,6 +118,7 @@ from rawdog.stores import (
     mark_store_used,
     record_store_file,
 )
+from rawdog.verifier import verify_same_bytes
 from rawdog.workflows import (
     create_or_update_workflow,
     get_workflow_by_name,
@@ -598,6 +599,14 @@ def _mark_store_path_used(path: Path, store_kind: StoreKind) -> None:
         return
 
 
+def _store_for_exact_path(root_path: Path, store_kind: StoreKind) -> Store | None:
+    resolved = root_path.expanduser().resolve()
+    for store in _known_stores(store_kind):
+        if store.root_path == resolved:
+            return store
+    return None
+
+
 def _register_or_mark_store_path(path: Path, store_kind: StoreKind, preferred_name: str) -> Store | None:
     try:
         _, config = _load_or_exit()
@@ -984,13 +993,14 @@ def _show_home_menu() -> None:
         table.add_column("Option", style=STYLE_ACTION, justify="right")
         table.add_column("Workflow", style=STYLE_SAFE)
         table.add_column("Action", style=STYLE_PATH)
-        table.add_row("1", "First setup", "Initialize config and database")
-        table.add_row("2", "Fetch from card/folder", "Preview an ingest")
-        table.add_row("3", "Backup/archive edited project", "Preview an append-only backup")
-        table.add_row("4", "Consolidate old drive/folder", "Audit -> review -> copy/move into archive")
-        table.add_row("5", "Queue a longer safe job", "Show queue starter commands")
-        table.add_row("6", "Inspect or score a folder", "Run sniff or score")
-        table.add_row("7", "Check saved memory and plans", "Show status and recent plans")
+        table.add_row("i", "Setup / settings", "Set yards, dens, and defaults")
+        table.add_row("1", "Fetch card -> Yard", "Copy card/flash files to yard")
+        table.add_row("2", "Archive copy -> Den", "Copy files to archive; source stays")
+        table.add_row("3", "Cleanup review", "Report files safe to remove manually")
+        table.add_row("4", "Fast same-drive move -> Den", "Rename files on the same filesystem")
+        table.add_row("5", "Audit / inspect folder", "Sniff layout or score a folder")
+        table.add_row("6", "Verify source -> destination", "Check source is represented")
+        table.add_row("7", "Review / resume old plans", "Inspect, run, resume, or prune")
         table.add_row("8", "Help", "Show command examples")
         table.add_row("9", "Den / yard setup", "Register archive and working stores")
         table.add_row("0", "Quit", "Exit RAWDOG")
@@ -1007,8 +1017,8 @@ def _show_home_menu() -> None:
         _print_latest_plan_hint()
         choice = Prompt.ask(
             _prompt("CHOOSE AN OPTION"),
-            choices=["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"],
-            default="0",
+            choices=["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "i", "init", "initialize", "setup"],
+            default="i" if not _is_initialized() else "1",
             console=console,
         )
         if choice == "0":
@@ -1067,18 +1077,20 @@ def _parse_cli_date(value: str) -> date:
 
 
 def _run_home_choice(choice: str) -> None:
-    if choice == "1":
+    if choice in {"i", "init", "initialize", "setup"}:
         _home_init()
-    elif choice == "2":
+    elif choice == "1":
         _home_fetch()
-    elif choice == "3":
+    elif choice == "2":
         _home_backup()
+    elif choice == "3":
+        _home_cleanup_review()
     elif choice == "4":
-        _home_den()
+        _home_fast_move()
     elif choice == "5":
-        _show_queue_examples()
-    elif choice == "6":
         _home_inspect()
+    elif choice == "6":
+        _home_verify()
     elif choice == "7":
         _home_status()
     elif choice == "8":
@@ -1136,7 +1148,56 @@ def _home_fetch() -> None:
     )
 
 
+def _print_copy_to_den_guidance() -> None:
+    console.print(
+        Panel(
+            "\n".join(
+                [
+                    "This is the safe archive path.",
+                    "",
+                    "What happens:",
+                    "1. RAWDOG scans the working source.",
+                    "2. It writes a dry-run plan first.",
+                    "3. On commit, it copies files into the den without deleting the source.",
+                    "4. Existing same-name/same-size files are skipped; collisions are held for review.",
+                    "",
+                    "Use this when you finished editing and want the den/archive to receive a copy.",
+                ]
+            ),
+            title="Archive Copy -> Den",
+            border_style="green",
+            style=STYLE_PANEL,
+            expand=True,
+        )
+    )
+
+
+def _print_fast_move_guidance() -> None:
+    console.print(
+        Panel(
+            "\n".join(
+                [
+                    "Fast move is only for moving files on the same drive/filesystem.",
+                    "",
+                    "What happens:",
+                    "1. RAWDOG scans the source and writes a reviewable dry-run plan.",
+                    "2. It refuses if source and destination are not on the same filesystem.",
+                    "3. On commit, it uses os.rename to move each file into the den.",
+                    "4. File names stay unchanged; existing destination files are never overwritten.",
+                    "",
+                    "Use this to clean up same-drive folder mess without duplicating storage.",
+                ]
+            ),
+            title="Fast Same-Drive Move -> Den",
+            border_style="yellow",
+            style=STYLE_PANEL,
+            expand=True,
+        )
+    )
+
+
 def _home_backup() -> None:
+    _print_copy_to_den_guidance()
     source = _choose_store_path("Working project/source", StoreKind.YARD)
     destination = _choose_store_path("Archive destination", StoreKind.DEN)
     project_name = _optional_prompt("Project name, or Enter to skip")
@@ -1149,10 +1210,54 @@ def _home_backup() -> None:
     )
 
 
-def _home_den() -> None:
-    _print_den_guidance()
+def _home_cleanup_review() -> None:
+    console.print(
+        Panel(
+            "\n".join(
+                [
+                    "Cleanup review does not delete files.",
+                    "RAWDOG compares a yard against a den catalog and reports files that appear represented in the den.",
+                    "Use the report to decide what you want to remove manually from your working disk.",
+                ]
+            ),
+            title="Cleanup Review",
+            border_style="yellow",
+            style=STYLE_PANEL,
+            expand=True,
+        )
+    )
+    yard = _choose_store_path("Working yard to review", StoreKind.YARD)
+    den_root = _choose_store_path("Den to compare against", StoreKind.DEN)
+    yard_store = _store_for_exact_path(yard, StoreKind.YARD)
+    den_store = _store_for_exact_path(den_root, StoreKind.DEN)
+    if yard_store is None:
+        raise typer.BadParameter("Selected yard is not registered. Use option 9 to register it first.")
+    if den_store is None:
+        raise typer.BadParameter("Selected den is not registered. Use option 9 to register it first.")
+    junkyard(
+        yard_name=yard_store.name,
+        den_name=den_store.name,
+        validate_first=True,
+    )
+
+
+def _home_fast_move() -> None:
+    _print_fast_move_guidance()
+    _home_den(action=DenTransferAction.MOVE)
+
+
+def _home_den(action: DenTransferAction = DenTransferAction.COPY) -> None:
+    if action == DenTransferAction.COPY:
+        _print_den_guidance()
     source = _choose_source_path("Messy source")
     destination = _choose_den_destination_path("Clean destination")
+    if action == DenTransferAction.MOVE:
+        try:
+            ensure_same_filesystem(source, destination)
+        except SafetyError as exc:
+            raise typer.BadParameter(
+                f"Fast move is same-drive only: {exc}. Use option 2 for safe copy-to-den instead."
+            ) from exc
     destination_inside_source = _destination_inside_source(source, destination)
     layout_analysis = analyze_source_layout(
         source,
@@ -1162,12 +1267,6 @@ def _home_den() -> None:
     default_layout = "date" if layout_analysis.recommendation == "ddd" else "preserve-dates"
     layout = _choose_den_layout(default_layout)
     group_by = _choose_date_grouping(layout) if _layout_generates_date_groups(layout) else None
-    action_choice = Prompt.ask(
-        "Transfer action",
-        choices=["copy", "move"],
-        default="copy",
-        console=console,
-    )
     project_name = _optional_prompt("Project name, or Enter to skip")
     start_date, end_date = (
         _choose_project_date_scope(source, [destination] if destination_inside_source else [])
@@ -1181,7 +1280,7 @@ def _home_den() -> None:
         project_name=project_name,
         workflow_name=None,
         layout=layout,
-        action=DenTransferAction(action_choice),
+        action=action,
         template=None,
         group_by=group_by,
         start_date=start_date,
@@ -1390,6 +1489,27 @@ def _home_inspect() -> None:
         score(root=root)
     else:
         sniff(roots=[root])
+
+
+def _home_verify() -> None:
+    console.print(
+        Panel(
+            "\n".join(
+                [
+                    "Verify checks whether a source is represented in a destination.",
+                    "It is useful before manual cleanup or before trusting an archive copy.",
+                    "This command does not delete, rename, or move files.",
+                ]
+            ),
+            title="Verify Source -> Destination",
+            border_style="green",
+            style=STYLE_PANEL,
+            expand=True,
+        )
+    )
+    source = _choose_source_path("Source to verify")
+    destination = _choose_den_destination_path("Destination to check")
+    verify(source=source, destination=destination)
 
 
 def _home_status() -> None:
@@ -2556,7 +2676,6 @@ def den(
             workflow = get_workflow_by_name(connection, workflow_name)
             if workflow:
                 mark_workflow_committed(connection, workflow.workflow_id)
-    _print_execution_plan_start(finished_plan)
 
 
 @app.command()
@@ -2633,6 +2752,18 @@ def junkyard(
     yard_name: str | None = typer.Option(None, "--yard", help="Limit report to one registered yard."),
     den_name: str | None = typer.Option(None, "--den", help="Limit report to one registered den."),
     before: str | None = typer.Option(None, "--before", help="Only show yard files modified before YYYY-MM-DD."),
+    validate_first: bool = typer.Option(
+        False,
+        "--validate-first",
+        "--verify-disk",
+        help="Also check matched den files on disk by path and size before reporting them.",
+    ),
+    hash_check: bool = typer.Option(
+        False,
+        "--hash-check",
+        help="Meticulous mode: SHA-256 hash yard and den files before reporting cleanup candidates.",
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Confirm long hash-check work in non-interactive runs."),
 ) -> None:
     """Report working files that appear safe to scrap. This never deletes files."""
     _, config = _load_or_exit()
@@ -2655,12 +2786,20 @@ def junkyard(
     den_by_source: dict[Path, object] = {}
     for den_store in dens:
         den_by_source.update(list_store_files_by_original_source(den_store))
+    validate_first = validate_first or hash_check
+    if hash_check:
+        _print_notice(
+            "Hash check reads both yard and den files. This is meticulous and may take a long time.",
+            style=STYLE_ROW_SELECTED,
+        )
+        if not yes and sys.stdin.isatty() and not _yes_no("Continue with SHA-256 hash checking?", default=False):
+            console.print("Hash check cancelled.")
+            return
     table = _styled_table(title="RAWDOG Junkyard Report", style=STYLE_PANEL, row_styles=STYLE_ROWS, expand=True)
     table.add_column("Yard File")
     table.add_column("Matched Den File")
     table.add_column("Bytes", justify="right")
-    candidates = 0
-    total_bytes = 0
+    matches: list[tuple[Path, Path, int]] = []
     for yard_store in yards:
         for item in scan_raw_files(yard_store.root_path):
             if before_dt and datetime.fromtimestamp(item.path.stat().st_mtime, tz=UTC) >= before_dt:
@@ -2668,15 +2807,84 @@ def junkyard(
             record = den_by_source.get(item.path.expanduser().resolve())
             if record is None or record.size_bytes != item.size_bytes:
                 continue
+            matches.append((item.path, record.store_path, item.size_bytes))
+    candidates = 0
+    missing_or_changed = 0
+    hash_mismatches = 0
+    total_bytes = 0
+    total_hash_bytes = sum(size_bytes * 2 for _, _, size_bytes in matches)
+    progress = None
+    hash_task = None
+    hashed_bytes = 0
+    if hash_check:
+        progress = Progress(
+            SpinnerColumn(),
+            TextColumn("[bold bright_green on black]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            TextColumn("[bright_white on black]{task.fields[status]}"),
+            TimeElapsedColumn(),
+            TimeRemainingColumn(),
+            console=console,
+        )
+        progress.start()
+        hash_task = progress.add_task("Hash check", total=total_hash_bytes or 1, status=_format_bytes(0))
+    try:
+        for yard_path, den_path, size_bytes in matches:
+            if validate_first:
+                try:
+                    den_stat = den_path.stat()
+                except OSError:
+                    missing_or_changed += 1
+                    continue
+                if den_stat.st_size != size_bytes:
+                    missing_or_changed += 1
+                    continue
+            if hash_check:
+                try:
+                    matched = verify_same_bytes(yard_path, den_path)
+                except OSError:
+                    missing_or_changed += 1
+                    continue
+                finally:
+                    hashed_bytes += size_bytes * 2
+                    if progress and hash_task is not None:
+                        progress.update(hash_task, completed=hashed_bytes, status=_format_bytes(hashed_bytes))
+                if not matched:
+                    hash_mismatches += 1
+                    continue
             candidates += 1
-            total_bytes += item.size_bytes
-            table.add_row(str(item.path), str(record.store_path), str(item.size_bytes))
+            total_bytes += size_bytes
+            table.add_row(str(yard_path), str(den_path), str(size_bytes))
+    finally:
+        if progress:
+            progress.stop()
     console.print(table)
-    console.print(
-        "[bold yellow]Report only:[/] "
-        f"{candidates} working files ({total_bytes / 1_000_000_000:.2f} GB) appear den-recorded. "
-        "RAWDOG did not delete or move anything."
-    )
+    if hash_check:
+        _print_notice(
+            f"Report only: {candidates} working files ({total_bytes / 1_000_000_000:.2f} GB) "
+            "appear den-recorded and matched by SHA-256. "
+            f"{missing_or_changed} catalog matches were missing or size-changed on disk; "
+            f"{hash_mismatches} had hash mismatches. RAWDOG did not delete or move anything.",
+            style=STYLE_ROW_SELECTED,
+        )
+    elif validate_first:
+        _print_notice(
+            f"Report only: {candidates} working files ({total_bytes / 1_000_000_000:.2f} GB) "
+            "appear den-recorded and were validated on disk by path + size. "
+            f"{missing_or_changed} catalog matches were missing or size-changed on disk. "
+            "RAWDOG did not delete or move anything.",
+            style=STYLE_ROW_SELECTED,
+        )
+    else:
+        _print_notice(
+            f"Report only: {candidates} working files ({total_bytes / 1_000_000_000:.2f} GB) "
+            "match the den catalog by original source path and size. "
+            "This is not a fresh disk/hash validation. Run with --validate-first for path + size checks, "
+            "or --hash-check for SHA-256 matching. "
+            "RAWDOG did not delete or move anything.",
+            style=STYLE_ROW_SELECTED,
+        )
 
 
 projects_app = typer.Typer(help="Manage RAWDOG projects.")
@@ -3071,6 +3279,61 @@ def plans_show(
     )
     if ops:
         _print_plan_operation_review(config, plan_id, rows)
+
+
+def _skip_reason(row: ExecutionPlanRow) -> str:
+    if row.status in {"skipped_existing_same_name_size", "skip_existing_same_name_size"}:
+        return "destination already has same name and size"
+    if row.status == "skipped_existing_partial":
+        return "destination has a pre-existing .partial that needs review"
+    if row.status == "skipped_collision" or row.status == "collision":
+        return "destination has same name but different size"
+    if row.status.startswith("skip"):
+        return "planned skip"
+    return row.audit_status or "skipped"
+
+
+@plans_app.command("skipped")
+def plans_skipped(
+    plan_id: int = typer.Argument(...),
+    limit: int = typer.Option(100, "--limit", min=1, max=1000, help="Skipped rows to show in terminal."),
+    export: Path | None = typer.Option(None, "--export", "-o", help="Optional CSV export path for skipped rows."),
+) -> None:
+    """Show skipped rows for a persisted execution plan."""
+    _, config = _load_or_exit()
+    with session(config.database_path) as connection:
+        plan = get_execution_plan(connection, plan_id)
+        if plan is None:
+            raise typer.BadParameter(f"Unknown plan: {plan_id}")
+        rows = list_execution_plan_rows(connection, plan_id)
+    skipped_rows = [
+        row
+        for row in rows
+        if row.status.startswith("skip") or row.status.startswith("skipped") or row.status == "collision"
+    ]
+    _print_execution_plan_start(plan)
+    if export:
+        export_path = write_operation_manifest(export, _operation_manifest_rows(skipped_rows))
+        console.print(f"Skipped row export written: {export_path}")
+    table = _styled_table(title=f"Plan #{plan_id} Skipped Rows")
+    table.add_column("Row", justify="right")
+    table.add_column("Status")
+    table.add_column("Reason")
+    table.add_column("Source")
+    table.add_column("Destination")
+    for row in skipped_rows[:limit]:
+        table.add_row(
+            str(row.row_id),
+            row.status,
+            _skip_reason(row),
+            str(row.source_path),
+            str(row.destination_path),
+        )
+    console.print(table)
+    if len(skipped_rows) > limit:
+        _print_notice(f"Showing first {limit} of {len(skipped_rows)} skipped rows.", style=STYLE_ROW_SELECTED)
+    if not skipped_rows:
+        _print_notice("No skipped rows found for this plan.", style=STYLE_SAFE)
 
 
 @plans_app.command("ops")

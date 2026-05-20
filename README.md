@@ -90,8 +90,19 @@ archive destinations.
 
 ## Commands
 
-Run `rawdog` with no arguments to open the colored workflow chooser. Use
-`rawdog --help` for the full command reference.
+Run `rawdog` with no arguments to open the colored workflow chooser. The menu is
+organized by job:
+
+- `i` / `init` / `setup` - initialize or change RAWDOG settings.
+- `1` - fetch card or flash-drive files into a working yard.
+- `2` - archive/copy working files into a den; sources stay in place.
+- `3` - cleanup review; report files that appear safe to remove manually.
+- `4` - fast same-drive move into a den; same filesystem only, no overwrites.
+- `5` - audit or inspect a folder, yard, or den.
+- `6` - verify whether a source is represented in a destination.
+- `7` - review, run, resume, or prune old plans.
+
+Use `rawdog --help` for the full command reference.
 
 ```bash
 rawdog init
@@ -282,10 +293,19 @@ boundary.
 
 `junkyard` is report-only. It compares registered yard files against registered
 den catalogs and reports working files that appear safe to review for removal
-because they are already recorded in a den. RAWDOG does not delete them.
+because they are already recorded in a den. By default this is a fast catalog
+match by original source path and size, not a fresh file-by-file validation.
+Use `--validate-first` to also check matched den files on disk by path and size
+before they appear in the report. Use `--hash-check` for the meticulous mode:
+RAWDOG reads both the yard file and matched den file and requires matching
+SHA-256 before reporting the file as cleanup-safe. `--hash-check` can take a
+long time on large libraries and implies `--validate-first`. RAWDOG does not
+delete them.
 
 ```bash
 rawdog junkyard --yard primary --den primary
+rawdog junkyard --yard primary --den primary --validate-first
+rawdog junkyard --yard primary --den primary --hash-check
 ```
 
 If RAWDOG is interrupted, rerun `rawdog plans list`, inspect the latest started
