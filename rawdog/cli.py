@@ -100,6 +100,15 @@ from rawdog.queue import (
     list_queues,
 )
 from rawdog.reports import write_operation_manifest
+from rawdog.runlock import (
+    ActiveRunError,
+    active_run_is_alive,
+    active_run_path,
+    begin_active_run,
+    clear_active_run,
+    finish_active_run,
+    read_active_run,
+)
 from rawdog.safety import (
     SafetyError,
     ensure_consolidation_roots,
@@ -2305,6 +2314,24 @@ def _execute_persisted_plan(config: RawdogConfig, plan_id: int) -> ExecutionPlan
         if plan is None:
             raise typer.BadParameter(f"Unknown plan: {plan_id}")
         rows = list_execution_plan_rows(connection, plan_id)
+    try:
+        begin_active_run(config.database_path, plan_id=plan_id, what=plan.what)
+    except ActiveRunError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    try:
+        return _execute_persisted_plan_unlocked(config, plan, rows)
+    finally:
+        finish_active_run(config.database_path, plan_id=plan_id)
+
+
+def _execute_persisted_plan_unlocked(
+    config: RawdogConfig,
+    plan: ExecutionPlan,
+    rows: list[ExecutionPlanRow],
+) -> ExecutionPlan:
+    plan_id = plan.plan_id
+    with session(config.database_path) as connection:
         mark_execution_plan_started(connection, plan_id)
 
     transferred = 0
@@ -2719,10 +2746,19 @@ def status() -> None:
         profiles = list_profiles(connection)
         stores = list_stores(connection)
         latest_plans = list_execution_plans(connection, limit=3)
+    active_run = _read_active_run_or_none(config)
     table.add_row("Projects", str(len(projects)))
     table.add_row("Profiles", str(len(profiles)))
     table.add_row("Known stores", str(len(stores)))
+    if active_run:
+        state = "running" if active_run_is_alive(active_run) else "stale"
+        table.add_row(
+            "Active run",
+            f"plan #{active_run.plan_id} ({state}, pid {active_run.pid})",
+        )
     console.print(table)
+    if active_run:
+        _print_active_run_notice(config)
     if latest_plans:
         plan_table = _styled_table(title="Recent Execution Plans")
         plan_table.add_column("ID")
@@ -3316,6 +3352,74 @@ def _skip_reason(row: ExecutionPlanRow) -> str:
     if row.status.startswith("skip"):
         return "planned skip"
     return row.audit_status or "skipped"
+
+
+def _print_active_run_notice(config: RawdogConfig) -> None:
+    run = _read_active_run_or_none(config)
+    if run is None:
+        _print_notice("No active RAWDOG plan marker found.", style=STYLE_SAFE)
+        return
+    state = "running" if active_run_is_alive(run) else "stale"
+    lines = [
+        f"Plan: #{run.plan_id}",
+        f"PID: {run.pid}",
+        f"State: {state}",
+        f"Started: {run.started_at.isoformat()}",
+        f"What: {run.what}",
+        f"Marker: {active_run_path(config.database_path)}",
+    ]
+    if state == "running":
+        lines.append("Avoid brew upgrades, drive disconnects, or starting another plan until this finishes.")
+    else:
+        lines.append("If no RAWDOG copy/move is running, clear this with: rawdog plans active-clear --force")
+    console.print(Panel("\n".join(lines), title="Active RAWDOG Run", border_style="yellow", style=STYLE_PANEL))
+
+
+def _read_active_run_or_none(config: RawdogConfig):
+    try:
+        return read_active_run(config.database_path)
+    except (OSError, ValueError, KeyError):
+        _print_notice(
+            f"Active-run marker is unreadable: {active_run_path(config.database_path)}",
+            style=STYLE_WARN,
+        )
+        _print_notice("If no RAWDOG copy/move is running, clear it with: rawdog plans active-clear --force")
+        return None
+
+
+@plans_app.command("active")
+def plans_active() -> None:
+    """Show the active plan execution marker, if any."""
+    _, config = _load_or_exit()
+    _print_active_run_notice(config)
+
+
+@plans_app.command("active-clear")
+def plans_active_clear(force: bool = typer.Option(False, "--force", help="Clear a stale active-run marker.")) -> None:
+    """Clear a stale active plan marker after confirming no RAWDOG copy/move is running."""
+    _, config = _load_or_exit()
+    try:
+        run = read_active_run(config.database_path)
+    except (OSError, ValueError, KeyError):
+        if not force:
+            raise typer.BadParameter("Active-run marker is unreadable. Use --force to clear it.") from None
+        removed = clear_active_run(config.database_path)
+        if removed:
+            _print_notice("Cleared unreadable active-run marker.", style=STYLE_WARN)
+        return
+    if run is None:
+        _print_notice("No active RAWDOG plan marker found.", style=STYLE_SAFE)
+        return
+    if active_run_is_alive(run) and not force:
+        raise typer.BadParameter(
+            f"Plan #{run.plan_id} still appears to be running as PID {run.pid}. "
+            "Use --force only if you are certain that process is not an active RAWDOG copy/move."
+        )
+    if not force:
+        raise typer.BadParameter("Use --force to clear the active-run marker.")
+    removed = clear_active_run(config.database_path)
+    if removed:
+        _print_notice(f"Cleared active-run marker for plan #{run.plan_id}.", style=STYLE_WARN)
 
 
 @plans_app.command("skipped")

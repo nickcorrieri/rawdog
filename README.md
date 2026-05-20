@@ -135,6 +135,8 @@ rawdog plans list
 rawdog plans show
 rawdog plans ops
 rawdog plans resume
+rawdog plans active
+rawdog plans active-clear --force
 ```
 
 ## Cleanup Consolidation
@@ -345,6 +347,17 @@ Python filesystem APIs it will use, such as `Path.mkdir`, Python file copy,
 `shutil.copystat`, `os.rename`, and macOS `setattrlist` best-effort metadata
 preservation, plus the source, destination, partial path, and safety rule for
 each row. Commit and resume prompts require `COMMIT PLAN <id>` after this review.
+
+While a plan is executing, RAWDOG writes an `active-run.json` marker beside the
+local SQLite database. `rawdog status` and `rawdog plans active` show that active
+run and warn you to avoid Homebrew upgrades, drive disconnects, or starting
+another plan while a copy/move is running. If RAWDOG is force-killed and the
+marker is left behind, clear it only after confirming no RAWDOG copy/move is
+running:
+
+```bash
+rawdog plans active-clear --force
+```
 
 `.partial` files are temporary transfer artifacts created only under the
 destination root during copy. They are not original RAW/camera video files, are ignored during
