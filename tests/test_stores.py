@@ -108,6 +108,28 @@ def test_rebuild_store_catalog_scans_disk_removes_stale_and_preserves_source_lin
     assert [row[0] for row in rows] == ["2026/IMG_0001.CR3", "2026/IMG_0002.CR3"]
 
 
+def test_rebuild_store_catalog_can_rebuild_yard_catalog(tmp_path: Path) -> None:
+    database = tmp_path / "rawdog.sqlite"
+    yard_root = tmp_path / "yard"
+    yard_file = yard_root / "Game" / "IMG_0001.JPG"
+    yard_file.parent.mkdir(parents=True)
+    yard_file.write_bytes(b"jpeg")
+    initialize(database)
+
+    with session(database) as connection:
+        store = create_or_update_store(
+            connection,
+            StoreCreate(name="primary", root_path=yard_root, store_kind=StoreKind.YARD),
+        )
+
+    result = rebuild_store_catalog(store, scan_raw_files(yard_root), dry_run=False)
+
+    assert result.scanned_files == 1
+    with sqlite3.connect(store_db_path(yard_root)) as connection:
+        rows = connection.execute("SELECT relative_path, size_bytes FROM store_files").fetchall()
+    assert rows == [("Game/IMG_0001.JPG", 4)]
+
+
 def test_stores_track_last_used_and_keep_primary_first(tmp_path: Path) -> None:
     database = tmp_path / "rawdog.sqlite"
     primary_root = tmp_path / "primary"

@@ -1434,16 +1434,7 @@ def _print_fast_move_guidance() -> None:
 
 def _home_backup() -> None:
     _print_copy_to_den_guidance()
-    source = _choose_store_path("Working project/source", StoreKind.YARD)
-    destination = _choose_store_path("Archive destination", StoreKind.DEN)
-    project_name = _optional_prompt("Project name, or Enter to skip")
-    backup(
-        project_name=project_name,
-        source=source,
-        destinations=[destination],
-        profile=None,
-        dry_run=True,
-    )
+    _home_den(action=DenTransferAction.COPY, show_guidance=False)
 
 
 def _home_cleanup_review() -> None:
@@ -1486,8 +1477,8 @@ def _home_fast_move() -> None:
     _home_den(action=DenTransferAction.MOVE)
 
 
-def _home_den(action: DenTransferAction = DenTransferAction.COPY) -> None:
-    if action == DenTransferAction.COPY:
+def _home_den(action: DenTransferAction = DenTransferAction.COPY, *, show_guidance: bool = True) -> None:
+    if action == DenTransferAction.COPY and show_guidance:
         _print_den_guidance()
     source = _choose_source_path("Messy source")
     destination = _choose_den_destination_path("Clean destination")
@@ -1751,17 +1742,21 @@ def _home_inspect() -> None:
     _print_option("1.", "Sniff a folder, yard, or den")
     _print_option("2.", "Score a folder for consolidation readiness")
     _print_option("3.", "Rebuild a den catalog from files on disk")
+    _print_option("4.", "Rebuild a yard catalog from files on disk")
     _print_option("0.", "Back")
     action = Prompt.ask(
         _prompt("Choose audit action"),
-        choices=["0", "1", "2", "3", "sniff", "score", "rebuild"],
+        choices=["0", "1", "2", "3", "4", "sniff", "score", "rebuild", "rebuild-den", "rebuild-yard"],
         default="1",
         console=console,
     )
     if action == "0":
         return
-    if action in {"3", "rebuild"}:
-        _home_rebuild_den_catalog()
+    if action in {"3", "rebuild", "rebuild-den"}:
+        _home_rebuild_store_catalog(StoreKind.DEN)
+        return
+    if action in {"4", "rebuild-yard"}:
+        _home_rebuild_store_catalog(StoreKind.YARD)
         return
     root = _choose_source_path("Folder to inspect")
     if action in {"2", "score"}:
@@ -1770,17 +1765,18 @@ def _home_inspect() -> None:
     sniff(roots=[root])
 
 
-def _home_rebuild_den_catalog() -> None:
+def _home_rebuild_store_catalog(store_kind: StoreKind) -> None:
+    noun = "den" if store_kind == StoreKind.DEN else "yard"
     _print_notice(
-        "Rebuild scans every RAW/camera video file currently in a den and rewrites that den's portable catalog.",
+        f"Rebuild scans every RAW/camera video/JPEG file currently in a {noun} and rewrites that {noun}'s portable catalog.",
         style=STYLE_ROW_SELECTED,
     )
-    den_root = _choose_store_path("Den catalog to rebuild", StoreKind.DEN)
-    store = _store_for_exact_path(den_root, StoreKind.DEN)
+    root = _choose_store_path(f"{noun.title()} catalog to rebuild", store_kind)
+    store = _store_for_exact_path(root, store_kind)
     if store is None:
-        raise typer.BadParameter("Selected den is not registered. Use option 9 to register it first.")
-    dry_run = not _yes_no("Write rebuilt den catalog now?", default=False)
-    _rebuild_den_catalog(store, dry_run=dry_run)
+        raise typer.BadParameter(f"Selected {noun} is not registered. Use option 9 to register it first.")
+    dry_run = not _yes_no(f"Write rebuilt {noun} catalog now?", default=False)
+    _rebuild_store_catalog(store, dry_run=dry_run)
 
 
 def _home_verify() -> None:
@@ -3681,25 +3677,30 @@ def _print_store_table(store_kind: StoreKind) -> None:
 
 
 def _resolve_den_store(identifier: str) -> Store:
+    return _resolve_store(identifier, StoreKind.DEN)
+
+
+def _resolve_store(identifier: str, store_kind: StoreKind) -> Store:
     _, config = _load_or_exit()
     with session(config.database_path) as connection:
-        store = get_store_by_name(connection, identifier, StoreKind.DEN)
+        store = get_store_by_name(connection, identifier, store_kind)
         if store is None:
-            rows = [row for row in list_stores(connection, StoreKind.DEN) if row.store_id == identifier]
+            rows = [row for row in list_stores(connection, store_kind) if row.store_id == identifier]
             store = rows[0] if rows else None
         if store is None:
             path = parse_user_path(identifier)
-            store = find_store_for_path(connection, path, StoreKind.DEN)
+            store = find_store_for_path(connection, path, store_kind)
         if store is None:
-            raise typer.BadParameter(f"No den store named, identified, or containing {identifier!r}.")
+            raise typer.BadParameter(f"No {store_kind.value} store named, identified, or containing {identifier!r}.")
         return mark_store_used(connection, store.store_id)
 
 
-def _print_den_rebuild_result(store: Store, result: StoreCatalogRebuildResult) -> None:
-    table = _styled_table(title=f"Den Catalog {'Preview' if result.dry_run else 'Rebuild'}")
+def _print_store_rebuild_result(store: Store, result: StoreCatalogRebuildResult) -> None:
+    noun = store.store_kind.value.title()
+    table = _styled_table(title=f"{noun} Catalog {'Preview' if result.dry_run else 'Rebuild'}")
     table.add_column("Metric")
     table.add_column("Value", justify="right")
-    table.add_row("Den", f"{store.name} ({store.store_id})")
+    table.add_row(noun, f"{store.name} ({store.store_id})")
     table.add_row("Root", str(store.root_path))
     table.add_row("Scanned files", str(result.scanned_files))
     table.add_row("Scanned GB", f"{result.total_bytes / 1_000_000_000:.2f}")
@@ -3709,20 +3710,27 @@ def _print_den_rebuild_result(store: Store, result: StoreCatalogRebuildResult) -
     table.add_row("Mode", "dry-run" if result.dry_run else "committed")
     console.print(table)
     if result.dry_run:
-        _print_notice("Dry run only. Re-run with --commit to rewrite the den catalog.", style=STYLE_ROW_SELECTED)
+        _print_notice(
+            f"Dry run only. Re-run with --commit to rewrite the {store.store_kind.value} catalog.",
+            style=STYLE_ROW_SELECTED,
+        )
     else:
-        _print_notice("Den catalog rebuilt from files currently on disk.", style=STYLE_SAFE)
+        _print_notice(f"{noun} catalog rebuilt from files currently on disk.", style=STYLE_SAFE)
 
 
 def _rebuild_den_catalog(store: Store, *, dry_run: bool) -> StoreCatalogRebuildResult:
+    return _rebuild_store_catalog(store, dry_run=dry_run)
+
+
+def _rebuild_store_catalog(store: Store, *, dry_run: bool) -> StoreCatalogRebuildResult:
     try:
-        ensure_existing_directory(store.root_path, "den root")
+        ensure_existing_directory(store.root_path, f"{store.store_kind.value} root")
     except SafetyError as exc:
         raise typer.BadParameter(str(exc)) from exc
-    _print_notice(f"Scanning den: {store.root_path}", style=STYLE_ROW_SELECTED)
+    _print_notice(f"Scanning {store.store_kind.value}: {store.root_path}", style=STYLE_ROW_SELECTED)
     items = scan_raw_files(store.root_path)
     result = rebuild_store_catalog(store, items, dry_run=dry_run)
-    _print_den_rebuild_result(store, result)
+    _print_store_rebuild_result(store, result)
     return result
 
 
@@ -3786,6 +3794,16 @@ def yard_remove(
 ) -> None:
     """Forget a yard registration without deleting files or portable metadata."""
     _remove_store(identifier, StoreKind.YARD, yes=yes)
+
+
+@yard_app.command("rebuild")
+def yard_rebuild(
+    identifier: str = typer.Argument("primary", help="Yard name, store ID, or path."),
+    dry_run: bool = typer.Option(True, "--dry-run/--commit", help="Preview before rewriting the yard catalog."),
+) -> None:
+    """Rebuild a yard's portable catalog from the files currently on disk."""
+    store = _resolve_store(identifier, StoreKind.YARD)
+    _rebuild_store_catalog(store, dry_run=dry_run)
 
 
 @profiles_app.command("create")
@@ -4108,25 +4126,31 @@ def plans_skipped(
     if export:
         export_path = write_operation_manifest(export, _operation_manifest_rows(skipped_rows))
         console.print(f"Skipped row export written: {export_path}")
-    table = _styled_table(title=f"Plan #{plan_id} Skipped Rows")
-    table.add_column("Row", justify="right")
-    table.add_column("Status")
-    table.add_column("Reason")
-    table.add_column("Source")
-    table.add_column("Destination")
+    _print_section_row(f"Plan #{plan_id} Skipped Rows")
     for row in skipped_rows[:limit]:
-        table.add_row(
-            str(row.row_id),
-            row.status,
-            _skip_reason(row),
-            str(row.source_path),
-            str(row.destination_path),
+        console.print(
+            Panel(
+                "\n".join(_skipped_row_lines(row)),
+                title=f"Skipped Row #{row.row_id}",
+                border_style="yellow",
+                style=STYLE_PANEL,
+                expand=True,
+            )
         )
-    console.print(table)
     if len(skipped_rows) > limit:
         _print_notice(f"Showing first {limit} of {len(skipped_rows)} skipped rows.", style=STYLE_ROW_SELECTED)
     if not skipped_rows:
         _print_notice("No skipped rows found for this plan.", style=STYLE_SAFE)
+
+
+def _skipped_row_lines(row: ExecutionPlanRow) -> list[str]:
+    return [
+        f"Status: {row.status}",
+        f"Reason: {_skip_reason(row)}",
+        f"Size: {_format_bytes(row.size_bytes)}",
+        f"Source: {row.source_path}",
+        f"Destination: {row.destination_path}",
+    ]
 
 
 def _print_plan_review_rows(plan_id: int, rows: list[ExecutionPlanRow], *, start: int, page_size: int) -> None:

@@ -140,6 +140,21 @@ def test_confirm_store_registration_includes_selected_path(tmp_path: Path, monke
     assert f"Selected archive den: {tmp_path.resolve()}" in rows[0]
 
 
+def test_home_backup_uses_copy_den_planner(monkeypatch) -> None:
+    calls: list[tuple[cli.DenTransferAction, bool]] = []
+
+    monkeypatch.setattr(cli, "_print_copy_to_den_guidance", lambda: None)
+    monkeypatch.setattr(
+        cli,
+        "_home_den",
+        lambda action, show_guidance=True: calls.append((action, show_guidance)),
+    )
+
+    cli._home_backup()
+
+    assert calls == [(cli.DenTransferAction.COPY, False)]
+
+
 def test_browse_den_destination_can_select_known_den_under_current_path(tmp_path: Path, monkeypatch) -> None:
     den_root = tmp_path / "archive"
     den_root.mkdir()

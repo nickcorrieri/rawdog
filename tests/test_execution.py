@@ -156,6 +156,16 @@ def test_plan_review_filter_includes_failed_skipped_and_review_rows(tmp_path: Pa
     assert [row.row_id for row in review_rows] == [2, 3, 4, 5]
 
 
+def test_skipped_row_lines_show_full_source_and_destination() -> None:
+    row = _row(3, "skipped_existing_same_name_size", "not_applicable")
+
+    lines = cli._skipped_row_lines(row)
+
+    assert "Reason: destination already has same name and size" in lines
+    assert f"Source: {row.source_path}" in lines
+    assert f"Destination: {row.destination_path}" in lines
+
+
 def test_wings_command_builder_wraps_rawdog_subcommand() -> None:
     command = cli._build_wings_command(
         caffeinate_path="/usr/bin/caffeinate",
