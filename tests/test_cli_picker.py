@@ -6,6 +6,7 @@ from pathlib import Path
 from rawdog import cli
 from rawdog.config import build_config
 from rawdog.db import initialize, session
+from rawdog.inventory import InventoryItem
 from rawdog.models import OrganizationMode, StoreCreate, StoreKind
 from rawdog.stores import create_or_update_store
 
@@ -307,6 +308,23 @@ def test_duplicate_year_destination_paths_ignores_den_name_year_prefix() -> None
     good = den / "2024" / "IMG_0001.CR3"
 
     assert cli._duplicate_year_destination_paths([good], destination_root=den) == []
+
+
+def test_duplicate_name_groups_reports_repeated_filenames(tmp_path: Path) -> None:
+    first = tmp_path / "a" / "IMG_0001.CR3"
+    second = tmp_path / "b" / "IMG_0001.CR3"
+    unique = tmp_path / "IMG_0002.CR3"
+    first.parent.mkdir()
+    second.parent.mkdir()
+    items = [
+        InventoryItem(first, Path("a/IMG_0001.CR3"), 10, 1),
+        InventoryItem(second, Path("b/IMG_0001.CR3"), 10, 1),
+        InventoryItem(unique, Path("IMG_0002.CR3"), 10, 1),
+    ]
+
+    groups = cli._duplicate_name_groups(items)
+
+    assert groups == {"IMG_0001.CR3": [first, second]}
 
 
 def _answers(*values: str):

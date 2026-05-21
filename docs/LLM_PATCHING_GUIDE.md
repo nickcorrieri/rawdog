@@ -92,6 +92,7 @@ for that tradeoff.
 | Store repair | Setup should relink existing portable stores and repair wrong den/yard registration kind. |
 | Den rebuild | `rawdog dens rebuild` rebuilds a den catalog from files on disk without moving media. |
 | Yard rebuild | `rawdog yard rebuild` rebuilds a yard catalog from files on disk without moving media. |
+| Slow audit | Slow full audit is read-only; SHA-256 grouping is opt-in because it reads file contents and can take a long time. |
 | Junkyard | Junkyard is report-only and does not delete files. |
 | Scrap | `junkyard-scrap` uses explicit report paths, dry-runs by default, and revalidates roots and file sizes. |
 | Exact cleanup | `--hash-check` verifies SHA-256 for meticulous cleanup reports. |

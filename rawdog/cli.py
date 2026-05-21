@@ -7,6 +7,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+from collections import Counter, defaultdict
 from dataclasses import replace
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -64,6 +65,7 @@ from rawdog.memory import (
     build_destination_memory,
     write_destination_memory,
 )
+from rawdog.metadata import capture_time_fallback
 from rawdog.models import (
     CollisionPolicy,
     ConsolidationWorkflowCreate,
@@ -134,7 +136,7 @@ from rawdog.stores import (
     record_store_file,
     remove_store_registration,
 )
-from rawdog.verifier import verify_same_bytes
+from rawdog.verifier import sha256_file, verify_same_bytes
 from rawdog.workflows import (
     create_or_update_workflow,
     get_workflow_by_name,
@@ -1787,10 +1789,26 @@ def _home_inspect() -> None:
     _print_option("2.", "Score a folder for consolidation readiness")
     _print_option("3.", "Rebuild a den catalog from files on disk")
     _print_option("4.", "Rebuild a yard catalog from files on disk")
+    _print_option("5.", "Slow full audit: inventory, dates, duplicates, optional hashes")
     _print_option("0.", "Back")
     action = Prompt.ask(
         _prompt("Choose audit action"),
-        choices=["0", "1", "2", "3", "4", "sniff", "score", "rebuild", "rebuild-den", "rebuild-yard"],
+        choices=[
+            "0",
+            "1",
+            "2",
+            "3",
+            "4",
+            "5",
+            "sniff",
+            "score",
+            "rebuild",
+            "rebuild-den",
+            "rebuild-yard",
+            "slow",
+            "full",
+            "hardcore",
+        ],
         default="1",
         console=console,
     )
@@ -1802,11 +1820,140 @@ def _home_inspect() -> None:
     if action in {"4", "rebuild-yard"}:
         _home_rebuild_store_catalog(StoreKind.YARD)
         return
+    if action in {"5", "slow", "full", "hardcore"}:
+        _home_hardcore_audit()
+        return
     root = _choose_source_path("Folder to inspect")
     if action in {"2", "score"}:
         score(root=root)
         return
     sniff(roots=[root])
+
+
+def _home_hardcore_audit() -> None:
+    console.print(
+        Panel(
+            "\n".join(
+                [
+                    "Slow full audit is read-only.",
+                    "It scans RAW/JPEG/camera-video files, totals size, checks date spread, and reports duplicate filenames.",
+                    "Optional SHA-256 grouping reads file contents and can take a long time on large drives.",
+                ]
+            ),
+            title="Slow Full Audit",
+            border_style="yellow",
+            style=STYLE_PANEL,
+            expand=True,
+        )
+    )
+    root = _choose_source_path("Folder to audit")
+    hash_check = _yes_no("Also run slow SHA-256 duplicate-content check?", default=False)
+    _run_hardcore_audit(root, hash_check=hash_check)
+
+
+def _run_hardcore_audit(root: Path, *, hash_check: bool = False) -> None:
+    root = root.expanduser().resolve()
+    _print_notice(f"Scanning files under: {root}", style=STYLE_ROW_SELECTED)
+    items = scan_raw_files(root)
+    total_bytes = sum(item.size_bytes for item in items)
+    extensions = Counter(item.path.suffix.lower() or "[none]" for item in items)
+    years = Counter(str(capture_time_fallback(item.path).year) for item in items)
+    duplicate_names = _duplicate_name_groups(items)
+
+    table = _styled_table(title="Slow Full Audit Summary")
+    table.add_column("Metric")
+    table.add_column("Value", justify="right")
+    table.add_row("Root", str(root))
+    table.add_row("Camera-original files", str(len(items)))
+    table.add_row("Total size", _format_bytes(total_bytes))
+    table.add_row("Extensions", str(len(extensions)))
+    table.add_row("Capture years", str(len(years)))
+    table.add_row("Duplicate filenames", str(len(duplicate_names)))
+    table.add_row("SHA-256 content check", "yes" if hash_check else "no")
+    console.print(table)
+
+    _print_counter_table("Files By Extension", extensions)
+    _print_counter_table("Files By Capture Year", years)
+    _print_duplicate_name_table(duplicate_names)
+    if hash_check:
+        _print_hash_duplicate_audit(items)
+    else:
+        _print_notice("Hash check skipped. Re-run slow audit and answer yes for byte-level duplicate grouping.")
+
+
+def _duplicate_name_groups(items) -> dict[str, list[Path]]:
+    groups: dict[str, list[Path]] = defaultdict(list)
+    for item in items:
+        groups[item.path.name].append(item.path)
+    return {name: paths for name, paths in groups.items() if len(paths) > 1}
+
+
+def _print_counter_table(title: str, counts: Counter[str], *, limit: int = 12) -> None:
+    if not counts:
+        return
+    table = _styled_table(title=title)
+    table.add_column("Value")
+    table.add_column("Files", justify="right")
+    for value, count in counts.most_common(limit):
+        table.add_row(value, str(count))
+    console.print(table)
+
+
+def _print_duplicate_name_table(duplicate_names: dict[str, list[Path]], *, limit: int = 20) -> None:
+    if not duplicate_names:
+        _print_notice("No duplicate filenames found.", style=STYLE_SAFE)
+        return
+    table = _styled_table(title=f"Top {min(limit, len(duplicate_names))} Duplicate Filenames")
+    table.add_column("Filename")
+    table.add_column("Count", justify="right")
+    table.add_column("Example Path", overflow="fold")
+    for name, paths in sorted(duplicate_names.items(), key=lambda item: len(item[1]), reverse=True)[:limit]:
+        table.add_row(name, str(len(paths)), str(paths[0]))
+    console.print(table)
+    _print_notice("Duplicate filenames are not necessarily duplicate files. Use hash check for byte-level grouping.")
+
+
+def _print_hash_duplicate_audit(items, *, limit: int = 20) -> None:
+    size_groups: dict[int, list[Path]] = defaultdict(list)
+    for item in items:
+        size_groups[item.size_bytes].append(item.path)
+    candidates = [paths for paths in size_groups.values() if len(paths) > 1]
+    if not candidates:
+        _print_notice("No same-size files found for hash duplicate grouping.", style=STYLE_SAFE)
+        return
+
+    digest_groups: dict[str, list[Path]] = defaultdict(list)
+    total_candidates = sum(len(paths) for paths in candidates)
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        TimeElapsedColumn(),
+        TimeRemainingColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Hashing same-size files", total=total_candidates)
+        for paths in candidates:
+            for path in paths:
+                try:
+                    digest_groups[sha256_file(path)].append(path)
+                except OSError:
+                    _print_error(f"Could not hash: {path}")
+                progress.advance(task)
+    duplicate_hashes = {digest: paths for digest, paths in digest_groups.items() if len(paths) > 1}
+    if not duplicate_hashes:
+        _print_notice("No byte-identical duplicate groups found.", style=STYLE_SAFE)
+        return
+    table = _styled_table(title=f"Top {min(limit, len(duplicate_hashes))} SHA-256 Duplicate Groups")
+    table.add_column("Files", justify="right")
+    table.add_column("Size")
+    table.add_column("Example Paths", overflow="fold")
+    for paths in sorted(duplicate_hashes.values(), key=len, reverse=True)[:limit]:
+        size = paths[0].stat().st_size
+        examples = "\n".join(str(path) for path in paths[:3])
+        table.add_row(str(len(paths)), _format_bytes(size), examples)
+    console.print(table)
 
 
 def _home_rebuild_store_catalog(store_kind: StoreKind) -> None:

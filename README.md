@@ -97,7 +97,7 @@ organized by job:
 - `DC` - den copy/archive working files into a den; sources stay in place.
 - `J` - junkyard cleanup review; report den-recorded files for manual removal.
 - `DM` - den move/consolidate same-drive files into a den.
-- `S` - sniff, audit, inspect, score, or rebuild a folder, yard, or den.
+- `S` - sniff, audit, inspect, score, run slow full audit, or rebuild a folder, yard, or den.
 - `P` - review, run, resume, or prune old plans.
 - `W` - work queue for longer safe jobs.
 - `M` - manage initial setup, defaults, dens, yards, and stores.
@@ -174,6 +174,8 @@ rawdog dens remove primary
 rawdog yard remove primary
 rawdog sniff /Volumes/OldDrive
 rawdog score /Volumes/OldDrive
+rawdog
+# choose S, then 5 for slow full audit
 rawdog den /Volumes/OldDrive --dest /Volumes/Archive
 rawdog den /Volumes/OldDrive --dest /Volumes/Archive --commit
 ```
