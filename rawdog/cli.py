@@ -1208,38 +1208,32 @@ def _show_home_menu() -> None:
             row_styles=STYLE_ROWS,
             expand=True,
         )
-        table.add_column("Option", style=STYLE_ACTION, justify="right")
+        table.add_column("Key", style=STYLE_ACTION, justify="right")
         table.add_column("Workflow", style=STYLE_SAFE)
         table.add_column("Action", style=STYLE_PATH)
-        table.add_row("i", "Setup / settings", "Set yards, dens, and defaults")
-        table.add_row("1", "Fetch card -> Yard", "Copy card/flash files to yard")
-        table.add_row("2", "COPY/archive -> Den", "Copy files to archive; source stays")
-        table.add_row("3", "Junkyard report only", "No writes; reports den-recorded files")
-        table.add_row("4", "MOVE same-drive -> Den", "Move files with same-filesystem rename")
-        table.add_row("5", "Audit / inspect folder", "Sniff layout or score a folder")
-        table.add_row("6", "Verify source -> destination", "Check source is represented")
-        table.add_row("7", "Review / resume old plans", "Inspect, run, resume, or prune")
-        table.add_row("8", "Help", "Show command examples")
-        table.add_row("9", "Den / yard management", "Create, relink, list, or forget stores")
-        table.add_row("0", "Quit", "Exit RAWDOG")
+        table.add_row("F", "Fetch -> Yard", "Copy card/folder files to a working yard")
+        table.add_row("DC", "Den COPY", "Copy/archive files to a den; source stays")
+        table.add_row("J", "Junkyard report only", "No deletes; reports den-recorded working files")
+        table.add_row("DM", "Den MOVE", "Same-drive consolidate into a den")
+        table.add_row("S", "Sniff / audit", "Audit folders; score/rebuild catalogs")
+        table.add_row("P", "Plans", "View, inspect, run, resume, or prune plans")
+        table.add_row("W", "Work queue", "Build or preview longer safe queued jobs")
+        table.add_row("M", "Manage", "Setup/defaults; manage dens and yards")
+        table.add_row("H", "Help", "Show command examples")
+        table.add_row("Q", "Quit", "Exit RAWDOG")
         console.print(table)
         _print_full_row(
             [
                 ("Preview-first: ", STYLE_WARN),
-                ("fetch, breed, and den do not write archive files unless you explicitly choose commit.", STYLE_WARN),
+                ("fetch and den do not write archive files unless you explicitly choose commit.", STYLE_WARN),
             ],
             style=STYLE_WARN,
         )
         if not _is_initialized():
             _print_init_guidance()
         _print_latest_plan_hint()
-        choice = Prompt.ask(
-            _prompt("CHOOSE AN OPTION"),
-            choices=["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "i", "init", "initialize", "setup"],
-            default="i" if not _is_initialized() else "1",
-            console=console,
-        )
-        if choice == "0":
+        choice = _ask_home_choice(default="m" if not _is_initialized() else "f")
+        if choice == "q":
             _print_notice("Goodbye.", style=STYLE_SAFE)
             return
         try:
@@ -1254,6 +1248,57 @@ def _show_home_menu() -> None:
             _prompt("Press Enter to return to RAWDOG"),
             console=console,
         )
+
+
+def _ask_home_choice(default: str) -> str:
+    while True:
+        choice = Prompt.ask(_prompt("CHOOSE A WORKFLOW"), default=default, console=console)
+        normalized = _normalize_home_choice(choice)
+        if normalized:
+            return normalized
+        _print_error("Choose one of: F, DC, DM, J, S, P, W, M, H, Q.")
+
+
+def _normalize_home_choice(choice: str) -> str | None:
+    normalized = choice.strip().lower().replace(" ", "").replace("-", "")
+    aliases = {
+        "f": "f",
+        "fetch": "f",
+        "dc": "dc",
+        "copy": "dc",
+        "dencopy": "dc",
+        "j": "j",
+        "junkyard": "j",
+        "dm": "dm",
+        "move": "dm",
+        "denmove": "dm",
+        "consolidate": "dm",
+        "s": "s",
+        "sniff": "s",
+        "audit": "s",
+        "inspect": "s",
+        "p": "p",
+        "plans": "p",
+        "plan": "p",
+        "w": "w",
+        "work": "w",
+        "queue": "w",
+        "qjob": "w",
+        "m": "m",
+        "manage": "m",
+        "settings": "m",
+        "stores": "m",
+        "i": "m",
+        "init": "m",
+        "initialize": "m",
+        "setup": "m",
+        "h": "h",
+        "help": "h",
+        "q": "q",
+        "quit": "q",
+        "exit": "q",
+    }
+    return aliases.get(normalized)
 
 
 def _print_latest_plan_hint() -> None:
@@ -1295,26 +1340,25 @@ def _parse_cli_date(value: str) -> date:
 
 
 def _run_home_choice(choice: str) -> None:
-    if choice in {"i", "init", "initialize", "setup"}:
-        _home_init()
-    elif choice == "1":
+    normalized = _normalize_home_choice(choice) or choice
+    if normalized == "f":
         _home_fetch()
-    elif choice == "2":
+    elif normalized == "dc":
         _home_backup()
-    elif choice == "3":
+    elif normalized == "j":
         _home_cleanup_review()
-    elif choice == "4":
+    elif normalized == "dm":
         _home_fast_move()
-    elif choice == "5":
+    elif normalized == "s":
         _home_inspect()
-    elif choice == "6":
-        _home_verify()
-    elif choice == "7":
+    elif normalized == "p":
         _home_status()
-    elif choice == "8":
-        _show_command_examples()
-    elif choice == "9":
+    elif normalized == "w":
+        _show_queue_examples()
+    elif normalized == "m":
         _home_store_setup()
+    elif normalized == "h":
+        _show_command_examples()
 
 
 def _home_init() -> None:
@@ -1421,7 +1465,7 @@ def _print_fast_move_guidance() -> None:
                     "5. Skipped/existing rows stay in the source folder for review; RAWDOG does not delete them.",
                     "",
                     "Use this to clean up same-drive folder mess without duplicating storage.",
-                    "For copy/archive, use menu option 2 instead.",
+                    "For copy/archive, use top-level workflow DC instead.",
                 ]
             ),
             title="Fast Same-Drive MOVE -> Den",
@@ -1458,9 +1502,9 @@ def _home_cleanup_review() -> None:
     yard_store = _store_for_exact_path(yard, StoreKind.YARD)
     den_store = _store_for_exact_path(den_root, StoreKind.DEN)
     if yard_store is None:
-        raise typer.BadParameter("Selected yard is not registered. Use option 9 to register it first.")
+        raise typer.BadParameter("Selected yard is not registered. Use top-level M to register it first.")
     if den_store is None:
-        raise typer.BadParameter("Selected den is not registered. Use option 9 to register it first.")
+        raise typer.BadParameter("Selected den is not registered. Use top-level M to register it first.")
     before = _optional_prompt("Only report yard files modified before YYYY-MM-DD, or Enter for all")
     _run_junkyard(
         yard_name=yard_store.name,
@@ -1774,7 +1818,7 @@ def _home_rebuild_store_catalog(store_kind: StoreKind) -> None:
     root = _choose_store_path(f"{noun.title()} catalog to rebuild", store_kind)
     store = _store_for_exact_path(root, store_kind)
     if store is None:
-        raise typer.BadParameter(f"Selected {noun} is not registered. Use option 9 to register it first.")
+        raise typer.BadParameter(f"Selected {noun} is not registered. Use top-level M to register it first.")
     dry_run = not _yes_no(f"Write rebuilt {noun} catalog now?", default=False)
     _rebuild_store_catalog(store, dry_run=dry_run)
 
@@ -1842,40 +1886,44 @@ def _home_status() -> None:
 
 def _home_store_setup() -> None:
     while True:
-        _print_section_row("Den / Yard Management")
-        _print_option("1.", "Register or relink an archive DEN")
-        _print_option("2.", "Register or relink a working YARD")
-        _print_option("3.", "List archive dens")
-        _print_option("4.", "List working yards")
-        _print_option("5.", "Forget a den registration")
-        _print_option("6.", "Forget a yard registration")
+        _print_section_row("Manage RAWDOG")
+        _print_option("1.", "Initial setup / defaults")
+        _print_option("2.", "Register or relink an archive DEN")
+        _print_option("3.", "Register or relink a working YARD")
+        _print_option("4.", "List archive dens")
+        _print_option("5.", "List working yards")
+        _print_option("6.", "Forget a den registration")
+        _print_option("7.", "Forget a yard registration")
         _print_option("0.", "Back")
         choice = Prompt.ask(
-            _prompt("Choose store action"),
-            choices=["0", "1", "2", "3", "4", "5", "6"],
+            _prompt("Choose manage action"),
+            choices=["0", "1", "2", "3", "4", "5", "6", "7"],
             default="1",
             console=console,
         )
         if choice == "0":
             return
         if choice == "1":
-            _home_register_store(StoreKind.DEN)
+            _home_init()
             continue
         if choice == "2":
-            _home_register_store(StoreKind.YARD)
+            _home_register_store(StoreKind.DEN)
             continue
         if choice == "3":
-            _print_store_table(StoreKind.DEN)
+            _home_register_store(StoreKind.YARD)
             continue
         if choice == "4":
-            _print_store_table(StoreKind.YARD)
+            _print_store_table(StoreKind.DEN)
             continue
         if choice == "5":
+            _print_store_table(StoreKind.YARD)
+            continue
+        if choice == "6":
             identifier = Prompt.ask("Den name or store ID to forget", console=console).strip()
             if identifier:
                 _remove_store(identifier, StoreKind.DEN)
             continue
-        if choice == "6":
+        if choice == "7":
             identifier = Prompt.ask("Yard name or store ID to forget", console=console).strip()
             if identifier:
                 _remove_store(identifier, StoreKind.YARD)

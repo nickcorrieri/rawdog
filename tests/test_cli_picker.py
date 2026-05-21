@@ -19,6 +19,20 @@ def test_choose_path_accepts_direct_path_without_exiting(tmp_path: Path, monkeyp
     assert picked == (tmp_path / "RAW_YARD").resolve()
 
 
+def test_home_choice_uses_letter_workflows_and_hides_init_under_manage() -> None:
+    assert cli._normalize_home_choice("F") == "f"
+    assert cli._normalize_home_choice("DC") == "dc"
+    assert cli._normalize_home_choice("DM") == "dm"
+    assert cli._normalize_home_choice("J") == "j"
+    assert cli._normalize_home_choice("S") == "s"
+    assert cli._normalize_home_choice("P") == "p"
+    assert cli._normalize_home_choice("W") == "w"
+    assert cli._normalize_home_choice("M") == "m"
+    assert cli._normalize_home_choice("init") == "m"
+    assert cli._normalize_home_choice("Q") == "q"
+    assert cli._normalize_home_choice("2") is None
+
+
 def test_choose_path_can_browse_numbered_location(tmp_path: Path, monkeypatch) -> None:
     child = tmp_path / "Photos"
     child.mkdir()

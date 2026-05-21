@@ -93,16 +93,26 @@ archive destinations.
 Run `rawdog` with no arguments to open the colored workflow chooser. The menu is
 organized by job:
 
-- `i` / `init` / `setup` - initialize or change RAWDOG settings.
-- `1` - fetch card or flash-drive files into a working yard.
-- `2` - archive/copy working files into a den; sources stay in place.
-- `3` - junkyard cleanup review; report den-recorded files for manual removal.
-- `4` - fast same-drive move into a den; same filesystem only, no overwrites.
-- `5` - audit or inspect a folder, yard, or den.
-- `6` - verify whether a source is represented in a destination.
-- `7` - review, run, resume, or prune old plans.
+- `F` - fetch card or folder files into a working yard.
+- `DC` - den copy/archive working files into a den; sources stay in place.
+- `J` - junkyard cleanup review; report den-recorded files for manual removal.
+- `DM` - den move/consolidate same-drive files into a den.
+- `S` - sniff, audit, inspect, score, or rebuild a folder, yard, or den.
+- `P` - review, run, resume, or prune old plans.
+- `W` - work queue for longer safe jobs.
+- `M` - manage initial setup, defaults, dens, yards, and stores.
+- `H` - command examples.
+- `Q` - quit.
+
+Top-level workflow keys are letters so numbered menus can stay reserved for
+path, den, yard, layout, and plan selections inside a workflow.
 
 Use `rawdog --help` for the full command reference.
+
+For maintainers and coding agents, see:
+
+- `docs/DEN_LAYOUTS_AND_SAFETY.md` for den layout contracts and path safety rules.
+- `docs/LLM_PATCHING_GUIDE.md` for decisions made, guardrails, LLM handoff prompts, patch constraints, and release checks.
 
 ```bash
 rawdog init
