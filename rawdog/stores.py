@@ -229,6 +229,23 @@ def record_store_file(
     return row_to_store_file(row)
 
 
+def mark_store_file_deleted(store: Store, store_path: Path) -> bool:
+    _initialize_store_db(store.root_path)
+    resolved = store_path.expanduser().resolve()
+    now = _now()
+    with sqlite3.connect(store_db_path(store.root_path)) as connection:
+        cursor = connection.execute(
+            """
+            UPDATE store_files
+            SET status = ?,
+                updated_at = ?
+            WHERE store_path = ?
+            """,
+            (StoreFileStatus.DELETED.value, now, str(resolved)),
+        )
+    return cursor.rowcount > 0
+
+
 def rebuild_store_catalog(
     store: Store,
     items: list[InventoryItem],

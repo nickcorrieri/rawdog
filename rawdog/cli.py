@@ -131,6 +131,7 @@ from rawdog.stores import (
     get_store_by_name,
     list_store_files_by_original_source,
     list_stores,
+    mark_store_file_deleted,
     mark_store_used,
     rebuild_store_catalog,
     record_store_file,
@@ -3712,7 +3713,7 @@ def junkyard_scrap(
     yard_roots = [yard.root_path.expanduser().resolve() for yard in yards]
     den_roots = [den.root_path.expanduser().resolve() for den in dens]
     report_rows = _read_junkyard_report_rows(report_path)
-    allowed: list[Path] = []
+    allowed: list[tuple[Path, Store]] = []
     skipped: list[tuple[Path, str]] = []
     for yard_path, den_path, size_bytes in report_rows:
         yard_resolved = yard_path.expanduser().resolve()
@@ -3738,9 +3739,13 @@ def junkyard_scrap(
         if hash_check and not verify_same_bytes(yard_resolved, den_resolved):
             skipped.append((yard_resolved, "yard and den hashes differ"))
             continue
-        allowed.append(yard_resolved)
+        yard_store = _store_for_path_from_list(yard_resolved, yards)
+        if yard_store is None:
+            skipped.append((yard_resolved, "yard path is not under a registered yard"))
+            continue
+        allowed.append((yard_resolved, yard_store))
 
-    total_bytes = sum(path.stat().st_size for path in allowed)
+    total_bytes = sum(path.stat().st_size for path, _ in allowed)
     table = _styled_table(title="Junkyard Scrap Preview")
     table.add_column("Metric")
     table.add_column("Value", justify="right")
@@ -3773,15 +3778,19 @@ def junkyard_scrap(
         return
     deleted = 0
     failed = 0
-    for path in allowed:
+    catalog_marked = 0
+    for path, yard_store in allowed:
         try:
             path.unlink()
             deleted += 1
+            if mark_store_file_deleted(yard_store, path):
+                catalog_marked += 1
         except OSError as exc:
             failed += 1
             _print_error(f"Failed to remove {path}: {exc}")
     _print_notice(
-        f"Junkyard scrap complete: removed {deleted} files; failed {failed}; den files were not touched.",
+        f"Junkyard scrap complete: removed {deleted} files; failed {failed}; "
+        f"marked {catalog_marked} yard catalog rows deleted; den files were not touched.",
         style=STYLE_SAFE if failed == 0 else STYLE_WARN,
     )
 
@@ -3808,6 +3817,14 @@ def _read_junkyard_report_rows(report_path: Path) -> list[tuple[Path, Path, int]
 
 def _path_is_under_any(path: Path, roots: list[Path]) -> bool:
     return any(path == root or root in path.parents for root in roots)
+
+
+def _store_for_path_from_list(path: Path, stores: list[Store]) -> Store | None:
+    for store in sorted(stores, key=lambda item: len(item.root_path.parts), reverse=True):
+        root = store.root_path.expanduser().resolve()
+        if path == root or root in path.parents:
+            return store
+    return None
 
 
 def _file_matches_expected_size(path: Path, size_bytes: int) -> bool:

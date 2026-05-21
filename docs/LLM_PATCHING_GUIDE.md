@@ -94,7 +94,7 @@ for that tradeoff.
 | Yard rebuild | `rawdog yard rebuild` rebuilds a yard catalog from files on disk without moving media. |
 | Slow audit | Slow full audit is read-only; SHA-256 grouping is opt-in because it reads file contents and can take a long time. |
 | Junkyard | Junkyard is report-only and does not delete files. |
-| Scrap | `junkyard-scrap` uses explicit report paths, dry-runs by default, and revalidates roots and file sizes. |
+| Scrap | `junkyard-scrap` uses explicit report paths, dry-runs by default, revalidates roots and file sizes, and marks removed yard catalog rows deleted. |
 | Exact cleanup | `--hash-check` verifies SHA-256 for meticulous cleanup reports. |
 | Media coverage | Scanner includes RAW, JPEG, and common camera video files; AppleDouble `._*` files are ignored. |
 | Stubs | Commands that are not implemented must say so clearly instead of pretending to verify/report. |

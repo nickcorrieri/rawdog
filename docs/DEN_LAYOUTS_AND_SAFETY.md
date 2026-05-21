@@ -72,6 +72,8 @@ hardening. Treat them as project policy unless a human operator changes them.
 - Junkyard is report-only. Any actual removal must come from an explicit report
   path and a separate scrap command.
 - `junkyard-scrap` is dry-run by default and must revalidate current disk state.
+- A committed scrap removes only yard files and should mark matching registered
+  yard catalog rows `deleted`; it must never touch den files.
 - SQLite is a hint for cleanup, not proof. File presence and size must be
   checked on disk before a yard file appears cleanup-safe.
 - Hash checking is optional but is the most meticulous cleanup validation.

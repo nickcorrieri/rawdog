@@ -354,7 +354,9 @@ yard path is under a registered yard, each matched den path is under a registere
 den, both files exist, and both still match the report size. Add
 `--hash-check` to `junkyard-scrap` for exact byte matching before removal. On
 `--commit`, only the report's yard paths can be removed after typing the exact
-confirmation phrase. Den files are never touched.
+confirmation phrase. Den files are never touched. When a registered yard file is
+removed, RAWDOG marks that row `deleted` in the yard's portable catalog so later
+catalog-aware tools do not keep treating the missing file as present.
 
 ```bash
 rawdog junkyard --yard primary --den primary

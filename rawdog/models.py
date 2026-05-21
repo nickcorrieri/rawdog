@@ -70,6 +70,7 @@ class StoreKind(StrEnum):
 class StoreFileStatus(StrEnum):
     PRESENT = "present"
     NEEDS_REVIEW = "needs_review"
+    DELETED = "deleted"
 
 
 def _require_name(value: str, field_name: str = "name") -> None:
