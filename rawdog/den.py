@@ -233,11 +233,12 @@ def _plan_row(
             if layout_mode == DenLayoutMode.DATE
             else _meaningful_prefix_before_camera_dump(source_root, item.relative_path)
         )
+        year_scoped_prefix = _year_scoped_prefix(preserved_prefix, captured_at)
         destination = (
             destination_root
-            / Path(*preserved_prefix)
+            / Path(*year_scoped_prefix)
             / _date_destination_without_duplicate_prefix(
-                preserved_prefix,
+                year_scoped_prefix,
                 default_date_only_destination(Path(), captured_at, folder_template),
             )
             / item.path.name
@@ -250,7 +251,11 @@ def _plan_row(
             / item.path.name
         )
     elif layout_mode == DenLayoutMode.PRESERVE_DATES:
-        destination = destination_folder / _normalize_relative_date_folders(item.relative_path)
+        captured_at = capture_time_fallback(item.path)
+        destination = destination_folder / _year_scoped_preserved_path(
+            item.relative_path,
+            captured_at,
+        )
     elif layout_mode == DenLayoutMode.PROJECT:
         destination = destination_folder / item.path.name
     else:
@@ -293,7 +298,7 @@ def _date_destination_without_duplicate_prefix(
 ) -> Path:
     if not preserved_prefix or not date_destination.parts:
         return date_destination
-    if preserved_prefix[-1] == date_destination.parts[0]:
+    if date_destination.parts[0] in preserved_prefix:
         return Path(*date_destination.parts[1:])
     return date_destination
 
@@ -303,6 +308,30 @@ def _normalize_relative_date_folders(relative_path: Path) -> Path:
         return relative_path
     parent_parts = normalize_date_folder_parts(relative_path.parent.parts)
     return Path(*parent_parts) / relative_path.name
+
+
+def _year_scoped_preserved_path(relative_path: Path, captured_at: datetime) -> Path:
+    normalized = _normalize_relative_date_folders(relative_path)
+    if not normalized.parts:
+        return normalized
+    year = f"{captured_at.year:04d}"
+    first_part = normalized.parts[0]
+    if first_part == year:
+        return normalized
+    if len(first_part) == 8 and first_part.isdigit() and first_part.startswith(year):
+        return Path(year) / normalized
+    if first_part.startswith(f"{year}-") or first_part.startswith(f"{year}_"):
+        return Path(year) / normalized
+    return Path(year) / normalized
+
+
+def _year_scoped_prefix(prefix: tuple[str, ...], captured_at: datetime) -> tuple[str, ...]:
+    if not prefix:
+        return prefix
+    year = f"{captured_at.year:04d}"
+    if prefix[0] == year:
+        return prefix
+    return (year, *prefix)
 
 
 def _year_from_destination(path: Path) -> str:

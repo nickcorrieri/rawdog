@@ -65,7 +65,7 @@ def test_den_can_preserve_structure_but_normalize_date_folders(tmp_path: Path) -
 
     plan = build_den_plan(source, destination, layout_mode=DenLayoutMode.PRESERVE_DATES)
 
-    assert plan.rows[0].destination_path == destination / "Trips" / "20260516" / "IMG_0001.CR3"
+    assert plan.rows[0].destination_path == destination / "2026" / "Trips" / "20260516" / "IMG_0001.CR3"
 
 
 def test_den_preserve_dates_routes_selected_camera_folder_by_date(tmp_path: Path) -> None:
@@ -126,8 +126,9 @@ def test_den_preserve_dates_keeps_project_prefix_but_drops_camera_wrappers(tmp_p
     )
 
     assert plan.rows[0].destination_path.name == "IMG_0001.NEF"
-    assert plan.rows[0].destination_path.parts[: len(destination.parts) + 1] == (
+    assert plan.rows[0].destination_path.parts[: len(destination.parts) + 2] == (
         *destination.parts,
+        "2026",
         "Wedding_Smith",
     )
     assert "DCIM" not in plan.rows[0].destination_path.parts
@@ -254,7 +255,24 @@ def test_den_preserve_dates_keeps_date_folder_label_and_file_name(tmp_path: Path
     plan = build_den_plan(source, destination, layout_mode=DenLayoutMode.PRESERVE_DATES)
 
     assert plan.rows[0].destination_path == (
-        destination / "Trips" / "20260516_Senior Photos" / "IMG_0042.CR2"
+        destination / "2026" / "Trips" / "20260516_Senior Photos" / "IMG_0042.CR2"
+    )
+
+
+def test_den_preserve_dates_year_scopes_project_folder(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "archive"
+    raw = source / "spring tournament" / "IMG_0042.CR2"
+    raw.parent.mkdir(parents=True)
+    destination.mkdir()
+    raw.write_bytes(b"raw")
+    captured_ts = datetime(2021, 6, 12, tzinfo=UTC).timestamp()
+    os.utime(raw, (captured_ts, captured_ts))
+
+    plan = build_den_plan(source, destination, layout_mode=DenLayoutMode.PRESERVE_DATES)
+
+    assert plan.rows[0].destination_path == (
+        destination / "2021" / "spring tournament" / "IMG_0042.CR2"
     )
 
 

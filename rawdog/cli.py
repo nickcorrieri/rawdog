@@ -1579,7 +1579,7 @@ def _choose_date_grouping(layout: DenLayoutMode) -> DateGroupMode:
         _print_full_row(
             [
                 ("Date grouping only applies to camera-dump rows. ", STYLE_ROW_SELECTED),
-                ("Existing meaningful/date folders are still preserved or normalized.", STYLE_ROW_SELECTED),
+                ("Existing meaningful/date folders are preserved or normalized under a YYYY year folder.", STYLE_ROW_SELECTED),
             ],
             style=STYLE_ROW_SELECTED,
         )
@@ -1699,10 +1699,10 @@ def _print_den_layout_guidance(options: list[tuple[str, DenLayoutMode]] | None =
     table.add_column("What it does", style=STYLE_SAFE)
     descriptions = {
         DenLayoutMode.PRESERVE: "Mirror source folders exactly. No generated date grouping; camera wrappers are kept.",
-        DenLayoutMode.PRESERVE_DATES: "Keep meaningful folders, normalize existing date-like folders, and drop camera wrappers. Camera dumps can group by month/day.",
-        DenLayoutMode.DATE: "Ignore source folders and group by capture date. Default grouping is month.",
-        DenLayoutMode.PROJECT: "Create one dated project/session folder from the earliest file date; files are directly inside it.",
-        DenLayoutMode.PROJECT_DATES: "Create project plus date buckets. Default month buckets look like Soccer-202601.",
+        DenLayoutMode.PRESERVE_DATES: "Keep meaningful folders, normalize date-like folders, drop camera wrappers, and always place them under YYYY.",
+        DenLayoutMode.DATE: "Ignore source folders and group by capture date. Default month folders look like YYYY/YYYY-MM.",
+        DenLayoutMode.PROJECT: "Create one dated project/session folder from the earliest file date, like YYYY/YYYYMMDD_PROJECT.",
+        DenLayoutMode.PROJECT_DATES: "Create project plus date buckets. Default month buckets look like YYYY/Soccer-202601.",
     }
     rows = options or [(None, layout) for layout in DenLayoutMode]
     for key, layout in rows:

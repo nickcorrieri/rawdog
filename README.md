@@ -252,7 +252,7 @@ generates new date/project folders:
 | Layout | Result |
 | --- | --- |
 | `preserve` | Mirrors source folders exactly. No generated date grouping. Camera wrappers are kept. |
-| `preserve-dates` | Keeps meaningful folders, normalizes existing date-like folders to `YYYYMMDD`, and drops camera wrappers such as `DCIM/100CANON`. For camera dumps, it generates date folders. |
+| `preserve-dates` | Keeps meaningful folders, normalizes existing date-like folders to `YYYYMMDD`, drops camera wrappers such as `DCIM/100CANON`, and always puts preserved folders under a top-level `YYYY`. Example: `spring tournament/IMG_0042.CR2` becomes `2021/spring tournament/IMG_0042.CR2`. |
 | `date` | Ignores source folders and groups by capture date. Default is month: `YYYY/YYYY-MM`. Choose `--group-by day` for `YYYY/YYYYMMDD`. |
 | `project` | Creates one dated project/session folder from the earliest file date, default `YYYY/YYYYMMDD_PROJECT`, and puts files directly inside it. |
 | `project-dates` | Creates project plus date buckets. Default is month folders like `YYYY/Soccer-202601`. Choose `--group-by day` for `YYYY/Soccer-20260115`. |
