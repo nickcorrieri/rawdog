@@ -1209,9 +1209,9 @@ def _show_home_menu() -> None:
         table.add_column("Action", style=STYLE_PATH)
         table.add_row("i", "Setup / settings", "Set yards, dens, and defaults")
         table.add_row("1", "Fetch card -> Yard", "Copy card/flash files to yard")
-        table.add_row("2", "Archive copy -> Den", "Copy files to archive; source stays")
-        table.add_row("3", "Junkyard cleanup review", "Report den-recorded files for manual removal")
-        table.add_row("4", "Fast same-drive move -> Den", "Rename files on the same filesystem")
+        table.add_row("2", "COPY/archive -> Den", "Copy files to archive; source stays")
+        table.add_row("3", "Junkyard report only", "No writes; reports den-recorded files")
+        table.add_row("4", "MOVE same-drive -> Den", "Move files with same-filesystem rename")
         table.add_row("5", "Audit / inspect folder", "Sniff layout or score a folder")
         table.add_row("6", "Verify source -> destination", "Check source is represented")
         table.add_row("7", "Review / resume old plans", "Inspect, run, resume, or prune")
@@ -1406,6 +1406,7 @@ def _print_fast_move_guidance() -> None:
         Panel(
             "\n".join(
                 [
+                    "You selected transfer mode: MOVE.",
                     "Fast move is only for moving files on the same drive/filesystem.",
                     "",
                     "What happens:",
@@ -1415,9 +1416,10 @@ def _print_fast_move_guidance() -> None:
                     "4. File names stay unchanged; existing destination files are never overwritten.",
                     "",
                     "Use this to clean up same-drive folder mess without duplicating storage.",
+                    "For copy/archive, use menu option 2 instead.",
                 ]
             ),
-            title="Fast Same-Drive Move -> Den",
+            title="Fast Same-Drive MOVE -> Den",
             border_style="yellow",
             style=STYLE_PANEL,
             expand=True,
@@ -1487,6 +1489,7 @@ def _home_den(action: DenTransferAction = DenTransferAction.COPY) -> None:
             raise typer.BadParameter(
                 f"Fast move is same-drive only: {exc}. Use option 2 for safe copy-to-den instead."
             ) from exc
+    _print_transfer_mode(action, source, destination)
     destination_inside_source = _destination_inside_source(source, destination)
     layout_analysis = analyze_source_layout(
         source,
@@ -1502,7 +1505,7 @@ def _home_den(action: DenTransferAction = DenTransferAction.COPY) -> None:
         if layout in {DenLayoutMode.PROJECT, DenLayoutMode.PROJECT_DATES}
         else (None, None)
     )
-    dry_run = not _yes_no("Commit now? Dry-run is safer.", default=False)
+    dry_run = not _yes_no(f"Commit {action.value.upper()} plan now? Dry-run is safer.", default=False)
     den(
         source=source,
         destination=destination,
@@ -1517,6 +1520,28 @@ def _home_den(action: DenTransferAction = DenTransferAction.COPY) -> None:
         limit=None,
         dry_run=dry_run,
     )
+
+
+def _print_transfer_mode(action: DenTransferAction, source: Path, destination: Path) -> None:
+    if action == DenTransferAction.MOVE:
+        title = "Transfer Mode: MOVE"
+        lines = [
+            "RAWDOG will create a MOVE plan.",
+            "On commit, each successful row uses os.rename on the same filesystem.",
+            "Source files that move successfully will no longer remain at the source path.",
+            "Existing destination files are never overwritten.",
+        ]
+        border_style = "yellow"
+    else:
+        title = "Transfer Mode: COPY"
+        lines = [
+            "RAWDOG will create a COPY plan.",
+            "On commit, source files remain in place.",
+            "Existing destination files are never overwritten.",
+        ]
+        border_style = "green"
+    lines.extend([f"Source: {source}", f"Destination: {destination}"])
+    console.print(Panel("\n".join(lines), title=title, border_style=border_style, style=STYLE_PANEL, expand=True))
 
 
 def _choose_den_layout(default_layout: str) -> DenLayoutMode:
