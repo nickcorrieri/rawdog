@@ -194,3 +194,30 @@ def test_append_only_move_refuses_existing_collision(tmp_path: Path) -> None:
 
     assert status == "skipped_collision"
     assert source.exists()
+
+
+def test_append_only_move_explains_permission_denied_rename(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.CR3"
+    destination = tmp_path / "archive" / "source.CR3"
+    source.write_bytes(b"raw")
+    destination.parent.mkdir()
+
+    def fail_rename(source_path: Path, destination_path: Path) -> None:
+        raise PermissionError(1, "Operation not permitted", str(source_path), str(destination_path))
+
+    monkeypatch.setattr(os, "rename", fail_rename)
+
+    with pytest.raises(SafetyError) as exc_info:
+        append_only_move(source, destination, tmp_path / "archive")
+
+    message = str(exc_info.value)
+    assert "Filesystem refused MOVE rename" in message
+    assert f"Source: {source}" in message
+    assert f"Destination: {destination}" in message
+    assert "Common causes:" in message
+    assert "ls -lOe@" in message
+    assert source.exists()
+    assert not destination.exists()
