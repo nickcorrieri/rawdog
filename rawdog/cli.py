@@ -446,6 +446,20 @@ def _choose_standard_root(label: str) -> Path:
             if path:
                 return path
             continue
+        if selection.lower().startswith("b") and len(selection) > 1:
+            try:
+                browse_index = int(selection[1:])
+            except ValueError:
+                _print_error("Invalid browse choice. Use b plus a number, like b7.")
+                continue
+            if 1 <= browse_index <= len(choices):
+                path = choices[browse_index - 1][1]
+                if path.exists() and path.is_dir():
+                    return path
+                _print_error(f"Folder is not available: {path}")
+                continue
+            _print_error("Invalid browse choice. Try again.")
+            continue
         try:
             index = int(selection)
         except ValueError:
@@ -468,25 +482,39 @@ def _browse_folder(
     max_children: int = 6,
 ) -> Path:
     current = start.expanduser().resolve()
+    folder_page = 0
     while True:
         _print_full_row([("Browsing: ", STYLE_ROW_HEADER), (str(current), STYLE_PATH)], style=STYLE_ROW_HEADER)
-        folders = _sorted_child_folders(current)[:max_children]
+        all_folders = _sorted_child_folders(current)
+        page_count = max(1, (len(all_folders) + max_children - 1) // max_children)
+        if folder_page >= page_count:
+            folder_page = 0
+        folders = all_folders[folder_page * max_children : folder_page * max_children + max_children]
+        if len(all_folders) > max_children:
+            _print_notice(f"Folders page {folder_page + 1} of {page_count}; sorted by sampled size.")
         for index, (path, size_bytes) in enumerate(folders, start=1):
             _print_folder_option(str(index), path.name, size_bytes)
+        if len(all_folders) > max_children:
+            _print_option("7", "More folders")
         _print_option("8", "Parent folder")
         _print_option("9", confirm_label)
         _print_option("0", "Manual path")
         selection = Prompt.ask(_prompt("Choose folder (Ctrl-C to exit)"), default="9", console=console).strip()
         if selection in {".", "9"}:
             return current
+        if selection == "7" and len(all_folders) > max_children:
+            folder_page = (folder_page + 1) % page_count
+            continue
         if selection in {"..", "8"}:
             current = current.parent
+            folder_page = 0
             continue
         if selection == "0":
             if manual_mode == "existing":
                 path = _manual_existing_directory("Manual path")
                 if path:
                     current = path
+                    folder_page = 0
                 continue
             if manual_mode == "destination":
                 path = _manual_destination_path("Manual destination")
@@ -494,12 +522,14 @@ def _browse_folder(
                     return path
                 continue
             current = parse_user_path(Prompt.ask(_prompt("Path"), console=console)).expanduser().resolve()
+            folder_page = 0
             continue
         if selection.startswith(("/", "~", ".")):
             path = parse_user_path(selection).expanduser().resolve()
             if manual_mode == "existing" and not _is_existing_directory(path):
                 continue
             current = path
+            folder_page = 0
             continue
         try:
             index = int(selection)
@@ -508,12 +538,14 @@ def _browse_folder(
             continue
         if 1 <= index <= len(folders):
             current = folders[index - 1][0]
+            folder_page = 0
             continue
         _print_error("Invalid folder choice. Try again.")
 
 
 def _browse_den_destination(start: Path, dens: list) -> Path:
     current = start.expanduser().resolve()
+    folder_page = 0
     while True:
         _print_full_row([("Browsing destination: ", STYLE_ROW_HEADER), (str(current), STYLE_PATH)], style=STYLE_ROW_HEADER)
         dens_here = _stores_under_path(dens, current)
@@ -521,14 +553,38 @@ def _browse_den_destination(start: Path, dens: list) -> Path:
             _print_notice("Known dens in this path", style=STYLE_SAFE)
             for index, store in enumerate(dens_here[:5], start=1):
                 _print_path_option(f"D{index}", store.name, store.root_path)
-        folders = _sorted_child_folders(current)[:5]
+            _print_notice("Tip: choose D1 directly, or choose 7 for a paged den selector.")
+        all_folders = _sorted_child_folders(current)
+        page_count = max(1, (len(all_folders) + 4) // 5)
+        if folder_page >= page_count:
+            folder_page = 0
+        folders = all_folders[folder_page * 5 : folder_page * 5 + 5]
+        if len(all_folders) > 5:
+            _print_notice(f"Folders page {folder_page + 1} of {page_count}; sorted by sampled size.")
         for index, (path, size_bytes) in enumerate(folders, start=1):
             _print_folder_option(str(index), path.name, size_bytes)
+        if len(all_folders) > 5:
+            _print_option("6", "More folders")
         _print_option("7", "Select a known den in this path")
         _print_option("8", "Parent folder")
         _print_option("9", "Create / use DEN here")
         _print_option("0", "Manual path")
         selection = Prompt.ask(_prompt("Choose destination folder (Ctrl-C to exit)"), default="9", console=console).strip()
+        if selection.lower().startswith("d") and len(selection) > 1:
+            try:
+                den_index = int(selection[1:])
+            except ValueError:
+                _print_error("Invalid den choice. Use D plus a number, like D1.")
+                continue
+            if 1 <= den_index <= len(dens_here[:5]):
+                store = dens_here[den_index - 1]
+                _mark_store_used(store)
+                return store.root_path
+            _print_error("Invalid den choice. Try again.")
+            continue
+        if selection == "6" and len(all_folders) > 5:
+            folder_page = (folder_page + 1) % page_count
+            continue
         if selection == "7":
             path = _pick_registered_store(dens_here, "den")
             if path:
@@ -536,6 +592,7 @@ def _browse_den_destination(start: Path, dens: list) -> Path:
             continue
         if selection == "8":
             current = current.parent
+            folder_page = 0
             continue
         if selection == "9":
             path = _confirm_destination_path(current)
@@ -562,6 +619,7 @@ def _browse_den_destination(start: Path, dens: list) -> Path:
             continue
         if 1 <= index <= len(folders):
             current = folders[index - 1][0]
+            folder_page = 0
             continue
         _print_error("Invalid destination choice. Try again.")
 

@@ -24,4 +24,7 @@ def standard_path_choices() -> list[tuple[str, Path]]:
 
 
 def parse_user_path(value: str) -> Path:
-    return Path(value).expanduser()
+    normalized = value.strip()
+    if "\\" in normalized:
+        normalized = normalized.replace("\\", "/")
+    return Path(normalized).expanduser()

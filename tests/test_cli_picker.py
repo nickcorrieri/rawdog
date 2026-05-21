@@ -29,6 +29,27 @@ def test_choose_path_can_browse_numbered_location(tmp_path: Path, monkeypatch) -
     assert picked == child.resolve()
 
 
+def test_choose_standard_root_accepts_browse_prefix(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(cli, "standard_path_choices", lambda: [("Root", tmp_path)])
+    monkeypatch.setattr(cli.Prompt, "ask", _answers("b1"))
+
+    picked = cli._choose_standard_root("Source")
+
+    assert picked == tmp_path.resolve()
+
+
+def test_browse_folder_can_page_to_more_children(tmp_path: Path, monkeypatch) -> None:
+    for index in range(7):
+        child = tmp_path / f"folder-{index}"
+        child.mkdir()
+        (child / "file.raw").write_bytes(b"x" * (index + 1))
+    monkeypatch.setattr(cli.Prompt, "ask", _answers("7", "1", "9"))
+
+    picked = cli._browse_folder(tmp_path, max_children=6)
+
+    assert picked == (tmp_path / "folder-0").resolve()
+
+
 def test_choose_store_path_lists_established_den_first(tmp_path: Path, monkeypatch) -> None:
     database = tmp_path / "rawdog.sqlite"
     den_root = tmp_path / "archive"
@@ -86,6 +107,25 @@ def test_browse_den_destination_can_select_known_den_under_current_path(tmp_path
     config = build_config(OrganizationMode.PROJECT, database_path=database)
     monkeypatch.setattr(cli, "_load_or_exit", lambda: (tmp_path / "config.json", config))
     monkeypatch.setattr(cli.Prompt, "ask", _answers("7", "1"))
+
+    picked = cli._browse_den_destination(tmp_path, [den])
+
+    assert picked == den_root.resolve()
+
+
+def test_browse_den_destination_accepts_visible_den_shortcut(tmp_path: Path, monkeypatch) -> None:
+    den_root = tmp_path / "RAW_DEN"
+    den_root.mkdir()
+    database = tmp_path / "rawdog.sqlite"
+    initialize(database)
+    with session(database) as connection:
+        den = create_or_update_store(
+            connection,
+            StoreCreate(name="primary", root_path=den_root, store_kind=StoreKind.DEN),
+        )
+    config = build_config(OrganizationMode.PROJECT, database_path=database)
+    monkeypatch.setattr(cli, "_load_or_exit", lambda: (tmp_path / "config.json", config))
+    monkeypatch.setattr(cli.Prompt, "ask", _answers("D1"))
 
     picked = cli._browse_den_destination(tmp_path, [den])
 
