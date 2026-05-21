@@ -1216,7 +1216,7 @@ def _show_home_menu() -> None:
         table.add_row("6", "Verify source -> destination", "Check source is represented")
         table.add_row("7", "Review / resume old plans", "Inspect, run, resume, or prune")
         table.add_row("8", "Help", "Show command examples")
-        table.add_row("9", "Den / yard setup", "Register archive and working stores")
+        table.add_row("9", "Den / yard management", "Create, relink, list, or forget stores")
         table.add_row("0", "Quit", "Exit RAWDOG")
         console.print(table)
         _print_full_row(
@@ -1414,6 +1414,7 @@ def _print_fast_move_guidance() -> None:
                     "2. It refuses if source and destination are not on the same filesystem.",
                     "3. On commit, it uses os.rename to move each file into the den.",
                     "4. File names stay unchanged; existing destination files are never overwritten.",
+                    "5. Skipped/existing rows stay in the source folder for review; RAWDOG does not delete them.",
                     "",
                     "Use this to clean up same-drive folder mess without duplicating storage.",
                     "For copy/archive, use menu option 2 instead.",
@@ -1529,6 +1530,7 @@ def _print_transfer_mode(action: DenTransferAction, source: Path, destination: P
             "RAWDOG will create a MOVE plan.",
             "On commit, each successful row uses os.rename on the same filesystem.",
             "Source files that move successfully will no longer remain at the source path.",
+            "Skipped/existing rows remain at the source path for review; skip is not a delete signal.",
             "Existing destination files are never overwritten.",
         ]
         border_style = "yellow"
@@ -1807,12 +1809,57 @@ def _home_status() -> None:
 
 
 def _home_store_setup() -> None:
-    kind_choice = Prompt.ask("Store type", choices=["den", "yard"], default="den", console=console)
+    while True:
+        _print_section_row("Den / Yard Management")
+        _print_option("1.", "Register or relink an archive DEN")
+        _print_option("2.", "Register or relink a working YARD")
+        _print_option("3.", "List archive dens")
+        _print_option("4.", "List working yards")
+        _print_option("5.", "Forget a den registration")
+        _print_option("6.", "Forget a yard registration")
+        _print_option("0.", "Back")
+        choice = Prompt.ask(
+            _prompt("Choose store action"),
+            choices=["0", "1", "2", "3", "4", "5", "6"],
+            default="1",
+            console=console,
+        )
+        if choice == "0":
+            return
+        if choice == "1":
+            _home_register_store(StoreKind.DEN)
+            continue
+        if choice == "2":
+            _home_register_store(StoreKind.YARD)
+            continue
+        if choice == "3":
+            _print_store_table(StoreKind.DEN)
+            continue
+        if choice == "4":
+            _print_store_table(StoreKind.YARD)
+            continue
+        if choice == "5":
+            identifier = Prompt.ask("Den name or store ID to forget", console=console).strip()
+            if identifier:
+                _remove_store(identifier, StoreKind.DEN)
+            continue
+        if choice == "6":
+            identifier = Prompt.ask("Yard name or store ID to forget", console=console).strip()
+            if identifier:
+                _remove_store(identifier, StoreKind.YARD)
+
+
+def _home_register_store(store_kind: StoreKind) -> None:
+    label = "archive den" if store_kind == StoreKind.DEN else "working yard"
+    _print_notice(
+        f"Register/relink a {label}. If the folder already has .rawdog metadata, RAWDOG will reuse it.",
+        style=STYLE_ROW_SELECTED,
+    )
     name = Prompt.ask("Store name", default="primary", console=console)
-    root = _choose_path("Store root")
+    root = _choose_path(f"{store_kind.value.title()} root")
     _print_notice("Optional description only; this is for your own label, not RAWDOG behavior.")
     notes = _optional_prompt("Store description, or Enter to skip")
-    _setup_store(name=name, root=root, store_kind=StoreKind(kind_choice), notes=notes)
+    _setup_store(name=name, root=root, store_kind=store_kind, notes=notes)
 
 
 def _show_queue_examples() -> None:
@@ -3367,24 +3414,12 @@ def _remove_store(identifier: str, store_kind: StoreKind, *, yes: bool = False) 
         _print_notice(f"Forgot {removed.store_kind.value} store: {removed.name} -> {removed.root_path}", style=STYLE_SAFE)
 
 
-@dens_app.command("setup")
-def den_store_setup(
-    name: str = typer.Argument("primary", help="Den store name."),
-    root: Path | None = typer.Option(None, "--root", "-r", help="Archive root to register as a den."),
-    notes: str | None = typer.Option(None, "--notes"),
-) -> None:
-    """Create or update a den archive store."""
-    root_path = root or _choose_path("Den archive root")
-    _setup_store(name=name, root=root_path, store_kind=StoreKind.DEN, notes=notes)
-
-
-@dens_app.command("list")
-def den_store_list() -> None:
-    """List den archive stores."""
+def _print_store_table(store_kind: StoreKind) -> None:
     _, config = _load_or_exit()
     with session(config.database_path) as connection:
-        stores = _list_configured_stores(connection, config, StoreKind.DEN)
-    table = _styled_table(title="RAWDOG Dens", style=STYLE_PANEL, row_styles=STYLE_ROWS, expand=True)
+        stores = _list_configured_stores(connection, config, store_kind)
+    title = "RAWDOG Dens" if store_kind == StoreKind.DEN else "RAWDOG Yards"
+    table = _styled_table(title=title, style=STYLE_PANEL, row_styles=STYLE_ROWS, expand=True)
     table.add_column("Store ID")
     table.add_column("Name")
     table.add_column("Root")
@@ -3403,6 +3438,23 @@ def den_store_list() -> None:
             store.updated_at.isoformat(),
         )
     console.print(table)
+
+
+@dens_app.command("setup")
+def den_store_setup(
+    name: str = typer.Argument("primary", help="Den store name."),
+    root: Path | None = typer.Option(None, "--root", "-r", help="Archive root to register as a den."),
+    notes: str | None = typer.Option(None, "--notes"),
+) -> None:
+    """Create or update a den archive store."""
+    root_path = root or _choose_path("Den archive root")
+    _setup_store(name=name, root=root_path, store_kind=StoreKind.DEN, notes=notes)
+
+
+@dens_app.command("list")
+def den_store_list() -> None:
+    """List den archive stores."""
+    _print_store_table(StoreKind.DEN)
 
 
 @dens_app.command("remove")
@@ -3428,28 +3480,7 @@ def yard_setup(
 @yard_app.command("list")
 def yard_list() -> None:
     """List yard working stores."""
-    _, config = _load_or_exit()
-    with session(config.database_path) as connection:
-        stores = _list_configured_stores(connection, config, StoreKind.YARD)
-    table = _styled_table(title="RAWDOG Yards", style=STYLE_PANEL, row_styles=STYLE_ROWS, expand=True)
-    table.add_column("Store ID")
-    table.add_column("Name")
-    table.add_column("Root")
-    table.add_column("Available")
-    table.add_column("Last Used")
-    table.add_column("Uses", justify="right")
-    table.add_column("Updated")
-    for store in stores:
-        table.add_row(
-            store.store_id,
-            store.name,
-            str(store.root_path),
-            "yes" if store.root_path.exists() else "missing",
-            store.last_used_at.isoformat() if store.last_used_at else "never",
-            str(store.use_count),
-            store.updated_at.isoformat(),
-        )
-    console.print(table)
+    _print_store_table(StoreKind.YARD)
 
 
 @yard_app.command("remove")
