@@ -1337,10 +1337,25 @@ def _home_init() -> None:
         date_template="YYYY/YYYY-MM",
         project_template="YYYY/YYYYMMDD_PROJECT",
     )
-    if working_root and _yes_no("Register this working root as a RAWDOG yard?", default=True):
+    if working_root and _confirm_store_registration(working_root, StoreKind.YARD):
         _setup_store("primary", working_root, StoreKind.YARD)
-    if archive_root and _yes_no("Register this archive root as a RAWDOG den?", default=True):
+    if archive_root and _confirm_store_registration(archive_root, StoreKind.DEN):
         _setup_store("primary", archive_root, StoreKind.DEN)
+
+
+def _confirm_store_registration(root: Path, store_kind: StoreKind) -> bool:
+    noun = "working yard" if store_kind == StoreKind.YARD else "archive den"
+    _print_full_row(
+        [
+            (f"Selected {noun}: ", STYLE_ROW_HEADER),
+            (str(root.expanduser().resolve()), STYLE_PATH),
+        ],
+        style=STYLE_ROW_HEADER,
+    )
+    return _yes_no(
+        f"Register {root.expanduser().resolve()} as a RAWDOG {store_kind.value}?",
+        default=True,
+    )
 
 
 def _home_fetch() -> None:

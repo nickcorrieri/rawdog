@@ -118,6 +118,27 @@ def test_choose_den_destination_uses_primary_registered_den_when_init_default_mi
     assert picked == den_root.resolve()
 
 
+def test_confirm_store_registration_includes_selected_path(tmp_path: Path, monkeypatch) -> None:
+    prompts: list[str] = []
+    rows: list[str] = []
+
+    def fake_yes_no(label: str, default: bool = False) -> bool:
+        prompts.append(label)
+        return default
+
+    def fake_print_full_row(parts, *, style):
+        rows.append("".join(value for value, _ in parts))
+
+    monkeypatch.setattr(cli, "_yes_no", fake_yes_no)
+    monkeypatch.setattr(cli, "_print_full_row", fake_print_full_row)
+
+    result = cli._confirm_store_registration(tmp_path, StoreKind.DEN)
+
+    assert result is True
+    assert str(tmp_path.resolve()) in prompts[0]
+    assert f"Selected archive den: {tmp_path.resolve()}" in rows[0]
+
+
 def test_browse_den_destination_can_select_known_den_under_current_path(tmp_path: Path, monkeypatch) -> None:
     den_root = tmp_path / "archive"
     den_root.mkdir()
