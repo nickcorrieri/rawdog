@@ -232,7 +232,7 @@ def test_parse_junkyard_before_accepts_cli_string_date_and_datetime() -> None:
     )
 
 
-def test_read_junkyard_report_paths_accepts_tsv_report(tmp_path: Path) -> None:
+def test_read_junkyard_report_rows_accepts_tsv_report(tmp_path: Path) -> None:
     report = tmp_path / "junkyard.tsv"
     report.write_text(
         "yard_path\tmatched_den_path\tsize_bytes\n"
@@ -240,7 +240,9 @@ def test_read_junkyard_report_paths_accepts_tsv_report(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    assert cli._read_junkyard_report_paths(report) == [Path("/yard/photo one.CR3")]
+    assert cli._read_junkyard_report_rows(report) == [
+        (Path("/yard/photo one.CR3"), Path("/den/photo one.CR3"), 123)
+    ]
 
 
 def test_path_is_under_any_requires_registered_root(tmp_path: Path) -> None:
@@ -249,6 +251,18 @@ def test_path_is_under_any_requires_registered_root(tmp_path: Path) -> None:
 
     assert cli._path_is_under_any(yard / "photo.CR3", [yard])
     assert not cli._path_is_under_any(outside / "photo.CR3", [yard])
+
+
+def test_file_matches_expected_size_requires_real_file(tmp_path: Path) -> None:
+    photo = tmp_path / "photo.CR3"
+    photo.write_bytes(b"raw")
+    folder = tmp_path / "folder"
+    folder.mkdir()
+
+    assert cli._file_matches_expected_size(photo, 3)
+    assert not cli._file_matches_expected_size(photo, 4)
+    assert not cli._file_matches_expected_size(folder, 0)
+    assert not cli._file_matches_expected_size(tmp_path / "missing.CR3", 3)
 
 
 def _answers(*values: str):

@@ -3205,12 +3205,12 @@ def junkyard(
         False,
         "--validate-first",
         "--verify-disk",
-        help="Also check matched den files on disk by path and size before reporting them.",
+        help="Compatibility flag. Junkyard always checks matched den files on disk by path and size.",
     ),
     hash_check: bool = typer.Option(
         False,
         "--hash-check",
-        help="Meticulous mode: SHA-256 hash yard and den files before reporting cleanup candidates.",
+        help="Exact mode: SHA-256 hash yard and den files before reporting cleanup candidates.",
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Confirm long hash-check work in non-interactive runs."),
 ) -> None:
@@ -3254,10 +3254,10 @@ def _run_junkyard(
     den_by_source: dict[Path, object] = {}
     for den_store in dens:
         den_by_source.update(list_store_files_by_original_source(den_store))
-    validate_first = validate_first or hash_check
+    den_roots = [den_store.root_path.expanduser().resolve() for den_store in dens]
     if hash_check:
         _print_notice(
-            "Hash check reads both yard and den files. This is meticulous and may take a long time.",
+            "Hash check reads both yard and den files for exact byte matching. This may take a long time.",
             style=STYLE_ROW_SELECTED,
         )
         if not yes and sys.stdin.isatty() and not _yes_no("Continue with SHA-256 hash checking?", default=False):
@@ -3272,10 +3272,14 @@ def _run_junkyard(
         for item in scan_raw_files(yard_store.root_path):
             if before_dt and datetime.fromtimestamp(item.path.stat().st_mtime, tz=UTC) >= before_dt:
                 continue
-            record = den_by_source.get(item.path.expanduser().resolve())
-            if record is None or record.size_bytes != item.size_bytes:
+            yard_path = item.path.expanduser().resolve()
+            record = den_by_source.get(yard_path)
+            if record is None:
                 continue
-            matches.append((item.path, record.store_path, item.size_bytes))
+            den_path = record.store_path.expanduser().resolve()
+            if not _path_is_under_any(den_path, den_roots):
+                continue
+            matches.append((yard_path, den_path, item.size_bytes))
     candidates = 0
     missing_or_changed = 0
     hash_mismatches = 0
@@ -3300,15 +3304,12 @@ def _run_junkyard(
         hash_task = progress.add_task("Hash check", total=total_hash_bytes or 1, status=_format_bytes(0))
     try:
         for yard_path, den_path, size_bytes in matches:
-            if validate_first:
-                try:
-                    den_stat = den_path.stat()
-                except OSError:
-                    missing_or_changed += 1
-                    continue
-                if den_stat.st_size != size_bytes:
-                    missing_or_changed += 1
-                    continue
+            if not _file_matches_expected_size(yard_path, size_bytes):
+                missing_or_changed += 1
+                continue
+            if not _file_matches_expected_size(den_path, size_bytes):
+                missing_or_changed += 1
+                continue
             if hash_check:
                 try:
                     matched = verify_same_bytes(yard_path, den_path)
@@ -3334,25 +3335,17 @@ def _run_junkyard(
     if hash_check:
         _print_notice(
             f"Report only: {candidates} working files ({total_bytes / 1_000_000_000:.2f} GB) "
-            "appear den-recorded and matched by SHA-256. "
+            "appear den-recorded, exist on disk, and matched by SHA-256. "
             f"{missing_or_changed} catalog matches were missing or size-changed on disk; "
             f"{hash_mismatches} had hash mismatches. RAWDOG did not delete or move anything.",
-            style=STYLE_ROW_SELECTED,
-        )
-    elif validate_first:
-        _print_notice(
-            f"Report only: {candidates} working files ({total_bytes / 1_000_000_000:.2f} GB) "
-            "appear den-recorded and were validated on disk by path + size. "
-            f"{missing_or_changed} catalog matches were missing or size-changed on disk. "
-            "RAWDOG did not delete or move anything.",
             style=STYLE_ROW_SELECTED,
         )
     else:
         _print_notice(
             f"Report only: {candidates} working files ({total_bytes / 1_000_000_000:.2f} GB) "
-            "match the den catalog by original source path and size. "
-            "This is not a fresh disk/hash validation. Run with --validate-first for path + size checks, "
-            "or --hash-check for SHA-256 matching. "
+            "appear den-recorded and were validated on disk by path + exact size. "
+            f"{missing_or_changed} catalog matches were missing or size-changed on disk. "
+            "Run with --hash-check for exact SHA-256 byte matching. "
             "RAWDOG did not delete or move anything.",
             style=STYLE_ROW_SELECTED,
         )
@@ -3414,6 +3407,7 @@ def _print_junkyard_manual_cleanup_commands(manifest_path: Path) -> None:
 def junkyard_scrap(
     report: Path = typer.Argument(..., help="Junkyard TSV report written by rawdog junkyard."),
     dry_run: bool = typer.Option(True, "--dry-run/--commit", help="Preview before removing report paths."),
+    hash_check: bool = typer.Option(False, "--hash-check", help="Require exact SHA-256 match before removal."),
 ) -> None:
     """Remove yard files listed in a junkyard report. Never touches den files."""
     _, config = _load_or_exit()
@@ -3422,35 +3416,48 @@ def junkyard_scrap(
         raise typer.BadParameter(f"Report does not exist: {report_path}")
     with session(config.database_path) as connection:
         yards = _list_configured_stores(connection, config, StoreKind.YARD)
+        dens = _list_configured_stores(connection, config, StoreKind.DEN)
     yard_roots = [yard.root_path.expanduser().resolve() for yard in yards]
-    report_paths = _read_junkyard_report_paths(report_path)
+    den_roots = [den.root_path.expanduser().resolve() for den in dens]
+    report_rows = _read_junkyard_report_rows(report_path)
     allowed: list[Path] = []
     skipped: list[tuple[Path, str]] = []
-    for path in report_paths:
-        resolved = path.expanduser().resolve()
-        if not _path_is_under_any(resolved, yard_roots):
-            skipped.append((resolved, "not under a registered yard"))
+    for yard_path, den_path, size_bytes in report_rows:
+        yard_resolved = yard_path.expanduser().resolve()
+        den_resolved = den_path.expanduser().resolve()
+        if not _path_is_under_any(yard_resolved, yard_roots):
+            skipped.append((yard_resolved, "yard path is not under a registered yard"))
             continue
-        if not resolved.exists():
-            skipped.append((resolved, "missing"))
+        if not _path_is_under_any(den_resolved, den_roots):
+            skipped.append((yard_resolved, "matched den path is not under a registered den"))
             continue
-        if resolved.is_dir():
-            skipped.append((resolved, "directory"))
+        if not _file_matches_expected_size(yard_resolved, size_bytes):
+            skipped.append((yard_resolved, "yard file missing or size changed"))
             continue
-        if resolved.is_symlink():
-            skipped.append((resolved, "symlink"))
+        if not _file_matches_expected_size(den_resolved, size_bytes):
+            skipped.append((yard_resolved, "matched den file missing or size changed"))
             continue
-        allowed.append(resolved)
+        if yard_resolved.is_symlink():
+            skipped.append((yard_resolved, "yard path is a symlink"))
+            continue
+        if den_resolved.is_symlink():
+            skipped.append((yard_resolved, "matched den path is a symlink"))
+            continue
+        if hash_check and not verify_same_bytes(yard_resolved, den_resolved):
+            skipped.append((yard_resolved, "yard and den hashes differ"))
+            continue
+        allowed.append(yard_resolved)
 
     total_bytes = sum(path.stat().st_size for path in allowed)
     table = _styled_table(title="Junkyard Scrap Preview")
     table.add_column("Metric")
     table.add_column("Value", justify="right")
     table.add_row("Report", str(report_path))
-    table.add_row("Report rows", str(len(report_paths)))
+    table.add_row("Report rows", str(len(report_rows)))
     table.add_row("Removable files", str(len(allowed)))
     table.add_row("Removable GB", f"{total_bytes / 1_000_000_000:.2f}")
     table.add_row("Skipped rows", str(len(skipped)))
+    table.add_row("Validation", "path + size + SHA-256" if hash_check else "path + exact size")
     table.add_row("Mode", "dry-run" if dry_run else "commit")
     console.print(table)
     if skipped:
@@ -3487,8 +3494,8 @@ def junkyard_scrap(
     )
 
 
-def _read_junkyard_report_paths(report_path: Path) -> list[Path]:
-    paths: list[Path] = []
+def _read_junkyard_report_rows(report_path: Path) -> list[tuple[Path, Path, int]]:
+    rows: list[tuple[Path, Path, int]] = []
     with report_path.open("r", encoding="utf-8") as handle:
         for index, raw_line in enumerate(handle):
             line = raw_line.rstrip("\n")
@@ -3496,12 +3503,27 @@ def _read_junkyard_report_paths(report_path: Path) -> list[Path]:
                 continue
             if index == 0 and line.startswith("yard_path\t"):
                 continue
-            paths.append(Path(line.split("\t", 1)[0]))
-    return paths
+            parts = line.split("\t")
+            if len(parts) < 3:
+                raise typer.BadParameter(f"Invalid junkyard report row: {line}")
+            try:
+                size_bytes = int(parts[2])
+            except ValueError as exc:
+                raise typer.BadParameter(f"Invalid junkyard report size: {parts[2]}") from exc
+            rows.append((Path(parts[0]), Path(parts[1]), size_bytes))
+    return rows
 
 
 def _path_is_under_any(path: Path, roots: list[Path]) -> bool:
     return any(path == root or root in path.parents for root in roots)
+
+
+def _file_matches_expected_size(path: Path, size_bytes: int) -> bool:
+    try:
+        stat_result = path.stat()
+    except OSError:
+        return False
+    return path.is_file() and not path.is_symlink() and stat_result.st_size == size_bytes
 
 
 projects_app = typer.Typer(help="Manage RAWDOG projects.")

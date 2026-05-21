@@ -322,18 +322,23 @@ boundary.
 
 `junkyard` is report-only. It compares registered yard files against registered
 den catalogs and reports working files that appear safe to review for removal
-because they are already recorded in a den. By default this is a fast catalog
-match by original source path and size, not a fresh file-by-file validation.
-Use `--validate-first` to also check matched den files on disk by path and size
-before they appear in the report. Use `--hash-check` for the meticulous mode:
-RAWDOG reads both the yard file and matched den file and requires matching
-SHA-256 before reporting the file as cleanup-safe. `--hash-check` can take a
-long time on large libraries and implies `--validate-first`. RAWDOG does not
-delete them. When candidates are found, RAWDOG writes a TSV report with explicit
-yard path, matched den path, and size for every candidate. Use
-`rawdog junkyard-scrap REPORT` to preview removal from that exact report, and
-`rawdog junkyard-scrap REPORT --commit` to remove only the report's yard paths
-after typing the exact confirmation phrase. Den files are never touched.
+because they are already recorded in a den. The SQLite catalog is only a hint:
+Junkyard always checks the matched den path on disk and requires the current den
+file size to exactly match before a yard file appears in the report.
+
+Use `--hash-check` for exact byte matching: RAWDOG reads both the yard file and
+matched den file and requires matching SHA-256 before reporting the file as
+cleanup-safe. `--hash-check` can take a long time on large libraries. RAWDOG
+does not delete files during `junkyard`.
+
+When candidates are found, RAWDOG writes a TSV report with explicit yard path,
+matched den path, and size for every candidate. Use `rawdog junkyard-scrap
+REPORT` to preview removal from that exact report. Scrap revalidates that each
+yard path is under a registered yard, each matched den path is under a registered
+den, both files exist, and both still match the report size. Add
+`--hash-check` to `junkyard-scrap` for exact byte matching before removal. On
+`--commit`, only the report's yard paths can be removed after typing the exact
+confirmation phrase. Den files are never touched.
 
 ```bash
 rawdog junkyard --yard primary --den primary
@@ -341,6 +346,7 @@ rawdog junkyard --yard primary --den primary --before 2026-04-01
 rawdog junkyard --yard primary --den primary --validate-first
 rawdog junkyard --yard primary --den primary --hash-check
 rawdog junkyard-scrap ~/Library/Application\ Support/rawdog/reports/junkyard-candidates-YYYYMMDD-HHMMSS.tsv
+rawdog junkyard-scrap ~/Library/Application\ Support/rawdog/reports/junkyard-candidates-YYYYMMDD-HHMMSS.tsv --hash-check
 rawdog junkyard-scrap ~/Library/Application\ Support/rawdog/reports/junkyard-candidates-YYYYMMDD-HHMMSS.tsv --commit
 ```
 
