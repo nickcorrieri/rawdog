@@ -236,7 +236,10 @@ def _plan_row(
         destination = (
             destination_root
             / Path(*preserved_prefix)
-            / default_date_only_destination(Path(), captured_at, folder_template)
+            / _date_destination_without_duplicate_prefix(
+                preserved_prefix,
+                default_date_only_destination(Path(), captured_at, folder_template),
+            )
             / item.path.name
         )
     elif layout_mode == DenLayoutMode.PROJECT_DATES:
@@ -282,6 +285,17 @@ def _meaningful_prefix_before_camera_dump(source_root: Path, relative_path: Path
             break
         prefix.append(part)
     return normalize_date_folder_parts(tuple(prefix))
+
+
+def _date_destination_without_duplicate_prefix(
+    preserved_prefix: tuple[str, ...],
+    date_destination: Path,
+) -> Path:
+    if not preserved_prefix or not date_destination.parts:
+        return date_destination
+    if preserved_prefix[-1] == date_destination.parts[0]:
+        return Path(*date_destination.parts[1:])
+    return date_destination
 
 
 def _normalize_relative_date_folders(relative_path: Path) -> Path:

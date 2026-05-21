@@ -6,6 +6,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 from time import monotonic
@@ -2608,6 +2609,8 @@ def _execute_persisted_plan_unlocked(
     failed = 0
     review_rows: list[ExecutionPlanRow] = []
     failed_rows: list[ExecutionPlanRow] = []
+    move_plan = all(row.transfer_action == DenTransferAction.MOVE for row in rows)
+    transfer_label = "moved" if move_plan else "copied"
     copy_bytes_total = sum(
         row.size_bytes
         for row in rows
@@ -2622,8 +2625,16 @@ def _execute_persisted_plan_unlocked(
                 [
                     f"Rows: {len(rows)}",
                     f"Started: {execution_started_at.isoformat()}",
-                    f"Copy bytes queued: {_format_bytes(copy_bytes_total)}",
-                    "Copy ETA is based on actual copied bytes in this execution session; skipped rows do not improve the ETA.",
+                    (
+                        "Move plan: byte ETA is not shown because same-filesystem rename does not copy file bytes."
+                        if move_plan
+                        else f"Copy bytes queued: {_format_bytes(copy_bytes_total)}"
+                    ),
+                    (
+                        "Skipped/existing rows remain at source for review."
+                        if move_plan
+                        else "Copy ETA is based on actual copied bytes in this execution session; skipped rows do not improve the ETA."
+                    ),
                 ]
             ),
             title=f"Executing Plan #{plan_id}",
@@ -2641,17 +2652,21 @@ def _execute_persisted_plan_unlocked(
         console=console,
     ) as progress:
         file_task = progress.add_task("Files", total=len(rows), status="starting")
-        byte_task = progress.add_task(
-            "Copy bytes",
-            total=copy_bytes_total or 1,
-            status=_format_copy_progress(0, copy_bytes_total, progress_started_at),
+        byte_task = (
+            None
+            if move_plan
+            else progress.add_task(
+                "Copy bytes",
+                total=copy_bytes_total or 1,
+                status=_format_copy_progress(0, copy_bytes_total, progress_started_at),
+            )
         )
         bytes_copied_total = 0
         for row in rows:
             progress.update(
                 file_task,
                 status=(
-                    f"{transferred} copied / {skipped} skipped / {failed} failed - "
+                    f"{transferred} {transfer_label} / {skipped} skipped / {failed} failed - "
                     f"{row.source_path.name} -> {row.destination_path.parent}"
                 ),
             )
@@ -2661,15 +2676,16 @@ def _execute_persisted_plan_unlocked(
                 nonlocal bytes_copied_total, row_bytes_advanced
                 row_bytes_advanced += amount
                 bytes_copied_total += amount
-                progress.advance(byte_task, amount)
-                progress.update(
-                    byte_task,
-                    status=_format_copy_progress(
-                        bytes_copied_total,
-                        copy_bytes_total,
-                        progress_started_at,
-                    ),
-                )
+                if byte_task is not None:
+                    progress.advance(byte_task, amount)
+                    progress.update(
+                        byte_task,
+                        status=_format_copy_progress(
+                            bytes_copied_total,
+                            copy_bytes_total,
+                            progress_started_at,
+                        ),
+                    )
 
             if row.status not in {"plan_copy", "planned", "failed"}:
                 audit_status = _audit_execution_row(row, row.status)
@@ -2747,7 +2763,7 @@ def _execute_persisted_plan_unlocked(
                     )
             except Exception as exc:
                 failed += 1
-                failed_rows.append(row)
+                failed_rows.append(replace(row, status="failed", audit_status="not_audited", error=str(exc)))
                 with session(config.database_path) as connection:
                     update_execution_plan_row(
                         connection,
@@ -2760,7 +2776,7 @@ def _execute_persisted_plan_unlocked(
                 progress.advance(file_task, 1)
                 progress.update(
                     file_task,
-                    status=f"{transferred} copied / {skipped} skipped / {failed} failed",
+                    status=f"{transferred} {transfer_label} / {skipped} skipped / {failed} failed",
                 )
 
     final_status = ExecutionPlanStatus.DONE
