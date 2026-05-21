@@ -96,7 +96,7 @@ organized by job:
 - `i` / `init` / `setup` - initialize or change RAWDOG settings.
 - `1` - fetch card or flash-drive files into a working yard.
 - `2` - archive/copy working files into a den; sources stay in place.
-- `3` - cleanup review; report files that appear safe to remove manually.
+- `3` - junkyard cleanup review; report den-recorded files for manual removal.
 - `4` - fast same-drive move into a den; same filesystem only, no overwrites.
 - `5` - audit or inspect a folder, yard, or den.
 - `6` - verify whether a source is represented in a destination.
@@ -120,6 +120,7 @@ rawdog score
 rawdog status
 rawdog report
 rawdog verify
+rawdog wings
 rawdog projects create
 rawdog projects list
 rawdog profiles create
@@ -215,6 +216,7 @@ rawdog queue add-sniff old_drive_cleanup /Volumes/Archive
 rawdog queue show old_drive_cleanup
 rawdog queue run old_drive_cleanup
 rawdog queue run old_drive_cleanup --commit
+rawdog wings queue run old_drive_cleanup --commit
 rawdog plans list
 rawdog plans show 1
 rawdog plans ops 1
@@ -363,6 +365,20 @@ running:
 ```bash
 rawdog plans active-clear --force
 ```
+
+On macOS, use `rawdog wings` to run or attach to RAWDOG through `caffeinate` so
+the Mac stays awake during long copy/move work:
+
+```bash
+rawdog wings plans resume 10
+rawdog wings den /Volumes/Old --dest /Volumes/Archive --commit
+rawdog wings --pid 12345
+rawdog wings
+```
+
+With no arguments, `rawdog wings` attaches to the current active RAWDOG run if
+one exists. Locking the screen is fine; sleeping, logging out, unplugging drives,
+or disconnecting docks is not.
 
 `.partial` files are temporary transfer artifacts created only under the
 destination root during copy. They are not original RAW/camera video files, are ignored during

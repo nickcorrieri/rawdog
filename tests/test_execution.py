@@ -156,6 +156,35 @@ def test_plan_review_filter_includes_failed_skipped_and_review_rows(tmp_path: Pa
     assert [row.row_id for row in review_rows] == [2, 3, 4, 5]
 
 
+def test_wings_command_builder_wraps_rawdog_subcommand() -> None:
+    command = cli._build_wings_command(
+        caffeinate_path="/usr/bin/caffeinate",
+        rawdog_executable="/opt/homebrew/bin/rawdog",
+        args=["plans", "resume", "10"],
+        pid=None,
+    )
+
+    assert command == [
+        "/usr/bin/caffeinate",
+        "-dimsu",
+        "/opt/homebrew/bin/rawdog",
+        "plans",
+        "resume",
+        "10",
+    ]
+
+
+def test_wings_command_builder_can_attach_to_pid() -> None:
+    command = cli._build_wings_command(
+        caffeinate_path="/usr/bin/caffeinate",
+        rawdog_executable="/opt/homebrew/bin/rawdog",
+        args=[],
+        pid=12345,
+    )
+
+    assert command == ["/usr/bin/caffeinate", "-dimsu", "-w", "12345"]
+
+
 def _row(
     row_id: int,
     status: str,

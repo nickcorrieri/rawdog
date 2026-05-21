@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import shutil
 import sqlite3
+import subprocess
 import sys
 from datetime import UTC, date, datetime
 from pathlib import Path
+from time import monotonic
 
 import typer
 from rich.console import Console
@@ -794,11 +796,39 @@ def _format_duration(seconds: float) -> str:
     return f"{hours} hr {remainder} min" if remainder else f"{hours} hr"
 
 
+def _format_copy_progress(copied_bytes: int, total_bytes: int, started_at: float) -> str:
+    elapsed = max(monotonic() - started_at, 0.001)
+    mbps = copied_bytes / elapsed / 1_000_000
+    if copied_bytes <= 0 or mbps <= 0:
+        eta = "calculating"
+    else:
+        eta = _format_duration(max(total_bytes - copied_bytes, 0) / (mbps * 1_000_000))
+    return (
+        f"{_format_bytes(copied_bytes)} / {_format_bytes(total_bytes)} copied | "
+        f"avg {mbps:.1f} MB/s | ETA {eta}"
+    )
+
+
 def _same_filesystem_best_effort(source_root: Path, destination_root: Path) -> bool:
     try:
         return source_root.stat().st_dev == destination_root.stat().st_dev
     except OSError:
         return False
+
+
+def _build_wings_command(
+    *,
+    caffeinate_path: str,
+    rawdog_executable: str,
+    args: list[str],
+    pid: int | None,
+) -> list[str]:
+    base = [caffeinate_path, "-dimsu"]
+    if pid is not None:
+        return [*base, "-w", str(pid)]
+    if args and Path(args[0]).name == "rawdog":
+        return [*base, *args]
+    return [*base, rawdog_executable, *args]
 
 
 def _print_big_job_warning(plan: DenPlan, source_root: Path, destination_root: Path, action: DenTransferAction) -> None:
@@ -1111,7 +1141,7 @@ def _show_home_menu() -> None:
         table.add_row("i", "Setup / settings", "Set yards, dens, and defaults")
         table.add_row("1", "Fetch card -> Yard", "Copy card/flash files to yard")
         table.add_row("2", "Archive copy -> Den", "Copy files to archive; source stays")
-        table.add_row("3", "Cleanup review", "Report files safe to remove manually")
+        table.add_row("3", "Junkyard cleanup review", "Report den-recorded files for manual removal")
         table.add_row("4", "Fast same-drive move -> Den", "Rename files on the same filesystem")
         table.add_row("5", "Audit / inspect folder", "Sniff layout or score a folder")
         table.add_row("6", "Verify source -> destination", "Check source is represented")
@@ -1330,12 +1360,12 @@ def _home_cleanup_review() -> None:
         Panel(
             "\n".join(
                 [
-                    "Cleanup review does not delete files.",
+                    "Junkyard is report-only. It does not delete files.",
                     "RAWDOG compares a yard against a den catalog and reports files that appear represented in the den.",
                     "Use the report to decide what you want to remove manually from your working disk.",
                 ]
             ),
-            title="Cleanup Review",
+            title="Junkyard Cleanup Review",
             border_style="yellow",
             style=STYLE_PANEL,
             expand=True,
@@ -2421,14 +2451,22 @@ def _execute_persisted_plan_unlocked(
     failed = 0
     review_rows: list[ExecutionPlanRow] = []
     failed_rows: list[ExecutionPlanRow] = []
-    total_bytes = sum(row.size_bytes for row in rows if row.status in {"plan_copy", "planned", "failed"})
+    copy_bytes_total = sum(
+        row.size_bytes
+        for row in rows
+        if row.status in {"plan_copy", "planned", "failed"}
+        and row.transfer_action == DenTransferAction.COPY
+    )
+    execution_started_at = datetime.now(UTC)
+    progress_started_at = monotonic()
     console.print(
         Panel(
             "\n".join(
                 [
                     f"Rows: {len(rows)}",
-                    f"Bytes queued: {_format_bytes(total_bytes)}",
-                    "Progress updates after every file and during copy byte transfer.",
+                    f"Started: {execution_started_at.isoformat()}",
+                    f"Copy bytes queued: {_format_bytes(copy_bytes_total)}",
+                    "Copy ETA is based on actual copied bytes in this execution session; skipped rows do not improve the ETA.",
                 ]
             ),
             title=f"Executing Plan #{plan_id}",
@@ -2443,12 +2481,15 @@ def _execute_persisted_plan_unlocked(
         TaskProgressColumn(),
         TextColumn("[bright_white on black]{task.fields[status]}"),
         TimeElapsedColumn(),
-        TimeRemainingColumn(),
         console=console,
     ) as progress:
         file_task = progress.add_task("Files", total=len(rows), status="starting")
-        byte_task = progress.add_task("Bytes", total=total_bytes or 1, status=_format_bytes(0))
-        bytes_advanced_total = 0
+        byte_task = progress.add_task(
+            "Copy bytes",
+            total=copy_bytes_total or 1,
+            status=_format_copy_progress(0, copy_bytes_total, progress_started_at),
+        )
+        bytes_copied_total = 0
         for row in rows:
             progress.update(
                 file_task,
@@ -2460,11 +2501,18 @@ def _execute_persisted_plan_unlocked(
             row_bytes_advanced = 0
 
             def advance_bytes(amount: int) -> None:
-                nonlocal bytes_advanced_total, row_bytes_advanced
+                nonlocal bytes_copied_total, row_bytes_advanced
                 row_bytes_advanced += amount
-                bytes_advanced_total += amount
+                bytes_copied_total += amount
                 progress.advance(byte_task, amount)
-                progress.update(byte_task, status=_format_bytes(bytes_advanced_total))
+                progress.update(
+                    byte_task,
+                    status=_format_copy_progress(
+                        bytes_copied_total,
+                        copy_bytes_total,
+                        progress_started_at,
+                    ),
+                )
 
             if row.status not in {"plan_copy", "planned", "failed"}:
                 audit_status = _audit_execution_row(row, row.status)
@@ -2503,7 +2551,6 @@ def _execute_persisted_plan_unlocked(
                     and row.destination_path.stat().st_size == row.size_bytes
                 ):
                     status = "moved"
-                    advance_bytes(row.size_bytes)
                 else:
                     status = (
                         append_only_move(row.source_path, row.destination_path, plan.destination_root)
@@ -2515,10 +2562,6 @@ def _execute_persisted_plan_unlocked(
                             progress_callback=advance_bytes,
                         )
                     )
-                    if status == "moved" and row_bytes_advanced == 0:
-                        advance_bytes(row.size_bytes)
-                if row_bytes_advanced < row.size_bytes and status.startswith("skipped"):
-                    advance_bytes(row.size_bytes - row_bytes_advanced)
                 audit_status = _audit_execution_row(row, status)
                 if status in {"copied", "moved"}:
                     transferred += 1
@@ -2865,6 +2908,58 @@ def report() -> None:
     """Generate RAWDOG reports from the local database."""
     _, config = _load_or_exit()
     console.print(f"Reports will be generated from: {config.database_path}")
+
+
+@app.command(context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+def wings(
+    ctx: typer.Context,
+    pid: int | None = typer.Option(None, "--pid", "-p", help="Keep the Mac awake until this PID exits."),
+) -> None:
+    """Run RAWDOG under macOS caffeinate, or attach to the active RAWDOG run."""
+    if sys.platform != "darwin":
+        raise typer.BadParameter("rawdog wings uses macOS caffeinate and is only available on macOS.")
+    caffeinate_path = shutil.which("caffeinate")
+    if caffeinate_path is None:
+        raise typer.BadParameter("macOS caffeinate command was not found.")
+    args = list(ctx.args)
+    if pid is not None and args:
+        raise typer.BadParameter("Use either --pid or a RAWDOG command, not both.")
+    if pid is None and not args:
+        _, config = _load_or_exit()
+        active_run = read_active_run(config.database_path)
+        if active_run is None:
+            raise typer.BadParameter(
+                "No active RAWDOG run found. Use `rawdog wings plans resume 10` "
+                "or `rawdog wings --pid PID`."
+            )
+        if not active_run_is_alive(active_run):
+            raise typer.BadParameter(
+                f"Active marker for plan #{active_run.plan_id} is stale. "
+                "If no RAWDOG copy/move is running, clear it with `rawdog plans active-clear --force`."
+            )
+        pid = active_run.pid
+    command = _build_wings_command(
+        caffeinate_path=caffeinate_path,
+        rawdog_executable=sys.argv[0],
+        args=args,
+        pid=pid,
+    )
+    detail = f"PID {pid}" if pid is not None else "rawdog " + " ".join(args)
+    console.print(
+        Panel(
+            "\n".join(
+                [
+                    "Keeping the Mac awake with caffeinate.",
+                    f"Target: {detail}",
+                    "Screen lock is OK. Do not sleep, log out, unplug drives, or disconnect docks.",
+                ]
+            ),
+            title="RAWDOG Wings",
+            border_style="bright_green",
+            style=STYLE_PANEL,
+        )
+    )
+    raise typer.Exit(subprocess.run(command).returncode)
 
 
 @app.command()
@@ -3931,6 +4026,12 @@ def queue_run(
     console.print(
         f"Total queued transfer: {total_files} files / {total_bytes / 1_000_000_000:.2f} GB"
     )
+    if total_bytes >= 50_000_000_000:
+        _print_notice(
+            f"Long queue tip: run this through `rawdog wings queue run {name} --commit` "
+            "so macOS stays awake.",
+            style=STYLE_ROW_SELECTED,
+        )
     execution_plans = [
         _persist_den_execution_plan(config, result, queue_id=queue.queue_id)
         for step, result in runnable_steps
