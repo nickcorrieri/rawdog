@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shlex
 import shutil
 import sqlite3
 import subprocess
@@ -1469,10 +1470,14 @@ def _home_cleanup_review() -> None:
         raise typer.BadParameter("Selected yard is not registered. Use option 9 to register it first.")
     if den_store is None:
         raise typer.BadParameter("Selected den is not registered. Use option 9 to register it first.")
-    junkyard(
+    before = _optional_prompt("Only report yard files modified before YYYY-MM-DD, or Enter for all")
+    _run_junkyard(
         yard_name=yard_store.name,
         den_name=den_store.name,
+        before=before,
         validate_first=True,
+        hash_check=False,
+        yes=False,
     )
 
 
@@ -3210,8 +3215,27 @@ def junkyard(
     yes: bool = typer.Option(False, "--yes", "-y", help="Confirm long hash-check work in non-interactive runs."),
 ) -> None:
     """Report working files that appear safe to scrap. This never deletes files."""
+    _run_junkyard(
+        yard_name=yard_name,
+        den_name=den_name,
+        before=before,
+        validate_first=validate_first,
+        hash_check=hash_check,
+        yes=yes,
+    )
+
+
+def _run_junkyard(
+    *,
+    yard_name: str | None,
+    den_name: str | None,
+    before: str | date | datetime | None,
+    validate_first: bool,
+    hash_check: bool,
+    yes: bool,
+) -> None:
     _, config = _load_or_exit()
-    before_dt = datetime.fromisoformat(before).replace(tzinfo=UTC) if before else None
+    before_dt = _parse_junkyard_before(before)
     with session(config.database_path) as connection:
         if yard_name:
             yard_store = get_store_by_name(connection, yard_name, StoreKind.YARD)
@@ -3256,6 +3280,7 @@ def junkyard(
     missing_or_changed = 0
     hash_mismatches = 0
     total_bytes = 0
+    candidate_rows: list[tuple[Path, Path, int]] = []
     total_hash_bytes = sum(size_bytes * 2 for _, _, size_bytes in matches)
     progress = None
     hash_task = None
@@ -3299,11 +3324,13 @@ def junkyard(
                     continue
             candidates += 1
             total_bytes += size_bytes
+            candidate_rows.append((yard_path, den_path, size_bytes))
             table.add_row(str(yard_path), str(den_path), str(size_bytes))
     finally:
         if progress:
             progress.stop()
     console.print(table)
+    manifest_path = _write_junkyard_report(config, candidate_rows) if candidate_rows else None
     if hash_check:
         _print_notice(
             f"Report only: {candidates} working files ({total_bytes / 1_000_000_000:.2f} GB) "
@@ -3329,6 +3356,152 @@ def junkyard(
             "RAWDOG did not delete or move anything.",
             style=STYLE_ROW_SELECTED,
         )
+    if manifest_path:
+        _print_junkyard_manual_cleanup_commands(manifest_path)
+
+
+def _parse_junkyard_before(before: str | date | datetime | None) -> datetime | None:
+    if before is None:
+        return None
+    if isinstance(before, datetime):
+        return before if before.tzinfo else before.replace(tzinfo=UTC)
+    if isinstance(before, date):
+        return datetime.combine(before, datetime.min.time(), tzinfo=UTC)
+    return datetime.combine(_parse_cli_date(before), datetime.min.time(), tzinfo=UTC)
+
+
+def _write_junkyard_report(config: RawdogConfig, candidate_rows: list[tuple[Path, Path, int]]) -> Path:
+    reports_dir = config.database_path.parent / "reports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+    manifest_path = reports_dir / f"junkyard-candidates-{timestamp}.tsv"
+    with manifest_path.open("w", encoding="utf-8") as handle:
+        handle.write("yard_path\tmatched_den_path\tsize_bytes\n")
+        for yard_path, den_path, size_bytes in candidate_rows:
+            handle.write(f"{yard_path}\t{den_path}\t{size_bytes}\n")
+    return manifest_path
+
+
+def _print_junkyard_manual_cleanup_commands(manifest_path: Path) -> None:
+    quoted_manifest = shlex.quote(str(manifest_path))
+    console.print(
+        Panel(
+            "\n".join(
+                [
+                    "RAWDOG did not delete anything.",
+                    f"Candidate manifest: {manifest_path}",
+                    "",
+                    "Review candidates:",
+                    f"less {quoted_manifest}",
+                    f"wc -l {quoted_manifest}",
+                    "",
+                    "Preview report-based removal:",
+                    f"rawdog junkyard-scrap {quoted_manifest}",
+                    "",
+                    "Commit report-based removal after review:",
+                    f"rawdog junkyard-scrap {quoted_manifest} --commit",
+                ]
+            ),
+            title="Manual Junkyard Cleanup",
+            border_style="yellow",
+            style=STYLE_PANEL,
+            expand=True,
+        )
+    )
+
+
+@app.command("junkyard-scrap")
+def junkyard_scrap(
+    report: Path = typer.Argument(..., help="Junkyard TSV report written by rawdog junkyard."),
+    dry_run: bool = typer.Option(True, "--dry-run/--commit", help="Preview before removing report paths."),
+) -> None:
+    """Remove yard files listed in a junkyard report. Never touches den files."""
+    _, config = _load_or_exit()
+    report_path = report.expanduser().resolve()
+    if not report_path.is_file():
+        raise typer.BadParameter(f"Report does not exist: {report_path}")
+    with session(config.database_path) as connection:
+        yards = _list_configured_stores(connection, config, StoreKind.YARD)
+    yard_roots = [yard.root_path.expanduser().resolve() for yard in yards]
+    report_paths = _read_junkyard_report_paths(report_path)
+    allowed: list[Path] = []
+    skipped: list[tuple[Path, str]] = []
+    for path in report_paths:
+        resolved = path.expanduser().resolve()
+        if not _path_is_under_any(resolved, yard_roots):
+            skipped.append((resolved, "not under a registered yard"))
+            continue
+        if not resolved.exists():
+            skipped.append((resolved, "missing"))
+            continue
+        if resolved.is_dir():
+            skipped.append((resolved, "directory"))
+            continue
+        if resolved.is_symlink():
+            skipped.append((resolved, "symlink"))
+            continue
+        allowed.append(resolved)
+
+    total_bytes = sum(path.stat().st_size for path in allowed)
+    table = _styled_table(title="Junkyard Scrap Preview")
+    table.add_column("Metric")
+    table.add_column("Value", justify="right")
+    table.add_row("Report", str(report_path))
+    table.add_row("Report rows", str(len(report_paths)))
+    table.add_row("Removable files", str(len(allowed)))
+    table.add_row("Removable GB", f"{total_bytes / 1_000_000_000:.2f}")
+    table.add_row("Skipped rows", str(len(skipped)))
+    table.add_row("Mode", "dry-run" if dry_run else "commit")
+    console.print(table)
+    if skipped:
+        skipped_table = _styled_table(title="Skipped Report Rows")
+        skipped_table.add_column("Path")
+        skipped_table.add_column("Reason")
+        for path, reason in skipped[:20]:
+            skipped_table.add_row(str(path), reason)
+        console.print(skipped_table)
+    if dry_run:
+        _print_notice("Dry run only. Re-run with --commit to remove the removable files in this report.")
+        return
+    phrase = "SCRAP JUNKYARD REPORT"
+    entered = Prompt.ask(
+        f"Type {phrase!r} to remove {len(allowed)} files listed in this report",
+        default="",
+        console=console,
+    )
+    if entered != phrase:
+        _print_notice("Junkyard scrap cancelled.", style=STYLE_ROW_SELECTED)
+        return
+    deleted = 0
+    failed = 0
+    for path in allowed:
+        try:
+            path.unlink()
+            deleted += 1
+        except OSError as exc:
+            failed += 1
+            _print_error(f"Failed to remove {path}: {exc}")
+    _print_notice(
+        f"Junkyard scrap complete: removed {deleted} files; failed {failed}; den files were not touched.",
+        style=STYLE_SAFE if failed == 0 else STYLE_WARN,
+    )
+
+
+def _read_junkyard_report_paths(report_path: Path) -> list[Path]:
+    paths: list[Path] = []
+    with report_path.open("r", encoding="utf-8") as handle:
+        for index, raw_line in enumerate(handle):
+            line = raw_line.rstrip("\n")
+            if not line:
+                continue
+            if index == 0 and line.startswith("yard_path\t"):
+                continue
+            paths.append(Path(line.split("\t", 1)[0]))
+    return paths
+
+
+def _path_is_under_any(path: Path, roots: list[Path]) -> bool:
+    return any(path == root or root in path.parents for root in roots)
 
 
 projects_app = typer.Typer(help="Manage RAWDOG projects.")

@@ -1,5 +1,6 @@
 # Author: Nicholas Corrieri
 
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 from rawdog import cli
@@ -216,6 +217,38 @@ def test_known_stores_repairs_configured_working_root_kind(tmp_path: Path, monke
     with session(database) as connection:
         den_rows = cli.list_stores(connection, StoreKind.DEN)
     assert den_rows == []
+
+
+def test_parse_junkyard_before_accepts_cli_string_date_and_datetime() -> None:
+    assert cli._parse_junkyard_before("2026-04-01") == datetime(2026, 4, 1, tzinfo=UTC)
+    assert cli._parse_junkyard_before(date(2026, 4, 1)) == datetime(2026, 4, 1, tzinfo=UTC)
+    assert cli._parse_junkyard_before(datetime(2026, 4, 1, 12, 30)) == datetime(
+        2026,
+        4,
+        1,
+        12,
+        30,
+        tzinfo=UTC,
+    )
+
+
+def test_read_junkyard_report_paths_accepts_tsv_report(tmp_path: Path) -> None:
+    report = tmp_path / "junkyard.tsv"
+    report.write_text(
+        "yard_path\tmatched_den_path\tsize_bytes\n"
+        "/yard/photo one.CR3\t/den/photo one.CR3\t123\n",
+        encoding="utf-8",
+    )
+
+    assert cli._read_junkyard_report_paths(report) == [Path("/yard/photo one.CR3")]
+
+
+def test_path_is_under_any_requires_registered_root(tmp_path: Path) -> None:
+    yard = tmp_path / "yard"
+    outside = tmp_path / "outside"
+
+    assert cli._path_is_under_any(yard / "photo.CR3", [yard])
+    assert not cli._path_is_under_any(outside / "photo.CR3", [yard])
 
 
 def _answers(*values: str):

@@ -329,12 +329,19 @@ before they appear in the report. Use `--hash-check` for the meticulous mode:
 RAWDOG reads both the yard file and matched den file and requires matching
 SHA-256 before reporting the file as cleanup-safe. `--hash-check` can take a
 long time on large libraries and implies `--validate-first`. RAWDOG does not
-delete them.
+delete them. When candidates are found, RAWDOG writes a TSV report with explicit
+yard path, matched den path, and size for every candidate. Use
+`rawdog junkyard-scrap REPORT` to preview removal from that exact report, and
+`rawdog junkyard-scrap REPORT --commit` to remove only the report's yard paths
+after typing the exact confirmation phrase. Den files are never touched.
 
 ```bash
 rawdog junkyard --yard primary --den primary
+rawdog junkyard --yard primary --den primary --before 2026-04-01
 rawdog junkyard --yard primary --den primary --validate-first
 rawdog junkyard --yard primary --den primary --hash-check
+rawdog junkyard-scrap ~/Library/Application\ Support/rawdog/reports/junkyard-candidates-YYYYMMDD-HHMMSS.tsv
+rawdog junkyard-scrap ~/Library/Application\ Support/rawdog/reports/junkyard-candidates-YYYYMMDD-HHMMSS.tsv --commit
 ```
 
 If RAWDOG is interrupted, rerun `rawdog plans list`, inspect the latest started
