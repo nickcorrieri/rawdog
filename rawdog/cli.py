@@ -386,15 +386,17 @@ def _choose_den_destination_path(label: str) -> Path:
     dens = _known_stores(StoreKind.DEN)
     while True:
         _print_section_row(f"{label} (Ctrl-C to exit)")
-        default_den = config.archive_root
+        primary_den = next((store for store in dens if store.name.lower() == "primary"), None)
+        default_den = config.archive_root or (primary_den.root_path if primary_den else None)
         if default_den:
-            _print_path_option("1", "Default den from init", default_den)
+            default_label = "Default den from init" if config.archive_root else "Primary registered den"
+            _print_path_option("1", default_label, default_den)
         else:
             _print_full_row(
                 [
                     ("1.", STYLE_ROW_SELECTED),
                     (" ", STYLE_ROW),
-                    ("Default den from init: ", "bold bright_white on black"),
+                    ("Default / primary den: ", "bold bright_white on black"),
                     ("not configured", STYLE_MUTED),
                 ],
                 style=STYLE_ROW,

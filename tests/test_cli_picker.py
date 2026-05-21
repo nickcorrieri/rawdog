@@ -96,6 +96,28 @@ def test_choose_den_destination_uses_default_and_can_create_missing_path(tmp_pat
     assert destination.exists()
 
 
+def test_choose_den_destination_uses_primary_registered_den_when_init_default_missing(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    den_root = tmp_path / "RAW_DEN"
+    den_root.mkdir()
+    database = tmp_path / "rawdog.sqlite"
+    initialize(database)
+    with session(database) as connection:
+        create_or_update_store(
+            connection,
+            StoreCreate(name="primary", root_path=den_root, store_kind=StoreKind.DEN),
+        )
+    config = build_config(OrganizationMode.PROJECT, database_path=database)
+    monkeypatch.setattr(cli, "_load_or_exit", lambda: (tmp_path / "config.json", config))
+    monkeypatch.setattr(cli.Prompt, "ask", _answers("1"))
+
+    picked = cli._choose_den_destination_path("Destination")
+
+    assert picked == den_root.resolve()
+
+
 def test_browse_den_destination_can_select_known_den_under_current_path(tmp_path: Path, monkeypatch) -> None:
     den_root = tmp_path / "archive"
     den_root.mkdir()
