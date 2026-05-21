@@ -112,8 +112,10 @@ rawdog backup
 rawdog den
 rawdog dens setup
 rawdog dens list
+rawdog dens remove
 rawdog yard setup
 rawdog yard list
+rawdog yard remove
 rawdog junkyard
 rawdog sniff
 rawdog score
@@ -155,6 +157,8 @@ beside stills by DSLRs, mirrorless bodies, action cameras, and cinema cameras:
 ```bash
 rawdog dens setup primary --root /Volumes/Archive
 rawdog yard setup primary --root ~/Pictures/RAWDOG
+rawdog dens remove primary
+rawdog yard remove primary
 rawdog sniff /Volumes/OldDrive
 rawdog score /Volumes/OldDrive
 rawdog den /Volumes/OldDrive --dest /Volumes/Archive
@@ -166,6 +170,13 @@ carries its own portable `.rawdog/store.json` and `.rawdog/store.sqlite` inside
 that folder, so the store can still identify itself if a volume path changes.
 Successful den copy/move rows under a registered den are written to that den's
 local store catalog.
+
+Running `dens setup` or `yard setup` on a folder that already has `.rawdog`
+metadata relinks that portable store into App Support memory. If the requested
+store name is already used by another store of the same type, RAWDOG assigns the
+next available name instead of crashing. `dens remove` and `yard remove` only
+forget the App Support pointer; they do not delete media files or the portable
+`.rawdog` catalog.
 
 Two consolidation workflows are supported:
 

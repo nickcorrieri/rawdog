@@ -128,6 +128,7 @@ from rawdog.stores import (
     list_stores,
     mark_store_used,
     record_store_file,
+    remove_store_registration,
 )
 from rawdog.verifier import verify_same_bytes
 from rawdog.workflows import (
@@ -1701,7 +1702,8 @@ def _home_store_setup() -> None:
     kind_choice = Prompt.ask("Store type", choices=["den", "yard"], default="den", console=console)
     name = Prompt.ask("Store name", default="primary", console=console)
     root = _choose_path("Store root")
-    notes = _optional_prompt("Notes, or Enter to skip")
+    _print_notice("Optional description only; this is for your own label, not RAWDOG behavior.")
+    notes = _optional_prompt("Store description, or Enter to skip")
     _setup_store(name=name, root=root, store_kind=StoreKind(kind_choice), notes=notes)
 
 
@@ -3208,6 +3210,12 @@ def _setup_store(name: str, root: Path, store_kind: StoreKind, notes: str | None
             connection,
             StoreCreate(name=name, root_path=root_path, store_kind=store_kind, notes=notes),
         )
+        store = mark_store_used(connection, store.store_id)
+    if store.name != name:
+        _print_notice(
+            f"Store name '{name}' was already used for another {store_kind.value}; registered this path as '{store.name}'.",
+            style=STYLE_ROW_SELECTED,
+        )
     console.print(
         Panel(
             "\n".join(
@@ -3227,6 +3235,28 @@ def _setup_store(name: str, root: Path, store_kind: StoreKind, notes: str | None
         )
     )
     console.print(f"[bold green]Registered {store.store_kind.value} store:[/] {store.name} -> {store.root_path}")
+
+
+def _remove_store(identifier: str, store_kind: StoreKind, *, yes: bool = False) -> None:
+    _, config = _load_or_exit()
+    with session(config.database_path) as connection:
+        existing = get_store_by_name(connection, identifier, store_kind)
+        if existing is None:
+            rows = [store for store in list_stores(connection, store_kind) if store.store_id == identifier]
+            existing = rows[0] if rows else None
+        if existing is None:
+            raise typer.BadParameter(f"No {store_kind.value} store named or identified by {identifier!r}.")
+        _print_notice(
+            f"Forget {store_kind.value} store '{existing.name}' at {existing.root_path} from App Support memory only.",
+            style=STYLE_ROW_SELECTED,
+        )
+        _print_notice("This does not delete media files or the portable .rawdog catalog.")
+        if not yes and not _yes_no("Forget this store registration?", default=False):
+            _print_notice("Store registration left unchanged.", style=STYLE_MUTED)
+            return
+        removed = remove_store_registration(connection, existing.store_id, store_kind)
+    if removed:
+        _print_notice(f"Forgot {removed.store_kind.value} store: {removed.name} -> {removed.root_path}", style=STYLE_SAFE)
 
 
 @dens_app.command("setup")
@@ -3267,6 +3297,15 @@ def den_store_list() -> None:
     console.print(table)
 
 
+@dens_app.command("remove")
+def den_store_remove(
+    identifier: str = typer.Argument(..., help="Den store name or store ID to forget from App Support."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation."),
+) -> None:
+    """Forget a den registration without deleting files or portable metadata."""
+    _remove_store(identifier, StoreKind.DEN, yes=yes)
+
+
 @yard_app.command("setup")
 def yard_setup(
     name: str = typer.Argument("primary", help="Yard store name."),
@@ -3303,6 +3342,15 @@ def yard_list() -> None:
             store.updated_at.isoformat(),
         )
     console.print(table)
+
+
+@yard_app.command("remove")
+def yard_remove(
+    identifier: str = typer.Argument(..., help="Yard store name or store ID to forget from App Support."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation."),
+) -> None:
+    """Forget a yard registration without deleting files or portable metadata."""
+    _remove_store(identifier, StoreKind.YARD, yes=yes)
 
 
 @profiles_app.command("create")

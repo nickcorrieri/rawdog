@@ -37,13 +37,18 @@ def create_or_update_store(connection: sqlite3.Connection, payload: StoreCreate)
         "SELECT store_id, name FROM stores WHERE root_path = ?",
         (str(root_path),),
     ).fetchone()
+    portable_identity = _read_store_identity(root_path)
     store_id = (
         existing_row["store_id"]
         if existing_row
-        else _read_store_id(root_path) or f"{payload.store_kind.value}_{uuid.uuid4().hex[:12]}"
+        else portable_identity.get("store_id") or f"{payload.store_kind.value}_{uuid.uuid4().hex[:12]}"
     )
+    name = payload.name
+    if portable_identity.get("name") and payload.name.strip().lower() == "primary" and not existing_row:
+        name = portable_identity["name"]
+    name = _available_name(connection, payload.store_kind, name, store_id)
     now = _now()
-    _write_store_identity(root_path, store_id, payload.name, payload.store_kind, now)
+    _write_store_identity(root_path, store_id, name, payload.store_kind, now)
     _initialize_store_db(root_path)
     connection.execute(
         """
@@ -59,7 +64,7 @@ def create_or_update_store(connection: sqlite3.Connection, payload: StoreCreate)
         """,
         (
             store_id,
-            payload.name,
+            name,
             payload.store_kind.value,
             str(root_path),
             now,
@@ -87,6 +92,26 @@ def list_stores(connection: sqlite3.Connection, store_kind: StoreKind | None = N
     else:
         rows = connection.execute(f"SELECT * FROM stores {order}").fetchall()
     return [row_to_store(row) for row in rows]
+
+
+def remove_store_registration(
+    connection: sqlite3.Connection,
+    identifier: str,
+    store_kind: StoreKind,
+) -> Store | None:
+    row = connection.execute(
+        """
+        SELECT * FROM stores
+        WHERE store_kind = ?
+          AND (store_id = ? OR name = ?)
+        """,
+        (store_kind.value, identifier, identifier),
+    ).fetchone()
+    if row is None:
+        return None
+    store = row_to_store(row)
+    connection.execute("DELETE FROM stores WHERE store_id = ?", (store.store_id,))
+    return store
 
 
 def get_store_by_name(
@@ -237,13 +262,40 @@ def row_to_store_file(row: sqlite3.Row) -> StoreFile:
 
 
 def _read_store_id(root_path: Path) -> str | None:
+    store_id = _read_store_identity(root_path).get("store_id")
+    return str(store_id) if store_id else None
+
+
+def _read_store_identity(root_path: Path) -> dict[str, str]:
     path = store_json_path(root_path)
     if not path.exists():
-        return None
-    with path.open("r", encoding="utf-8") as handle:
-        payload = json.load(handle)
-    store_id = payload.get("store_id")
-    return str(store_id) if store_id else None
+        return {}
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return {key: str(value) for key, value in payload.items() if value is not None}
+
+
+def _available_name(
+    connection: sqlite3.Connection,
+    store_kind: StoreKind,
+    preferred_name: str,
+    store_id: str,
+) -> str:
+    base = preferred_name.strip() or store_kind.value
+    candidate = base
+    counter = 2
+    while True:
+        row = connection.execute(
+            "SELECT store_id FROM stores WHERE store_kind = ? AND name = ?",
+            (store_kind.value, candidate),
+        ).fetchone()
+        if row is None or row["store_id"] == store_id:
+            return candidate
+        candidate = f"{base}-{counter}"
+        counter += 1
 
 
 def _write_store_identity(

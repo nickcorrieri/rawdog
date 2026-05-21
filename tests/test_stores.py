@@ -13,6 +13,7 @@ from rawdog.stores import (
     list_stores,
     mark_store_used,
     record_store_file,
+    remove_store_registration,
     store_db_path,
     store_json_path,
 )
@@ -118,6 +119,57 @@ def test_store_setup_repairs_existing_root_kind_and_portable_metadata(tmp_path: 
     assert [store.root_path for store in yards] == [root.resolve()]
     assert dens == []
     assert portable["store_kind"] == "yard"
+
+
+def test_store_setup_relinks_portable_store_without_duplicate_name_crash(tmp_path: Path) -> None:
+    database = tmp_path / "rawdog.sqlite"
+    first_root = tmp_path / "first-yard"
+    second_root = tmp_path / "second-yard"
+    first_root.mkdir()
+    second_root.mkdir()
+    initialize(database)
+
+    with session(database) as connection:
+        first = create_or_update_store(
+            connection,
+            StoreCreate(name="primary", root_path=first_root, store_kind=StoreKind.YARD),
+        )
+        removed = remove_store_registration(connection, first.store_id, StoreKind.YARD)
+        relinked = create_or_update_store(
+            connection,
+            StoreCreate(name="primary", root_path=first_root, store_kind=StoreKind.YARD),
+        )
+        second = create_or_update_store(
+            connection,
+            StoreCreate(name="primary", root_path=second_root, store_kind=StoreKind.YARD),
+        )
+        stores = list_stores(connection, StoreKind.YARD)
+
+    assert removed is not None
+    assert relinked.store_id == first.store_id
+    assert relinked.name == "primary"
+    assert second.name == "primary-2"
+    assert [store.name for store in stores] == ["primary", "primary-2"]
+
+
+def test_remove_store_registration_only_forgets_app_pointer(tmp_path: Path) -> None:
+    database = tmp_path / "rawdog.sqlite"
+    root = tmp_path / "archive"
+    root.mkdir()
+    initialize(database)
+
+    with session(database) as connection:
+        store = create_or_update_store(
+            connection,
+            StoreCreate(name="primary", root_path=root, store_kind=StoreKind.DEN),
+        )
+        removed = remove_store_registration(connection, "primary", StoreKind.DEN)
+        stores = list_stores(connection, StoreKind.DEN)
+
+    assert removed is not None
+    assert removed.store_id == store.store_id
+    assert stores == []
+    assert store_json_path(root).exists()
 
 
 def test_store_migration_adds_usage_columns_to_existing_database(tmp_path: Path) -> None:
