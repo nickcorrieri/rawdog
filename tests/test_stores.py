@@ -5,6 +5,7 @@ import sqlite3
 from pathlib import Path
 
 from rawdog.db import initialize, session
+from rawdog.inventory import scan_raw_files
 from rawdog.models import StoreCreate, StoreKind
 from rawdog.stores import (
     create_or_update_store,
@@ -12,6 +13,7 @@ from rawdog.stores import (
     list_store_files_by_original_source,
     list_stores,
     mark_store_used,
+    rebuild_store_catalog,
     record_store_file,
     remove_store_registration,
     store_db_path,
@@ -66,6 +68,44 @@ def test_store_records_den_file_by_original_source(tmp_path: Path) -> None:
 
     assert yard_file.resolve() in by_source
     assert by_source[yard_file.resolve()].store_path == den_file.resolve()
+
+
+def test_rebuild_store_catalog_scans_disk_removes_stale_and_preserves_source_links(tmp_path: Path) -> None:
+    database = tmp_path / "rawdog.sqlite"
+    den_root = tmp_path / "archive"
+    yard_root = tmp_path / "yard"
+    kept_file = den_root / "2026" / "IMG_0001.CR3"
+    new_file = den_root / "2026" / "IMG_0002.CR3"
+    stale_file = den_root / "2026" / "IMG_0003.CR3"
+    yard_file = yard_root / "IMG_0001.CR3"
+    kept_file.parent.mkdir(parents=True)
+    yard_file.parent.mkdir(parents=True)
+    kept_file.write_bytes(b"raw1")
+    new_file.write_bytes(b"raw2")
+    stale_file.write_bytes(b"raw3")
+    yard_file.write_bytes(b"raw1")
+    initialize(database)
+
+    with session(database) as connection:
+        store = create_or_update_store(
+            connection,
+            StoreCreate(name="primary", root_path=den_root, store_kind=StoreKind.DEN),
+        )
+    record_store_file(store, store_path=kept_file, original_source_path=yard_file, size_bytes=4)
+    record_store_file(store, store_path=stale_file, size_bytes=4)
+    stale_file.unlink()
+
+    result = rebuild_store_catalog(store, scan_raw_files(den_root), dry_run=False)
+    by_source = list_store_files_by_original_source(store)
+
+    assert result.scanned_files == 2
+    assert result.old_rows == 2
+    assert result.stale_rows_removed == 1
+    assert result.source_links_preserved == 1
+    assert yard_file.resolve() in by_source
+    with sqlite3.connect(store_db_path(den_root)) as connection:
+        rows = connection.execute("SELECT relative_path FROM store_files ORDER BY relative_path").fetchall()
+    assert [row[0] for row in rows] == ["2026/IMG_0001.CR3", "2026/IMG_0002.CR3"]
 
 
 def test_stores_track_last_used_and_keep_primary_first(tmp_path: Path) -> None:

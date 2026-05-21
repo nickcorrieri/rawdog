@@ -113,6 +113,7 @@ rawdog den
 rawdog dens setup
 rawdog dens list
 rawdog dens remove
+rawdog dens rebuild
 rawdog yard setup
 rawdog yard list
 rawdog yard remove
@@ -156,6 +157,7 @@ beside stills by DSLRs, mirrorless bodies, action cameras, and cinema cameras:
 
 ```bash
 rawdog dens setup primary --root /Volumes/Archive
+rawdog dens rebuild primary --commit
 rawdog yard setup primary --root ~/Pictures/RAWDOG
 rawdog dens remove primary
 rawdog yard remove primary
@@ -170,6 +172,12 @@ carries its own portable `.rawdog/store.json` and `.rawdog/store.sqlite` inside
 that folder, so the store can still identify itself if a volume path changes.
 Successful den copy/move rows under a registered den are written to that den's
 local store catalog.
+
+Use `rawdog dens rebuild primary --commit` to completely rebuild a den's
+portable catalog from the RAW/camera video files currently on disk. Rebuild scans
+the den, removes stale catalog rows for files no longer present, adds newly found
+files, and preserves known original-source links when the destination path still
+matches an existing catalog row. It does not move, delete, or rename media files.
 
 Running `dens setup` or `yard setup` on a folder that already has `.rawdog`
 metadata relinks that portable store into App Support memory. If the requested

@@ -5,14 +5,26 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from rawdog.inventory import InventoryItem
 from rawdog.models import Store, StoreCreate, StoreFile, StoreFileStatus, StoreKind
 
 STORE_DIR = ".rawdog"
 STORE_JSON = "store.json"
 STORE_DB = "store.sqlite"
+
+
+@dataclass(frozen=True)
+class StoreCatalogRebuildResult:
+    scanned_files: int
+    total_bytes: int
+    old_rows: int
+    stale_rows_removed: int
+    source_links_preserved: int
+    dry_run: bool
 
 
 def _now() -> str:
@@ -215,6 +227,69 @@ def record_store_file(
             (str(resolved),),
         ).fetchone()
     return row_to_store_file(row)
+
+
+def rebuild_store_catalog(
+    store: Store,
+    items: list[InventoryItem],
+    *,
+    dry_run: bool = True,
+) -> StoreCatalogRebuildResult:
+    """Rebuild a store catalog from the files currently present on disk."""
+    _initialize_store_db(store.root_path)
+    now = _now()
+    rows = []
+    with sqlite3.connect(store_db_path(store.root_path)) as connection:
+        connection.row_factory = sqlite3.Row
+        existing_rows = connection.execute("SELECT * FROM store_files").fetchall()
+        existing_by_path = {row["store_path"]: row for row in existing_rows}
+        scanned_paths = {str(item.path.expanduser().resolve()) for item in items}
+        stale_rows_removed = len([row for row in existing_rows if row["store_path"] not in scanned_paths])
+        source_links_preserved = 0
+        total_bytes = 0
+        for item in items:
+            resolved = item.path.expanduser().resolve()
+            existing = existing_by_path.get(str(resolved))
+            if existing and existing["original_source_path"]:
+                source_links_preserved += 1
+            total_bytes += item.size_bytes
+            rows.append(
+                (
+                    store.store_id,
+                    str(resolved),
+                    str(resolved.relative_to(store.root_path)),
+                    existing["original_source_path"] if existing else None,
+                    item.size_bytes,
+                    StoreFileStatus.PRESENT.value,
+                    existing["execution_plan_id"] if existing else None,
+                    existing["execution_row_id"] if existing else None,
+                    existing["created_at"] if existing else now,
+                    now,
+                    now,
+                )
+            )
+
+        if not dry_run:
+            connection.execute("DELETE FROM store_files")
+            connection.executemany(
+                """
+                INSERT INTO store_files (
+                    store_id, store_path, relative_path, original_source_path, size_bytes, status,
+                    execution_plan_id, execution_row_id, created_at, updated_at, last_seen_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+
+    return StoreCatalogRebuildResult(
+        scanned_files=len(items),
+        total_bytes=total_bytes,
+        old_rows=len(existing_rows),
+        stale_rows_removed=stale_rows_removed,
+        source_links_preserved=source_links_preserved,
+        dry_run=dry_run,
+    )
 
 
 def list_store_files_by_original_source(store: Store) -> dict[Path, StoreFile]:

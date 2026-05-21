@@ -122,12 +122,14 @@ from rawdog.safety import (
     reject_dangerous_arguments,
 )
 from rawdog.stores import (
+    StoreCatalogRebuildResult,
     create_or_update_store,
     find_store_for_path,
     get_store_by_name,
     list_store_files_by_original_source,
     list_stores,
     mark_store_used,
+    rebuild_store_catalog,
     record_store_file,
     remove_store_registration,
 )
@@ -1740,12 +1742,40 @@ def _print_den_guidance() -> None:
 
 
 def _home_inspect() -> None:
+    _print_section_row("Audit / Inspect")
+    _print_option("1.", "Sniff a folder, yard, or den")
+    _print_option("2.", "Score a folder for consolidation readiness")
+    _print_option("3.", "Rebuild a den catalog from files on disk")
+    _print_option("0.", "Back")
+    action = Prompt.ask(
+        _prompt("Choose audit action"),
+        choices=["0", "1", "2", "3", "sniff", "score", "rebuild"],
+        default="1",
+        console=console,
+    )
+    if action == "0":
+        return
+    if action in {"3", "rebuild"}:
+        _home_rebuild_den_catalog()
+        return
     root = _choose_source_path("Folder to inspect")
-    action = Prompt.ask("Inspect action", choices=["sniff", "score"], default="sniff", console=console)
-    if action == "score":
+    if action in {"2", "score"}:
         score(root=root)
-    else:
-        sniff(roots=[root])
+        return
+    sniff(roots=[root])
+
+
+def _home_rebuild_den_catalog() -> None:
+    _print_notice(
+        "Rebuild scans every RAW/camera video file currently in a den and rewrites that den's portable catalog.",
+        style=STYLE_ROW_SELECTED,
+    )
+    den_root = _choose_store_path("Den catalog to rebuild", StoreKind.DEN)
+    store = _store_for_exact_path(den_root, StoreKind.DEN)
+    if store is None:
+        raise typer.BadParameter("Selected den is not registered. Use option 9 to register it first.")
+    dry_run = not _yes_no("Write rebuilt den catalog now?", default=False)
+    _rebuild_den_catalog(store, dry_run=dry_run)
 
 
 def _home_verify() -> None:
@@ -3456,6 +3486,52 @@ def _print_store_table(store_kind: StoreKind) -> None:
     console.print(table)
 
 
+def _resolve_den_store(identifier: str) -> Store:
+    _, config = _load_or_exit()
+    with session(config.database_path) as connection:
+        store = get_store_by_name(connection, identifier, StoreKind.DEN)
+        if store is None:
+            rows = [row for row in list_stores(connection, StoreKind.DEN) if row.store_id == identifier]
+            store = rows[0] if rows else None
+        if store is None:
+            path = parse_user_path(identifier)
+            store = find_store_for_path(connection, path, StoreKind.DEN)
+        if store is None:
+            raise typer.BadParameter(f"No den store named, identified, or containing {identifier!r}.")
+        return mark_store_used(connection, store.store_id)
+
+
+def _print_den_rebuild_result(store: Store, result: StoreCatalogRebuildResult) -> None:
+    table = _styled_table(title=f"Den Catalog {'Preview' if result.dry_run else 'Rebuild'}")
+    table.add_column("Metric")
+    table.add_column("Value", justify="right")
+    table.add_row("Den", f"{store.name} ({store.store_id})")
+    table.add_row("Root", str(store.root_path))
+    table.add_row("Scanned files", str(result.scanned_files))
+    table.add_row("Scanned GB", f"{result.total_bytes / 1_000_000_000:.2f}")
+    table.add_row("Existing catalog rows", str(result.old_rows))
+    table.add_row("Stale rows removed", str(result.stale_rows_removed))
+    table.add_row("Source links preserved", str(result.source_links_preserved))
+    table.add_row("Mode", "dry-run" if result.dry_run else "committed")
+    console.print(table)
+    if result.dry_run:
+        _print_notice("Dry run only. Re-run with --commit to rewrite the den catalog.", style=STYLE_ROW_SELECTED)
+    else:
+        _print_notice("Den catalog rebuilt from files currently on disk.", style=STYLE_SAFE)
+
+
+def _rebuild_den_catalog(store: Store, *, dry_run: bool) -> StoreCatalogRebuildResult:
+    try:
+        ensure_existing_directory(store.root_path, "den root")
+    except SafetyError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    _print_notice(f"Scanning den: {store.root_path}", style=STYLE_ROW_SELECTED)
+    items = scan_raw_files(store.root_path)
+    result = rebuild_store_catalog(store, items, dry_run=dry_run)
+    _print_den_rebuild_result(store, result)
+    return result
+
+
 @dens_app.command("setup")
 def den_store_setup(
     name: str = typer.Argument("primary", help="Den store name."),
@@ -3480,6 +3556,16 @@ def den_store_remove(
 ) -> None:
     """Forget a den registration without deleting files or portable metadata."""
     _remove_store(identifier, StoreKind.DEN, yes=yes)
+
+
+@dens_app.command("rebuild")
+def den_store_rebuild(
+    identifier: str = typer.Argument("primary", help="Den name, store ID, or path."),
+    dry_run: bool = typer.Option(True, "--dry-run/--commit", help="Preview before rewriting the den catalog."),
+) -> None:
+    """Rebuild a den's portable catalog from the files currently on disk."""
+    store = _resolve_den_store(identifier)
+    _rebuild_den_catalog(store, dry_run=dry_run)
 
 
 @yard_app.command("setup")
