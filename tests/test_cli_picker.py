@@ -85,6 +85,31 @@ def test_choose_store_path_lists_established_den_first(tmp_path: Path, monkeypat
     assert picked == den_root.resolve()
 
 
+def test_choose_audit_root_can_pick_registered_den(tmp_path: Path, monkeypatch) -> None:
+    database = tmp_path / "rawdog.sqlite"
+    den_root = tmp_path / "archive"
+    yard_root = tmp_path / "yard"
+    den_root.mkdir()
+    yard_root.mkdir()
+    initialize(database)
+    with session(database) as connection:
+        create_or_update_store(
+            connection,
+            StoreCreate(name="primary", root_path=den_root, store_kind=StoreKind.DEN),
+        )
+        create_or_update_store(
+            connection,
+            StoreCreate(name="primary", root_path=yard_root, store_kind=StoreKind.YARD),
+        )
+    config = build_config(OrganizationMode.PROJECT, database_path=database)
+    monkeypatch.setattr(cli, "_load_or_exit", lambda: (tmp_path / "config.json", config))
+    monkeypatch.setattr(cli.Prompt, "ask", _answers("2", "1"))
+
+    picked = cli._choose_audit_root("Audit")
+
+    assert picked == den_root.resolve()
+
+
 def test_choose_source_path_requires_existing_manual_path(tmp_path: Path, monkeypatch) -> None:
     source = tmp_path / "source"
     source.mkdir()

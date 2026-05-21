@@ -175,7 +175,7 @@ rawdog yard remove primary
 rawdog sniff /Volumes/OldDrive
 rawdog score /Volumes/OldDrive
 rawdog
-# choose S, then 5 for slow full audit
+# choose S, then 5 for slow full audit; pick yard, den, common path, or manual path
 rawdog den /Volumes/OldDrive --dest /Volumes/Archive
 rawdog den /Volumes/OldDrive --dest /Volumes/Archive --commit
 ```

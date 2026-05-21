@@ -1846,9 +1846,39 @@ def _home_hardcore_audit() -> None:
             expand=True,
         )
     )
-    root = _choose_source_path("Folder to audit")
+    root = _choose_audit_root("Slow full audit target")
     hash_check = _yes_no("Also run slow SHA-256 duplicate-content check?", default=False)
     _run_hardcore_audit(root, hash_check=hash_check)
+
+
+def _choose_audit_root(label: str) -> Path:
+    yards = _known_stores(StoreKind.YARD)
+    dens = _known_stores(StoreKind.DEN)
+    while True:
+        _print_section_row(f"{label} (Ctrl-C to exit)")
+        _print_option("1.", f"Pick registered yard ({len(yards)} available)")
+        _print_option("2.", f"Pick registered den ({len(dens)} available)")
+        _print_option("3.", "Browse common folders / volumes")
+        _print_option("0.", "Enter manual existing path")
+        selection = Prompt.ask(_prompt("Choose audit target type"), default="3", console=console).strip()
+        if selection == "1":
+            path = _pick_registered_store(yards, "yard")
+            if path:
+                return path
+            continue
+        if selection == "2":
+            path = _pick_registered_store(dens, "den")
+            if path:
+                return path
+            continue
+        if selection == "3":
+            return _choose_explored_source_path(label)
+        if selection == "0":
+            path = _manual_existing_directory("Audit path")
+            if path:
+                return path
+            continue
+        _print_error("Invalid audit target choice. Try again.")
 
 
 def _run_hardcore_audit(root: Path, *, hash_check: bool = False) -> None:
