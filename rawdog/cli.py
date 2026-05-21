@@ -161,15 +161,23 @@ STYLE_PANEL = STYLE_TEXT
 console = Console(force_terminal=True, color_system="256", style=STYLE_TEXT)
 
 RAWDOG_ASCII = r"""
-        __________________
-       /   RAWDOG CLI    \__
-      |   [__]       o     _)
-       \__________________/
-              / \__
-             (    @\___
-              /         O
-             /   (_____/
-            /_____/   U
+  .----------------------------------------------------------------.
+  |  RRRR    AAA   W   W  DDDD    OOO    GGGG                     |
+  |  R   R  A   A  W   W  D   D  O   O  G                         |
+  |  RRRR   AAAAA  W W W  D   D  O   O  G  GG                     |
+  |  R  R   A   A  WW WW  D   D  O   O  G   G                     |
+  |  R   R  A   A  W   W  DDDD    OOO    GGGG                     |
+  |----------------------------------------------------------------|
+  |    _________                                                   |
+  |   /  _____  \__        FETCH . DEN . BREED . SNIFF             |
+  |  |  [_____]    _)      APPEND-ONLY PHOTO OPS                   |
+  |   \___________/        NO DELETE . NO OVERWRITE . FULL AUDIT   |
+  |        / \__                                                   |
+  |       (    @\___       ARCHIVE DOG ONLINE                      |
+  |        /         O                                             |
+  |       /   (_____/                                              |
+  |      /_____/   U                                               |
+  '----------------------------------------------------------------'
 """
 
 
