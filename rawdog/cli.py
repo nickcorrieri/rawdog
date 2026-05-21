@@ -2457,6 +2457,11 @@ def _print_plan_operation_review(
         )
     )
     _print_destination_folder_summary(rows)
+    destination_root = _plan_destination_root(config, plan_id)
+    _print_duplicate_year_warning(
+        [row.destination_path for row in rows],
+        destination_root=destination_root,
+    )
     table = _styled_table(
         title=f"Plan #{plan_id} {'Verbose ' if verbose else ''}Operations Preview",
         style=STYLE_PANEL,
@@ -2490,6 +2495,69 @@ def _print_plan_operation_review(
     if len(rows) > limit:
         _print_notice(f"Showing first {limit} of {len(rows)} operations.", style=STYLE_ROW_SELECTED)
     return manifest_path
+
+
+def _plan_destination_root(config: RawdogConfig, plan_id: int) -> Path | None:
+    with session(config.database_path) as connection:
+        plan = get_execution_plan(connection, plan_id)
+    return plan.destination_root if plan else None
+
+
+def _print_duplicate_year_warning(paths: list[Path], *, destination_root: Path | None, limit: int = 5) -> None:
+    examples = _duplicate_year_destination_paths(paths, destination_root=destination_root, limit=limit)
+    if not examples:
+        return
+    lines = [
+        "RAWDOG found destination paths with repeated adjacent year folders.",
+        "This usually means the selected layout/template would create a messy den path like YYYY/YYYY/...",
+        "Pause and inspect the layout before committing this plan.",
+        "",
+        "Examples:",
+    ]
+    lines.extend(f"- {path}" for path in examples)
+    console.print(
+        Panel(
+            "\n".join(lines),
+            title="Destination Path Warning",
+            border_style="red",
+            style=STYLE_WARN,
+            expand=True,
+        )
+    )
+
+
+def _duplicate_year_destination_paths(
+    paths: list[Path],
+    *,
+    destination_root: Path | None,
+    limit: int = 5,
+) -> list[Path]:
+    examples: list[Path] = []
+    for path in paths:
+        parts = _destination_relative_parts(path, destination_root)
+        if _has_adjacent_duplicate_year(parts):
+            examples.append(path)
+        if len(examples) >= limit:
+            break
+    return examples
+
+
+def _destination_relative_parts(path: Path, destination_root: Path | None) -> tuple[str, ...]:
+    if destination_root is None:
+        return path.parts
+    try:
+        return path.expanduser().resolve().relative_to(destination_root.expanduser().resolve()).parts
+    except ValueError:
+        return path.parts
+
+
+def _has_adjacent_duplicate_year(parts: tuple[str, ...]) -> bool:
+    previous = ""
+    for part in parts:
+        if len(part) == 4 and part.isdigit() and part == previous:
+            return True
+        previous = part
+    return False
 
 
 def _print_destination_folder_summary(rows: list[ExecutionPlanRow], *, limit: int = 10) -> None:
@@ -3027,6 +3095,10 @@ def den(
                 str(row["estimated_gb"]),
             )
         console.print(year_table)
+    _print_duplicate_year_warning(
+        [row.destination_path for row in plan.rows],
+        destination_root=plan.destination_root,
+    )
     skipped = sum(1 for row in plan.rows if row.status.startswith("skip"))
     collisions = sum(1 for row in plan.rows if row.status == "collision")
     console.print(f"Skipped existing: {skipped}")

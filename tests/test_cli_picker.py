@@ -280,6 +280,21 @@ def test_file_matches_expected_size_requires_real_file(tmp_path: Path) -> None:
     assert not cli._file_matches_expected_size(tmp_path / "missing.CR3", 3)
 
 
+def test_duplicate_year_destination_paths_detects_adjacent_year_under_den() -> None:
+    den = Path("/Volumes/Archive/RAW_DEN")
+    bad = den / "2024" / "2024" / "IMG_0001.CR3"
+    good = den / "2024" / "2024-05" / "IMG_0002.CR3"
+
+    assert cli._duplicate_year_destination_paths([good, bad], destination_root=den) == [bad]
+
+
+def test_duplicate_year_destination_paths_ignores_den_name_year_prefix() -> None:
+    den = Path("/Volumes/Archive/2024")
+    good = den / "2024" / "IMG_0001.CR3"
+
+    assert cli._duplicate_year_destination_paths([good], destination_root=den) == []
+
+
 def _answers(*values: str):
     answers = iter(values)
 
