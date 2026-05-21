@@ -229,6 +229,20 @@ def test_den_can_scope_project_plan_by_capture_date(tmp_path: Path) -> None:
     assert "Soccer-202602" in plan.rows[0].destination_path.parts
 
 
+def test_den_plan_includes_jpeg_files(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "archive"
+    source.mkdir()
+    destination.mkdir()
+    (source / "IMG_0001.JPG").write_bytes(b"jpeg")
+
+    plan = build_den_plan(source, destination)
+
+    assert len(plan.rows) == 1
+    assert plan.rows[0].source_path == source / "IMG_0001.JPG"
+    assert plan.rows[0].destination_path.name == "IMG_0001.JPG"
+
+
 def test_den_preserve_dates_keeps_date_folder_label_and_file_name(tmp_path: Path) -> None:
     source = tmp_path / "source"
     destination = tmp_path / "archive"
@@ -293,7 +307,7 @@ def test_score_items_reports_empty_source() -> None:
     score = score_items([])
 
     assert score.score == 0
-    assert score.notes == ["No RAW or camera video files found."]
+    assert score.notes == ["No RAW, JPEG, or camera video files found."]
 
 
 def test_score_items_counts_raw_files(tmp_path: Path) -> None:

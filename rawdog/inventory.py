@@ -46,6 +46,8 @@ def scan_raw_files(
             and not _is_excluded(current_path / dirname, resolved_excludes)
         )
         for filename in sorted(filenames):
+            if filename.startswith("._"):
+                continue
             path = current_path / filename
             if _is_excluded(path, resolved_excludes) or not path.is_file() or not is_camera_capture_file(path):
                 continue

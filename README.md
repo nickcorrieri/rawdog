@@ -118,6 +118,7 @@ rawdog yard setup
 rawdog yard list
 rawdog yard remove
 rawdog junkyard
+rawdog junkyard-scrap
 rawdog sniff
 rawdog score
 rawdog status
@@ -178,6 +179,8 @@ portable catalog from the RAW/camera video files currently on disk. Rebuild scan
 the den, removes stale catalog rows for files no longer present, adds newly found
 files, and preserves known original-source links when the destination path still
 matches an existing catalog row. It does not move, delete, or rename media files.
+After JPEG support upgrades, run this once for established dens if they were
+cataloged before JPEG files were included.
 
 Running `dens setup` or `yard setup` on a folder that already has `.rawdog`
 metadata relinks that portable store into App Support memory. If the requested
@@ -326,10 +329,11 @@ because they are already recorded in a den. The SQLite catalog is only a hint:
 Junkyard always checks the matched den path on disk and requires the current den
 file size to exactly match before a yard file appears in the report.
 
-Use `--hash-check` for exact byte matching: RAWDOG reads both the yard file and
-matched den file and requires matching SHA-256 before reporting the file as
-cleanup-safe. `--hash-check` can take a long time on large libraries. RAWDOG
-does not delete files during `junkyard`.
+RAWDOG scans RAW, JPEG, and common camera video files. Use `--hash-check` for
+exact byte matching: RAWDOG reads both the yard file and matched den file and
+requires matching SHA-256 before reporting the file as cleanup-safe.
+`--hash-check` can take a long time on large libraries. RAWDOG does not delete
+files during `junkyard`.
 
 When candidates are found, RAWDOG writes a TSV report with explicit yard path,
 matched den path, and size for every candidate. Use `rawdog junkyard-scrap

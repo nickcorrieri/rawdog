@@ -29,6 +29,13 @@ def test_camera_video_extensions_are_camera_capture_files() -> None:
     assert not is_camera_capture_file(Path("MVI_0001.MP4.partial"))
 
 
+def test_camera_jpeg_extensions_are_camera_capture_files() -> None:
+    assert not is_raw_file(Path("IMG_0001.JPG"))
+    assert is_camera_capture_file(Path("IMG_0001.JPG"))
+    assert is_camera_capture_file(Path("IMG_0001.jpeg"))
+    assert not is_camera_capture_file(Path("IMG_0001.JPG.partial"))
+
+
 def test_scan_raw_files_includes_camera_video_files(tmp_path: Path) -> None:
     (tmp_path / "IMG_0001.CR3").write_bytes(b"raw")
     (tmp_path / "MVI_0001.MP4").write_bytes(b"movie")
@@ -41,6 +48,19 @@ def test_scan_raw_files_includes_camera_video_files(tmp_path: Path) -> None:
         Path("IMG_0001.CR3"),
         Path("MVI_0001.MP4"),
         Path("PRIVATE/AVCHD/BDMV/STREAM/00001.MTS"),
+    ]
+
+
+def test_scan_raw_files_includes_camera_jpeg_files(tmp_path: Path) -> None:
+    (tmp_path / "IMG_0001.CR3").write_bytes(b"raw")
+    (tmp_path / "IMG_0001.JPG").write_bytes(b"jpeg")
+    (tmp_path / "._IMG_0001.JPG").write_bytes(b"appledouble")
+
+    items = scan_raw_files(tmp_path)
+
+    assert [item.relative_path for item in items] == [
+        Path("IMG_0001.CR3"),
+        Path("IMG_0001.JPG"),
     ]
 
 

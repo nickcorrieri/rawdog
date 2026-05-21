@@ -175,7 +175,7 @@ def score_items(items: list[InventoryItem]) -> LibraryScore:
     score = 100
     notes: list[str] = []
     if not items:
-        return LibraryScore(0, 0, 0, 0, 0, ["No RAW or camera video files found."])
+        return LibraryScore(0, 0, 0, 0, 0, ["No RAW, JPEG, or camera video files found."])
     if duplicate_names:
         score -= min(30, duplicate_names * 2)
         notes.append(f"{duplicate_names} duplicated filenames need review.")

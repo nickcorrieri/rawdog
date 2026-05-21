@@ -3114,8 +3114,7 @@ def status() -> None:
 @app.command()
 def report() -> None:
     """Generate RAWDOG reports from the local database."""
-    _, config = _load_or_exit()
-    console.print(f"Reports will be generated from: {config.database_path}")
+    raise typer.BadParameter("rawdog report is not implemented yet. Use sniff, score, plans, or junkyard reports.")
 
 
 @app.command(context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
@@ -3184,16 +3183,10 @@ def verify(
     ),
 ) -> None:
     """Verify archive files, or explicitly check whether SOURCE is represented in DESTINATION."""
-    _, config = _load_or_exit()
     if source or destination:
         if not source or not destination:
             raise typer.BadParameter("--source and --destination must be provided together.")
-        console.print("Running explicit source-to-destination verification preview.")
-        console.print("This is an optional check, not sync behavior.")
-        console.print(f"Source: {source}")
-        console.print(f"Destination: {destination}")
-        return
-    console.print(f"Verify will inspect RAWDOG archive root: {config.archive_root}")
+    raise typer.BadParameter("rawdog verify is not implemented yet. Use den/junkyard reports or plans review for now.")
 
 
 @app.command()
@@ -3332,6 +3325,12 @@ def _run_junkyard(
             progress.stop()
     console.print(table)
     manifest_path = _write_junkyard_report(config, candidate_rows) if candidate_rows else None
+    if candidates == 0 and matches == []:
+        _print_notice(
+            "No source-linked junkyard candidates found. Junkyard only reports files archived through RAWDOG "
+            "with original source tracking; files copied manually or added by dens rebuild may not have source links.",
+            style=STYLE_ROW_SELECTED,
+        )
     if hash_check:
         _print_notice(
             f"Report only: {candidates} working files ({total_bytes / 1_000_000_000:.2f} GB) "
