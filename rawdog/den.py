@@ -77,6 +77,7 @@ def build_den_plan(
     start_date: date | None = None,
     end_date: date | None = None,
     limit: int | None = None,
+    preserve_dates_drop_parts: set[str] | None = None,
 ) -> DenPlan:
     source_root = source_root.expanduser().resolve()
     destination_root = destination_root.expanduser().resolve()
@@ -99,8 +100,10 @@ def build_den_plan(
             folder_template,
         )
 
-    rows = [
-        _plan_row(
+    rows: list[DenPlanRow] = []
+    planned_destinations: set[Path] = set()
+    for item in items:
+        row = _plan_row(
             source_root,
             destination_root,
             destination_folder,
@@ -108,9 +111,19 @@ def build_den_plan(
             layout_mode=layout_mode,
             folder_template=folder_template,
             project_name=project_name or source_root.name,
+            preserve_dates_drop_parts=preserve_dates_drop_parts or set(),
         )
-        for item in items
-    ]
+        if row.status == "plan_copy":
+            if row.destination_path in planned_destinations:
+                row = DenPlanRow(
+                    source_path=row.source_path,
+                    destination_path=row.destination_path,
+                    size_bytes=row.size_bytes,
+                    status="collision",
+                )
+            else:
+                planned_destinations.add(row.destination_path)
+        rows.append(row)
     return DenPlan(
         source_root=source_root,
         destination_root=destination_root,
@@ -222,16 +235,22 @@ def _plan_row(
     layout_mode: DenLayoutMode,
     folder_template: str,
     project_name: str,
+    preserve_dates_drop_parts: set[str],
 ) -> DenPlanRow:
+    relative_path = (
+        _drop_preserve_dates_parts(item.relative_path, preserve_dates_drop_parts)
+        if layout_mode == DenLayoutMode.PRESERVE_DATES
+        else item.relative_path
+    )
     if layout_mode == DenLayoutMode.DATE or (
         layout_mode == DenLayoutMode.PRESERVE_DATES
-        and _has_camera_dump_relative_path(source_root, item.relative_path)
+        and _has_camera_dump_relative_path(source_root, relative_path)
     ):
         captured_at = capture_time_fallback(item.path)
         preserved_prefix = (
             ()
             if layout_mode == DenLayoutMode.DATE
-            else _meaningful_prefix_before_camera_dump(source_root, item.relative_path)
+            else _meaningful_prefix_before_camera_dump(source_root, relative_path)
         )
         year_scoped_prefix = _year_scoped_prefix(preserved_prefix, captured_at)
         destination = (
@@ -253,13 +272,13 @@ def _plan_row(
     elif layout_mode == DenLayoutMode.PRESERVE_DATES:
         captured_at = capture_time_fallback(item.path)
         destination = destination_folder / _year_scoped_preserved_path(
-            item.relative_path,
+            relative_path,
             captured_at,
         )
     elif layout_mode == DenLayoutMode.PROJECT:
         destination = destination_folder / item.path.name
     else:
-        destination = destination_folder / item.relative_path
+        destination = destination_folder / relative_path
     status = "plan_copy"
     if destination.exists():
         if destination.name == item.path.name and destination.stat().st_size == item.size_bytes:
@@ -272,6 +291,13 @@ def _plan_row(
         size_bytes=item.size_bytes,
         status=status,
     )
+
+
+def _drop_preserve_dates_parts(relative_path: Path, drop_parts: set[str]) -> Path:
+    if not drop_parts:
+        return relative_path
+    parent_parts = tuple(part for part in relative_path.parent.parts if part not in drop_parts)
+    return (Path(*parent_parts) / relative_path.name) if parent_parts else Path(relative_path.name)
 
 
 def _has_camera_dump_relative_path(source_root: Path, relative_path: Path) -> bool:

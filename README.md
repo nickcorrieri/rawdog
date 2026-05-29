@@ -1,12 +1,21 @@
-# RAWDOG
+# RAWdog
+
+```text
+   ____    ___   _       __   _
+  / __ \  /   | | |     / /  | |
+ / /_/ / / /| | | | /| / / __| | ___   __ _
+/ _, _/ / ___ | | |/ |/ / / _` |/ _ \ / _` |
+/_/ |_|/_/  |_| |__/|__/  \__,_|\___/ \__, |
+                                      /____/
+```
 
 RAW photo managing tool that can fetch, copy, and audit your RAW libraries.
 
-RAWDOG is local-first, append-only archival tooling for photographers. It helps
+RAWdog is local-first, append-only archival tooling for photographers. It helps
 you ingest from SD cards, manage working folders, organize project shoots,
 archive permanently to external storage, verify copies, and generate reports.
 
-RAWDOG is not sync software, cloud backup software, a DAM, a Lightroom
+RAWdog is not sync software, cloud backup software, a DAM, a Lightroom
 replacement, or aggressive dedupe tooling.
 
 Current status: pre-alpha CLI scaffold. The safety model, project/profile
@@ -27,7 +36,7 @@ main product shape.
 
 ## Import Profiles
 
-RAWDOG supports reusable import profiles. These are the existing RAWDOG profiles,
+RAWdog supports reusable import profiles. These are the existing RAWdog profiles,
 not a second profile system. A profile stores a source root, destination root,
 organization mode, folder template, naming convention, collision policy, verify
 preference, dry-run default, and exclude patterns. This supports normal local
@@ -42,12 +51,12 @@ dump:
 - raw camera dumps are suggested for DDD placement
 - mixed sources are flagged for operator review
 
-RAWDOG only suggests this behavior. It does not silently reorganize a source.
+RAWdog only suggests this behavior. It does not silently reorganize a source.
 
 `fetch` previews by default. Project/profile memory is written only when the
 operator uses `--commit`.
 
-When a project is named during import, RAWDOG remembers that project and the
+When a project is named during import, RAWdog remembers that project and the
 source/destination pair. By default project imports land under:
 
 ```text
@@ -59,7 +68,7 @@ one project folder. For project plus date buckets, use the den `project-dates`
 layout. Its default month buckets look like `Soccer-202601`; day buckets look
 like `Soccer-20260115`.
 
-RAWDOG keeps canonical memory in its local SQLite database and writes a portable
+RAWdog keeps canonical memory in its local SQLite database and writes a portable
 manifest to:
 
 ```text
@@ -71,12 +80,12 @@ area, for example `YYYY/YYYY-MM` or `YYYY/MM`.
 
 ## Lightroom Workflow
 
-RAWDOG does not sync Lightroom or track Lightroom rejects/deletes live. Use
+RAWdog does not sync Lightroom or track Lightroom rejects/deletes live. Use
 Lightroom or another editor inside the working project folder, then run
 `rawdog breed` when the project is ready to archive.
 
 `breed` snapshots the current working project state to append-only archive
-destinations. If a local working file was deleted before breed, RAWDOG simply
+destinations. If a local working file was deleted before breed, RAWdog simply
 does not copy it in that run. Existing archive files are not deleted.
 `rawdog backup` is an explicit alias for the same append-only workflow.
 
@@ -157,11 +166,11 @@ rawdog plans active-clear --force
 
 ## Cleanup Consolidation
 
-For old folders or drives that need to be gathered into a RAWDOG structure, use
+For old folders or drives that need to be gathered into a RAWdog structure, use
 `den`. It scans RAW and camera video files, builds a copy estimate, skips already-present
 same-name/same-size files, and reports collisions for review.
 
-RAWDOG remains RAW-first, but it also carries camera video files commonly written
+RAWdog remains RAW-first, but it also carries camera video files commonly written
 beside stills by DSLRs, mirrorless bodies, action cameras, and cinema cameras:
 `.mov`, `.mp4`, `.m4v`, `.mts`, `.m2ts`, `.mxf`, `.avi`, `.3gp`, `.mod`,
 `.tod`, `.insv`, `.crm`, `.braw`, and `.r3d`.
@@ -169,7 +178,7 @@ beside stills by DSLRs, mirrorless bodies, action cameras, and cinema cameras:
 ```bash
 rawdog dens setup primary --root /Volumes/Archive
 rawdog dens rebuild primary --commit
-rawdog yard setup primary --root ~/Pictures/RAWDOG
+rawdog yard setup primary --root ~/Pictures/RAWdog
 rawdog dens remove primary
 rawdog yard remove primary
 rawdog sniff /Volumes/OldDrive
@@ -196,7 +205,7 @@ cataloged before JPEG files were included.
 
 Running `dens setup` or `yard setup` on a folder that already has `.rawdog`
 metadata relinks that portable store into App Support memory. If the requested
-store name is already used by another store of the same type, RAWDOG assigns the
+store name is already used by another store of the same type, RAWdog assigns the
 next available name instead of crashing. `dens remove` and `yard remove` only
 forget the App Support pointer; they do not delete media files or the portable
 `.rawdog` catalog.
@@ -205,7 +214,7 @@ Two consolidation workflows are supported:
 
 - External drive to destination drive: audit the source and copy into the destination.
 - Same-drive cleanup: audit an old folder on the destination drive, then copy
-  or move into the RAWDOG structure.
+  or move into the RAWdog structure.
 
 Use `--action copy` for cross-drive consolidation. Use `--action move` only for
 same-drive cleanup when you intentionally want the old folder contents relocated
@@ -214,11 +223,11 @@ after reviewing the queued plan.
 ## Safe Plan Queues
 
 Long jobs can be queued as safe plans, previewed, and then committed with an
-explicit confirmation. Before any copy or move executes, RAWDOG writes a
+explicit confirmation. Before any copy or move executes, RAWdog writes a
 persisted execution plan to SQLite. The plan records:
 
-- what RAWDOG is doing
-- what RAWDOG is doing it to
+- what RAWdog is doing
+- what RAWdog is doing it to
 - what should be where when done
 - execution status
 - post-audit status
@@ -230,15 +239,15 @@ Queues are for operations such as:
 - copy
 - same-filesystem move of unique files with no overwrite
 
-Destructive cleanup is never queued. RAWDOG must not queue deletion, mismatch
+Destructive cleanup is never queued. RAWdog must not queue deletion, mismatch
 cleanup, thumbnail cleanup, overwrite, rename, or automatic dedupe reduction.
 No queued operation may silently resolve collisions.
 
-When RAWDOG finds a semi-destructive review item, such as a collision, stale
+When RAWdog finds a semi-destructive review item, such as a collision, stale
 partial, failed move, or destination mismatch, it prints a short copy-paste AI
 review prompt with the relevant paths. The prompt is meant for ChatGPT or
 another assistant to help the operator reason through the situation before any
-manual cleanup or retry. RAWDOG still refuses to delete originals or auto-resolve
+manual cleanup or retry. RAWdog still refuses to delete originals or auto-resolve
 collisions.
 
 ```bash
@@ -258,7 +267,7 @@ rawdog plans resume 1
 rawdog plans prune --dry-run --keep 20
 ```
 
-`den` layouts are explicit about whether RAWDOG preserves existing folders or
+`den` layouts are explicit about whether RAWdog preserves existing folders or
 generates new date/project folders:
 
 | Layout | Result |
@@ -279,7 +288,7 @@ rawdog den /Volumes/WD_BLACK/102EOSR7 \
   --group-by month
 ```
 
-If a project source spans many capture dates, RAWDOG warns that it may contain
+If a project source spans many capture dates, RAWdog warns that it may contain
 multiple projects. Scope the project explicitly when needed:
 
 ```bash
@@ -335,57 +344,65 @@ Dens can contain project folders, including nested project/session groupings.
 Camera folders remain transport wrappers; project folders are the human archive
 boundary.
 
-`junkyard` is report-only. It compares registered yard files against registered
-den catalogs and reports working files that appear safe to review for removal
-because they are already recorded in a den. The SQLite catalog is only a hint:
-Junkyard always checks the matched den path on disk and requires the current den
-file size to exactly match before a yard file appears in the report.
+`junkyard` starts with a report. It can compare registered yard files or an
+arbitrary source folder against a den and reports working files that appear safe
+to review for removal because they are represented in the den. RAWdog checks
+source-linked catalog rows first, then falls back to unique filename + exact-size
+matches in the selected den. Ambiguous filename + size matches are skipped.
+The SQLite catalog is only a hint: Junkyard always checks the matched den path on
+disk and requires the current den file size to exactly match before a source file
+appears in the report.
 
-RAWDOG scans RAW, JPEG, and common camera video files. Use `--hash-check` for
-exact byte matching: RAWDOG reads both the yard file and matched den file and
+RAWdog scans RAW, JPEG, and common camera video files. Use `--hash-check` for
+exact byte matching: RAWdog reads both the source file and matched den file and
 requires matching SHA-256 before reporting the file as cleanup-safe.
-`--hash-check` can take a long time on large libraries. RAWDOG does not delete
+`--hash-check` can take a long time on large libraries. RAWdog does not delete
 files during `junkyard`.
 
-When candidates are found, RAWDOG writes a TSV report with explicit yard path,
-matched den path, and size for every candidate. Use `rawdog junkyard-scrap
-REPORT` to preview removal from that exact report. Scrap revalidates that each
-yard path is under a registered yard, each matched den path is under a registered
-den, both files exist, and both still match the report size. Add
+When candidates are found, RAWdog writes a TSV report with explicit source path,
+matched den path, size, match method, and source/den root metadata. Use `rawdog
+junkyard-scrap REPORT` to preview removal from that exact report. Scrap
+revalidates that each source path is under a registered yard or the report's
+source root, each matched den path is under a registered den or the report's den
+root, both files exist, and both still match the report size. Add
 `--hash-check` to `junkyard-scrap` for exact byte matching before removal. On
-`--commit`, only the report's yard paths can be removed after typing the exact
-confirmation phrase. Den files are never touched. When a registered yard file is
-removed, RAWDOG marks that row `deleted` in the yard's portable catalog so later
-catalog-aware tools do not keep treating the missing file as present.
+`--commit`, only the report's source paths can be removed after typing the exact
+confirmation phrase. Cleanup requires SHA-256 exact matching by default; use
+`--trust-size` only when you intentionally accept path + size validation. Use
+`--each` with `--commit` to confirm each source file one at a time. Den files
+are never touched. When a registered yard file is removed, RAWdog marks that row
+`deleted` in the yard's portable catalog so later catalog-aware tools do not keep
+treating the missing file as present.
 
 ```bash
 rawdog junkyard --yard primary --den primary
+rawdog junkyard --source /Volumes/WD_BLACK/100CANON/2021 --den primary
 rawdog junkyard --yard primary --den primary --before 2026-04-01
 rawdog junkyard --yard primary --den primary --validate-first
 rawdog junkyard --yard primary --den primary --hash-check
 rawdog junkyard-scrap ~/Library/Application\ Support/rawdog/reports/junkyard-candidates-YYYYMMDD-HHMMSS.tsv
-rawdog junkyard-scrap ~/Library/Application\ Support/rawdog/reports/junkyard-candidates-YYYYMMDD-HHMMSS.tsv --hash-check
 rawdog junkyard-scrap ~/Library/Application\ Support/rawdog/reports/junkyard-candidates-YYYYMMDD-HHMMSS.tsv --commit
+rawdog junkyard-scrap ~/Library/Application\ Support/rawdog/reports/junkyard-candidates-YYYYMMDD-HHMMSS.tsv --commit --each
 ```
 
-If RAWDOG is interrupted, rerun `rawdog plans list`, inspect the latest started
+If RAWdog is interrupted, rerun `rawdog plans list`, inspect the latest started
 or incomplete plan, review its filesystem manifest with `rawdog plans ops PLAN_ID`,
 then press `r` from the operation review or run `rawdog plans run PLAN_ID`.
 Rows already copied, moved, skipped, or held for review are not blindly repeated.
-During execution, RAWDOG shows live progress for total files, total bytes, the
+During execution, RAWdog shows live progress for total files, total bytes, the
 current source/destination, elapsed time, and copied/skipped/failed counts.
-For large copy jobs, RAWDOG prints a rough time estimate before commit so the
+For large copy jobs, RAWdog prints a rough time estimate before commit so the
 operator can decide whether to run now or leave the plan queued.
 
 For same-drive consolidation, `--action move` uses an atomic filesystem rename
 and usually preserves Finder Created date because the original file record moves.
-For copy mode, RAWDOG copies to `.partial`, renames into place, then immediately
+For copy mode, RAWdog copies to `.partial`, renames into place, then immediately
 attempts to preserve macOS Finder Created date on that completed destination file
 before continuing to the next file. This is best-effort because creation time is
-filesystem-specific; RAWDOG still preserves modified time and records the source,
+filesystem-specific; RAWdog still preserves modified time and records the source,
 destination, and capture-date-derived plan in its database and manifest.
 
-Old dry-run plans can be pruned from the local RAWDOG database. Prune is
+Old dry-run plans can be pruned from the local RAWdog database. Prune is
 conservative by default: it removes only old `planned` plans, never `started`,
 `failed`, or `needs_review` plans.
 
@@ -393,30 +410,39 @@ Use `rawdog plans review <id>` to inspect failed, skipped, held, and
 review-needed rows 20 at a time. Press Enter for the next page or `0` to stop
 inspection.
 
+Skipped MOVE rows that are duplicates by name and size are not automatically
+destructive. Review them with `rawdog plans force-move-duplicates PLAN_ID`.
+That command hashes the source and destination with SHA-256, then `--commit`
+removes only sources that are exact byte duplicates. It never overwrites the
+destination.
+
 ```bash
 rawdog plans prune --dry-run --keep 20
 rawdog plans prune --commit --keep 20
+rawdog plans skipped 33
+rawdog plans force-move-duplicates 33
+rawdog plans force-move-duplicates 33 --commit
 ```
 
-RAWDOG does not shell out to hidden `cp`, `mv`, or `rm` commands for plan
+RAWdog does not shell out to hidden `cp`, `mv`, or `rm` commands for plan
 execution. It writes an operation manifest for each persisted plan showing the
 Python filesystem APIs it will use, such as `Path.mkdir`, Python file copy,
 `shutil.copystat`, `os.rename`, and macOS `setattrlist` best-effort metadata
 preservation, plus the source, destination, partial path, and safety rule for
 each row. Commit and resume prompts require `COMMIT PLAN <id>` after this review.
 
-While a plan is executing, RAWDOG writes an `active-run.json` marker beside the
+While a plan is executing, RAWdog writes an `active-run.json` marker beside the
 local SQLite database. `rawdog status` and `rawdog plans active` show that active
 run and warn you to avoid Homebrew upgrades, drive disconnects, or starting
-another plan while a copy/move is running. If RAWDOG is force-killed and the
-marker is left behind, clear it only after confirming no RAWDOG copy/move is
+another plan while a copy/move is running. If RAWdog is force-killed and the
+marker is left behind, clear it only after confirming no RAWdog copy/move is
 running:
 
 ```bash
 rawdog plans active-clear --force
 ```
 
-On macOS, use `rawdog wings` to run or attach to RAWDOG through `caffeinate` so
+On macOS, use `rawdog wings` to run or attach to RAWdog through `caffeinate` so
 the Mac stays awake during long copy/move work:
 
 ```bash
@@ -426,21 +452,21 @@ rawdog wings --pid 12345
 rawdog wings
 ```
 
-With no arguments, `rawdog wings` attaches to the current active RAWDOG run if
+With no arguments, `rawdog wings` attaches to the current active RAWdog run if
 one exists. Locking the screen is fine; sleeping, logging out, unplugging drives,
 or disconnecting docks is not.
 
 `.partial` files are temporary transfer artifacts created only under the
 destination root during copy. They are not original RAW/camera video files, are ignored during
 source inventory, and are never merged into archive state. A stale `.partial`
-blocks that destination row and requires review; RAWDOG does not auto-delete
-pre-existing `.partial` files. If RAWDOG creates a `.partial` during the current
+blocks that destination row and requires review; RAWdog does not auto-delete
+pre-existing `.partial` files. If RAWdog creates a `.partial` during the current
 copy attempt and that copy fails, it removes that current-run artifact before
 raising the error.
 
 ## Development
 
-RAWDOG targets Python 3.12+.
+RAWdog targets Python 3.12+.
 
 ```bash
 python -m pytest
@@ -448,7 +474,7 @@ python -m pytest
 
 ## Packaging
 
-RAWDOG is structured as a normal Python CLI package with a `pyproject.toml`
+RAWdog is structured as a normal Python CLI package with a `pyproject.toml`
 entry point:
 
 ```text
@@ -468,7 +494,7 @@ resources before it should be published to a tap.
 
 ## License
 
-RAWDOG source is licensed under the [Apache License 2.0](LICENSE). Operational
+RAWdog source is licensed under the [Apache License 2.0](LICENSE). Operational
 use is also covered by [TERMS.md](TERMS.md).
 
 Author: Nicholas Corrieri  

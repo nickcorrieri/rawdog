@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from rawdog import cli
+from rawdog.config import build_config
 from rawdog.db import initialize, session
 from rawdog.execution import (
     add_execution_plan_rows,
@@ -17,6 +18,7 @@ from rawdog.models import (
     ExecutionPlanCreate,
     ExecutionPlanRowCreate,
     ExecutionPlanStatus,
+    OrganizationMode,
 )
 
 
@@ -164,6 +166,140 @@ def test_skipped_row_lines_show_full_source_and_destination() -> None:
     assert "Reason: destination already has same name and size" in lines
     assert f"Source: {row.source_path}" in lines
     assert f"Destination: {row.destination_path}" in lines
+
+
+def test_post_execution_reports_write_source_and_den_context(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "den"
+    source.mkdir()
+    destination.mkdir()
+    now = datetime.now(UTC)
+    plan = cli.ExecutionPlan(
+        plan_id=33,
+        plan_kind="den",
+        status=ExecutionPlanStatus.FAILED,
+        what="move RAW files",
+        subject=f"{source} -> {destination}",
+        expected_result="files should be in den",
+        execution_summary="Transferred 1; skipped 1; failed 1.",
+        post_audit_summary="Destination audit incomplete.",
+        source_root=source,
+        destination_root=destination,
+        created_at=now,
+        updated_at=now,
+    )
+    rows = [
+        _row(1, "moved", "destination_verified"),
+        _row(2, "skipped_existing_same_name_size", "not_applicable"),
+        _row(3, "failed", "not_audited", error="Operation not permitted"),
+    ]
+
+    paths = cli._write_post_execution_reports(plan, rows)
+
+    assert source / "RAWDOG_REPORTS" / "PLAN_33_skipped.txt" in paths
+    assert destination / "RAWDOG_REPORTS" / "PLAN_33_failures.txt" in paths
+    skipped_text = (source / "RAWDOG_REPORTS" / "PLAN_33_skipped.txt").read_text(encoding="utf-8")
+    failure_text = (destination / "RAWDOG_REPORTS" / "PLAN_33_failures.txt").read_text(encoding="utf-8")
+    assert "This report is not a delete instruction." in skipped_text
+    assert "Operation not permitted" in failure_text
+
+
+def test_force_move_duplicates_removes_only_sha_verified_sources(tmp_path: Path, monkeypatch) -> None:
+    database = tmp_path / "rawdog.sqlite"
+    source_root = tmp_path / "source"
+    destination_root = tmp_path / "den"
+    source = source_root / "IMG_0001.CR3"
+    destination = destination_root / "IMG_0001.CR3"
+    source.parent.mkdir(parents=True)
+    destination.parent.mkdir(parents=True)
+    source.write_bytes(b"same bytes")
+    destination.write_bytes(b"same bytes")
+    initialize(database)
+    config = build_config(OrganizationMode.PROJECT, database_path=database)
+    with session(database) as connection:
+        plan = create_execution_plan(
+            connection,
+            ExecutionPlanCreate(
+                plan_kind="den",
+                what="move RAW files",
+                subject=f"{source_root} -> {destination_root}",
+                expected_result="source duplicate can be removed after hash verification",
+                source_root=source_root,
+                destination_root=destination_root,
+            ),
+        )
+        add_execution_plan_rows(
+            connection,
+            plan.plan_id,
+            [
+                ExecutionPlanRowCreate(
+                    source_path=source,
+                    destination_path=destination,
+                    size_bytes=len(b"same bytes"),
+                    transfer_action=DenTransferAction.MOVE,
+                    status="skipped_existing_same_name_size",
+                )
+            ],
+        )
+    monkeypatch.setattr(cli, "_load_or_exit", lambda: (tmp_path / "config.json", config))
+    monkeypatch.setattr(cli.Prompt, "ask", lambda *args, **kwargs: f"FORCE MOVE DUPLICATES PLAN {plan.plan_id}")
+
+    cli.plans_force_move_duplicates(plan.plan_id, limit=10, dry_run=False, confirm_each=False)
+
+    assert not source.exists()
+    assert destination.read_bytes() == b"same bytes"
+    with session(database) as connection:
+        rows = list_execution_plan_rows(connection, plan.plan_id)
+    assert rows[0].status == "source_removed_verified_duplicate"
+    assert rows[0].audit_status == "source_removed_after_sha256_match"
+
+
+def test_force_move_duplicates_rejects_hash_mismatch(tmp_path: Path, monkeypatch) -> None:
+    database = tmp_path / "rawdog.sqlite"
+    source_root = tmp_path / "source"
+    destination_root = tmp_path / "den"
+    source = source_root / "IMG_0001.CR3"
+    destination = destination_root / "IMG_0001.CR3"
+    source.parent.mkdir(parents=True)
+    destination.parent.mkdir(parents=True)
+    source.write_bytes(b"abcd")
+    destination.write_bytes(b"wxyz")
+    initialize(database)
+    config = build_config(OrganizationMode.PROJECT, database_path=database)
+    with session(database) as connection:
+        plan = create_execution_plan(
+            connection,
+            ExecutionPlanCreate(
+                plan_kind="den",
+                what="move RAW files",
+                subject=f"{source_root} -> {destination_root}",
+                expected_result="mismatches stay put",
+                source_root=source_root,
+                destination_root=destination_root,
+            ),
+        )
+        add_execution_plan_rows(
+            connection,
+            plan.plan_id,
+            [
+                ExecutionPlanRowCreate(
+                    source_path=source,
+                    destination_path=destination,
+                    size_bytes=4,
+                    transfer_action=DenTransferAction.MOVE,
+                    status="skipped_existing_same_name_size",
+                )
+            ],
+        )
+    monkeypatch.setattr(cli, "_load_or_exit", lambda: (tmp_path / "config.json", config))
+
+    cli.plans_force_move_duplicates(plan.plan_id, limit=10, dry_run=False, confirm_each=False)
+
+    assert source.exists()
+    assert destination.exists()
+    with session(database) as connection:
+        rows = list_execution_plan_rows(connection, plan.plan_id)
+    assert rows[0].status == "skipped_existing_same_name_size"
 
 
 def test_wings_command_builder_wraps_rawdog_subcommand() -> None:

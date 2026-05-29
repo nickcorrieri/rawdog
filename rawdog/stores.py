@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -189,43 +190,44 @@ def record_store_file(
     resolved = store_path.expanduser().resolve()
     relative = resolved.relative_to(store.root_path)
     now = _now()
-    with sqlite3.connect(store_db_path(store.root_path)) as connection:
+    with closing(sqlite3.connect(store_db_path(store.root_path))) as connection:
         connection.row_factory = sqlite3.Row
-        connection.execute(
-            """
-            INSERT INTO store_files (
-                store_id, store_path, relative_path, original_source_path, size_bytes, status,
-                execution_plan_id, execution_row_id, created_at, updated_at, last_seen_at
+        with connection:
+            connection.execute(
+                """
+                INSERT INTO store_files (
+                    store_id, store_path, relative_path, original_source_path, size_bytes, status,
+                    execution_plan_id, execution_row_id, created_at, updated_at, last_seen_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(store_path) DO UPDATE SET
+                    relative_path = excluded.relative_path,
+                    original_source_path = excluded.original_source_path,
+                    size_bytes = excluded.size_bytes,
+                    status = excluded.status,
+                    execution_plan_id = excluded.execution_plan_id,
+                    execution_row_id = excluded.execution_row_id,
+                    updated_at = excluded.updated_at,
+                    last_seen_at = excluded.last_seen_at
+                """,
+                (
+                    store.store_id,
+                    str(resolved),
+                    str(relative),
+                    str(original_source_path.expanduser().resolve()) if original_source_path else None,
+                    size_bytes,
+                    status.value,
+                    execution_plan_id,
+                    execution_row_id,
+                    now,
+                    now,
+                    now,
+                ),
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(store_path) DO UPDATE SET
-                relative_path = excluded.relative_path,
-                original_source_path = excluded.original_source_path,
-                size_bytes = excluded.size_bytes,
-                status = excluded.status,
-                execution_plan_id = excluded.execution_plan_id,
-                execution_row_id = excluded.execution_row_id,
-                updated_at = excluded.updated_at,
-                last_seen_at = excluded.last_seen_at
-            """,
-            (
-                store.store_id,
-                str(resolved),
-                str(relative),
-                str(original_source_path.expanduser().resolve()) if original_source_path else None,
-                size_bytes,
-                status.value,
-                execution_plan_id,
-                execution_row_id,
-                now,
-                now,
-                now,
-            ),
-        )
-        row = connection.execute(
-            "SELECT * FROM store_files WHERE store_path = ?",
-            (str(resolved),),
-        ).fetchone()
+            row = connection.execute(
+                "SELECT * FROM store_files WHERE store_path = ?",
+                (str(resolved),),
+            ).fetchone()
     return row_to_store_file(row)
 
 
@@ -233,17 +235,19 @@ def mark_store_file_deleted(store: Store, store_path: Path) -> bool:
     _initialize_store_db(store.root_path)
     resolved = store_path.expanduser().resolve()
     now = _now()
-    with sqlite3.connect(store_db_path(store.root_path)) as connection:
-        cursor = connection.execute(
-            """
-            UPDATE store_files
-            SET status = ?,
-                updated_at = ?
-            WHERE store_path = ?
-            """,
-            (StoreFileStatus.DELETED.value, now, str(resolved)),
-        )
-    return cursor.rowcount > 0
+    with closing(sqlite3.connect(store_db_path(store.root_path))) as connection:
+        with connection:
+            cursor = connection.execute(
+                """
+                UPDATE store_files
+                SET status = ?,
+                    updated_at = ?
+                WHERE store_path = ?
+                """,
+                (StoreFileStatus.DELETED.value, now, str(resolved)),
+            )
+            rowcount = cursor.rowcount
+    return rowcount > 0
 
 
 def rebuild_store_catalog(
@@ -256,7 +260,7 @@ def rebuild_store_catalog(
     _initialize_store_db(store.root_path)
     now = _now()
     rows = []
-    with sqlite3.connect(store_db_path(store.root_path)) as connection:
+    with closing(sqlite3.connect(store_db_path(store.root_path))) as connection:
         connection.row_factory = sqlite3.Row
         existing_rows = connection.execute("SELECT * FROM store_files").fetchall()
         existing_by_path = {row["store_path"]: row for row in existing_rows}
@@ -287,17 +291,18 @@ def rebuild_store_catalog(
             )
 
         if not dry_run:
-            connection.execute("DELETE FROM store_files")
-            connection.executemany(
-                """
-                INSERT INTO store_files (
-                    store_id, store_path, relative_path, original_source_path, size_bytes, status,
-                    execution_plan_id, execution_row_id, created_at, updated_at, last_seen_at
+            with connection:
+                connection.execute("DELETE FROM store_files")
+                connection.executemany(
+                    """
+                    INSERT INTO store_files (
+                        store_id, store_path, relative_path, original_source_path, size_bytes, status,
+                        execution_plan_id, execution_row_id, created_at, updated_at, last_seen_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    rows,
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                rows,
-            )
 
     return StoreCatalogRebuildResult(
         scanned_files=len(items),
@@ -313,7 +318,7 @@ def list_store_files_by_original_source(store: Store) -> dict[Path, StoreFile]:
     path = store_db_path(store.root_path)
     if not path.exists():
         return {}
-    with sqlite3.connect(path) as connection:
+    with closing(sqlite3.connect(path)) as connection:
         connection.row_factory = sqlite3.Row
         rows = connection.execute(
             "SELECT * FROM store_files WHERE original_source_path IS NOT NULL"
@@ -413,21 +418,22 @@ def _write_store_identity(
 def _initialize_store_db(root_path: Path) -> None:
     path = store_db_path(root_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(path) as connection:
-        connection.execute("PRAGMA journal_mode = WAL")
-        connection.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS store_files (
-                store_file_id INTEGER PRIMARY KEY,
-                store_id TEXT NOT NULL,
-                store_path TEXT NOT NULL UNIQUE,
-                relative_path TEXT NOT NULL,
-                original_source_path TEXT,
-                size_bytes INTEGER NOT NULL,
-                status TEXT NOT NULL,
-                execution_plan_id INTEGER,
-                execution_row_id INTEGER,
-                created_at TEXT NOT NULL,
+    with closing(sqlite3.connect(path)) as connection:
+        with connection:
+            connection.execute("PRAGMA journal_mode = WAL")
+            connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS store_files (
+                    store_file_id INTEGER PRIMARY KEY,
+                    store_id TEXT NOT NULL,
+                    store_path TEXT NOT NULL UNIQUE,
+                    relative_path TEXT NOT NULL,
+                    original_source_path TEXT,
+                    size_bytes INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    execution_plan_id INTEGER,
+                    execution_row_id INTEGER,
+                    created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 last_seen_at TEXT NOT NULL
             );

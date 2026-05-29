@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import shlex
 import shutil
 import sqlite3
 import subprocess
 import sys
 from collections import Counter, defaultdict
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 from time import monotonic
@@ -40,6 +41,7 @@ from rawdog.copier import append_only_copy, append_only_move
 from rawdog.db import initialize, session
 from rawdog.den import (
     DenPlan,
+    DenPlanRow,
     build_den_plan,
     capture_date_counts,
     score_items,
@@ -60,7 +62,7 @@ from rawdog.execution import (
     update_execution_plan_row,
 )
 from rawdog.inventory import earliest_raw_capture_time, scan_raw_files
-from rawdog.layout import LayoutAnalysis, analyze_source_layout
+from rawdog.layout import LayoutAnalysis, analyze_source_layout, is_camera_dump_part
 from rawdog.memory import (
     build_destination_memory,
     write_destination_memory,
@@ -87,9 +89,10 @@ from rawdog.models import (
     RawdogConfig,
     Store,
     StoreCreate,
+    StoreFileStatus,
     StoreKind,
 )
-from rawdog.planner import default_date_only_destination, default_project_destination
+from rawdog.planner import default_date_only_destination, default_project_destination, plan_append_only_copy
 from rawdog.profiles import (
     create_or_update_profile,
     get_last_profile,
@@ -186,6 +189,51 @@ RAWDOG_ASCII = r"""
   |      /_____/   U                                               |
   '----------------------------------------------------------------'
 """
+
+
+@dataclass(frozen=True)
+class JunkyardSource:
+    root_path: Path
+    store: Store | None = None
+
+
+@dataclass(frozen=True)
+class JunkyardCandidate:
+    source_path: Path
+    den_path: Path
+    size_bytes: int
+    match_method: str
+
+
+@dataclass(frozen=True)
+class JunkyardReport:
+    rows: list[JunkyardCandidate]
+    source_roots: list[Path]
+    den_roots: list[Path]
+
+
+@dataclass(frozen=True)
+class JunkyardScrapCandidate:
+    source_path: Path
+    den_path: Path
+    size_bytes: int
+    yard_store: Store | None
+
+
+@dataclass(frozen=True)
+class PreserveDatesFolderCandidate:
+    name: str
+    files: int
+    example_path: Path
+
+
+@dataclass(frozen=True)
+class VerifiedMoveDuplicate:
+    row: ExecutionPlanRow
+    source_path: Path
+    destination_path: Path
+    size_bytes: int
+    sha256: str
 
 
 def _load_or_exit() -> tuple[Path, RawdogConfig]:
@@ -1155,7 +1203,7 @@ def _review_reason(row: ExecutionPlanRow) -> str:
     if row.status == "failed":
         parts.append("transfer failed before RAWDOG could verify the destination")
     elif row.status in {"collision", "skipped_collision"}:
-        parts.append("same filename exists at destination with a different size")
+        parts.append("destination path collides with an existing or separately planned file")
     elif row.status == "skipped_existing_partial":
         parts.append("pre-existing .partial file requires manual review")
     elif row.audit_status == "destination_missing":
@@ -1228,7 +1276,10 @@ def _show_home_menu() -> None:
         _print_full_row(
             [
                 ("Preview-first: ", STYLE_WARN),
-                ("fetch and den do not write archive files unless you explicitly choose commit.", STYLE_WARN),
+                (
+                    "fetch and den do not write destination/archive files unless you explicitly choose commit.",
+                    STYLE_WARN,
+                ),
             ],
             style=STYLE_WARN,
         )
@@ -1426,6 +1477,19 @@ def _home_fetch() -> None:
         detect_sessions=detect_sessions,
         dry_run=True,
     )
+    if _yes_no("Commit this fetch now?"):
+        fetch(
+            source=source,
+            destination=destination,
+            profile=None,
+            project_name=project_name,
+            profile_name=None,
+            naming=None,
+            collision_policy=None,
+            verify_after_copy=None,
+            detect_sessions=detect_sessions,
+            dry_run=False,
+        )
 
 
 def _print_copy_to_den_guidance() -> None:
@@ -1489,9 +1553,9 @@ def _home_cleanup_review() -> None:
         Panel(
             "\n".join(
                 [
-                    "Junkyard is report-only. It does not delete files.",
-                    "RAWDOG compares a yard against a den catalog and reports files that appear represented in the den.",
-                    "Use the report to decide what you want to remove manually from your working disk.",
+                    "Junkyard starts with a report. Cleanup still requires an explicit confirmation.",
+                    "RAWDOG compares a yard or folder against a den and reports files that appear represented there.",
+                    "Use single confirm for normal cleanup, or file-by-file when you want to inspect each row.",
                 ]
             ),
             title="Junkyard Cleanup Review",
@@ -1500,22 +1564,23 @@ def _home_cleanup_review() -> None:
             expand=True,
         )
     )
-    yard = _choose_store_path("Working yard to review", StoreKind.YARD)
+    source = _choose_store_path("Source yard or folder to review", StoreKind.YARD)
     den_root = _choose_store_path("Den to compare against", StoreKind.DEN)
-    yard_store = _store_for_exact_path(yard, StoreKind.YARD)
+    yard_store = _store_for_exact_path(source, StoreKind.YARD)
     den_store = _store_for_exact_path(den_root, StoreKind.DEN)
-    if yard_store is None:
-        raise typer.BadParameter("Selected yard is not registered. Use top-level M to register it first.")
     if den_store is None:
-        raise typer.BadParameter("Selected den is not registered. Use top-level M to register it first.")
+        _print_notice("Selected den is not registered; J will inspect the folder on disk.", style=STYLE_ROW_SELECTED)
     before = _optional_prompt("Only report yard files modified before YYYY-MM-DD, or Enter for all")
     _run_junkyard(
-        yard_name=yard_store.name,
-        den_name=den_store.name,
+        yard_name=yard_store.name if yard_store else None,
+        source_root=None if yard_store else source,
+        den_name=den_store.name if den_store else None,
+        den_root=None if den_store else den_root,
         before=before,
         validate_first=True,
         hash_check=False,
         yes=False,
+        prompt_cleanup=True,
     )
 
 
@@ -1529,6 +1594,12 @@ def _home_den(action: DenTransferAction = DenTransferAction.COPY, *, show_guidan
         _print_den_guidance()
     source = _choose_source_path("Messy source")
     destination = _choose_den_destination_path("Clean destination")
+    same_root_reflow = source.expanduser().resolve() == destination.expanduser().resolve()
+    if same_root_reflow:
+        if action != DenTransferAction.MOVE:
+            raise typer.BadParameter("Same-root den reflow requires MOVE mode.")
+        if not _yes_no("Source and destination are the same den. Reflow files inside this den?", default=False):
+            raise typer.BadParameter("Same-root den reflow cancelled.")
     if action == DenTransferAction.MOVE:
         try:
             ensure_same_filesystem(source, destination)
@@ -1546,6 +1617,11 @@ def _home_den(action: DenTransferAction = DenTransferAction.COPY, *, show_guidan
     default_layout = "date" if layout_analysis.recommendation == "ddd" else "preserve-dates"
     layout = _choose_den_layout(default_layout)
     group_by = _choose_date_grouping(layout) if _layout_generates_date_groups(layout) else None
+    drop_preserved_folders = (
+        _choose_preserve_dates_drop_parts(source, [destination] if destination_inside_source else [])
+        if layout == DenLayoutMode.PRESERVE_DATES
+        else set()
+    )
     project_name = _optional_prompt("Project name, or Enter to skip")
     start_date, end_date = (
         _choose_project_date_scope(source, [destination] if destination_inside_source else [])
@@ -1565,6 +1641,8 @@ def _home_den(action: DenTransferAction = DenTransferAction.COPY, *, show_guidan
         start_date=start_date,
         end_date=end_date,
         limit=None,
+        drop_preserved_folder=sorted(drop_preserved_folders),
+        reflow_den=same_root_reflow,
         dry_run=dry_run,
     )
 
@@ -1648,6 +1726,70 @@ def _choose_date_grouping(layout: DenLayoutMode) -> DateGroupMode:
         console=console,
     )
     return DateGroupMode.DAY if choice in {"2", "day"} else DateGroupMode.MONTH
+
+
+def _choose_preserve_dates_drop_parts(source_root: Path, exclude_roots: list[Path]) -> set[str]:
+    candidates = _preserve_dates_folder_candidates(source_root, exclude_roots=exclude_roots)
+    if not candidates:
+        return set()
+    console.print(
+        Panel(
+            "\n".join(
+                [
+                    "preserve-dates can keep source folder names as project/context.",
+                    "Confirm each candidate before RAWDOG builds the plan.",
+                    "Enter or k = keep this folder name; n = do not keep it.",
+                ]
+            ),
+            title="Project Folder Review",
+            border_style="yellow",
+            style=STYLE_PANEL,
+            expand=True,
+        )
+    )
+    drop_parts: set[str] = set()
+    for candidate in candidates:
+        try:
+            example = candidate.example_path.relative_to(source_root.expanduser().resolve())
+        except ValueError:
+            example = candidate.example_path
+        choice = Prompt.ask(
+            _prompt(
+                f"Keep '{candidate.name}' as project/context? "
+                f"({candidate.files} files; example: {example})"
+            ),
+            choices=["k", "keep", "n", "no"],
+            default="k",
+            console=console,
+        ).strip().lower()
+        if choice in {"n", "no"}:
+            drop_parts.add(candidate.name)
+    if drop_parts:
+        _print_notice(
+            "Folder names ignored for preserve-dates: " + ", ".join(sorted(drop_parts)),
+            style=STYLE_ROW_SELECTED,
+        )
+    return drop_parts
+
+
+def _preserve_dates_folder_candidates(
+    source_root: Path,
+    *,
+    exclude_roots: list[Path] | None = None,
+) -> list[PreserveDatesFolderCandidate]:
+    counts: Counter[str] = Counter()
+    examples: dict[str, Path] = {}
+    resolved_source = source_root.expanduser().resolve()
+    for item in scan_raw_files(resolved_source, exclude_roots=exclude_roots or []):
+        for part in item.relative_path.parent.parts:
+            if not part or part == "." or is_camera_dump_part(part):
+                continue
+            counts[part] += 1
+            examples.setdefault(part, item.path.parent)
+    return [
+        PreserveDatesFolderCandidate(name=name, files=count, example_path=examples[name])
+        for name, count in sorted(counts.items(), key=lambda item: (-item[1], item[0].lower()))
+    ]
 
 
 def _den_template_for_grouping(layout: DenLayoutMode, group_by: DateGroupMode | None) -> str | None:
@@ -2213,7 +2355,11 @@ def fetch(
     naming: NamingConvention | None = typer.Option(
         None,
         "--naming",
-        help="Source layout behavior: detect, keep-existing, ddd, or project-label.",
+        help=(
+            "Destination naming/layout: detect chooses from the scan; keep-existing preserves source folders "
+            "under the yard; ddd puts camera dumps into the default dated Date_Only folder; project-label "
+            "puts files into the named project folder."
+        ),
     ),
     collision_policy: CollisionPolicy | None = typer.Option(
         None,
@@ -2350,7 +2496,7 @@ def fetch(
     console.print(f"Source: {source_root}")
     console.print(f"Destination: {destination_root}")
     console.print(f"Mode: {(loaded_profile.organization_mode if loaded_profile else config.organization_mode).value}")
-    console.print(f"Naming: {effective_naming.value}")
+    console.print(f"Naming: {effective_naming.value} - {_naming_description(effective_naming)}")
     console.print(f"Collision policy: {effective_collision_policy.value}")
     console.print(f"Verify after copy: {'yes' if effective_verify else 'no'}")
     effective_mode = loaded_profile.organization_mode if loaded_profile else config.organization_mode
@@ -2365,6 +2511,7 @@ def fetch(
     )
     earliest_capture_at = earliest_raw_capture_time(source_root)
     destination_folder = None
+    plan_ran = False
     if project_name:
         preview_project_name = project.name if project else project_name
         destination_folder = default_project_destination(
@@ -2398,11 +2545,55 @@ def fetch(
             earliest_capture_at=earliest_capture_at,
             profile_name=profile_name or profile,
         )
-        memory_path = write_destination_memory(memory, dry_run=effective_dry_run)
+        memory_path = write_destination_memory(memory, dry_run=True)
         console.print(f"Destination memory planned: {memory_path}")
+        plan = _build_fetch_plan(
+            source_root,
+            destination_root,
+            destination_folder,
+            effective_naming,
+        )
+        execution_plan = _persist_fetch_execution_plan(config, plan)
+        _print_execution_plan_start(execution_plan)
+        table = _styled_table(title="RAWDOG Fetch Plan")
+        table.add_column("Destination")
+        table.add_column("Files", justify="right")
+        table.add_column("GB", justify="right")
+        table.add_column("Mode")
+        table.add_row(
+            str(destination_folder),
+            str(plan.files_to_transfer),
+            f"{plan.bytes_to_transfer / 1_000_000_000:.2f}",
+            "dry-run" if effective_dry_run else "commit",
+        )
+        console.print(table)
+        skipped = sum(1 for row in plan.rows if row.status.startswith("skip"))
+        collisions = sum(1 for row in plan.rows if row.status == "collision")
+        console.print(f"Skipped existing: {skipped}")
+        console.print(f"Collisions needing review: {collisions}")
+        if effective_dry_run:
+            with session(config.database_path) as connection:
+                rows = list_execution_plan_rows(connection, execution_plan.plan_id)
+            manifest_path = _write_plan_operation_manifest(config, execution_plan.plan_id, rows)
+            console.print(
+                f"Plan #{execution_plan.plan_id} written to the database. "
+                "Review operation paths before executing."
+            )
+            console.print(f"Operation manifest written: {manifest_path}")
+            _prompt_dry_run_plan_next(config, execution_plan.plan_id)
+            with session(config.database_path) as connection:
+                finished = get_execution_plan(connection, execution_plan.plan_id)
+            plan_ran = bool(finished and finished.completed_at)
+        else:
+            finished = _execute_persisted_plan(config, execution_plan.plan_id)
+            _print_execution_plan_start(finished)
+            plan_ran = bool(finished and finished.completed_at)
+        if plan_ran:
+            write_destination_memory(memory, dry_run=False)
     console.print(f"Session detection: {'on' if detect_sessions else 'off'}")
     console.print(f"Dry run: {'yes' if effective_dry_run else 'no'}")
-    console.print("No files copied. Re-run with --commit after reviewing the plan.")
+    if effective_dry_run and not plan_ran:
+        console.print("No files copied. Re-run with --commit after reviewing the plan.")
 
 
 @app.command()
@@ -2568,6 +2759,96 @@ def _persist_den_execution_plan(
     return execution_plan
 
 
+def _naming_description(naming: NamingConvention) -> str:
+    descriptions = {
+        NamingConvention.DETECT: "inspect the source and choose a layout recommendation",
+        NamingConvention.KEEP_EXISTING: "preserve source folder paths under the destination yard",
+        NamingConvention.DDD: "copy camera-dump files into the default dated Date_Only folder",
+        NamingConvention.PROJECT_LABEL: "copy files into the named project folder",
+    }
+    return descriptions[naming]
+
+
+def _build_fetch_plan(
+    source_root: Path,
+    destination_root: Path,
+    destination_folder: Path,
+    naming: NamingConvention,
+) -> DenPlan:
+    items = scan_raw_files(source_root)
+    planned_destinations: dict[Path, Path] = {}
+    rows: list[DenPlanRow] = []
+    for item in items:
+        destination_path = (
+            destination_folder / item.relative_path
+            if naming == NamingConvention.KEEP_EXISTING
+            else destination_folder / item.path.name
+        )
+        planned_copy = plan_append_only_copy(item.path, destination_path)
+        if planned_copy is None:
+            status = "skip_existing_same_name_size"
+        elif destination_path in planned_destinations:
+            status = "collision"
+        elif planned_copy.reason == "collision_size_mismatch":
+            status = "collision"
+        else:
+            status = "plan_copy"
+        planned_destinations.setdefault(destination_path, item.path)
+        rows.append(
+            DenPlanRow(
+                source_path=item.path,
+                destination_path=destination_path,
+                size_bytes=item.size_bytes,
+                status=status,
+            )
+        )
+    return DenPlan(
+        source_root=source_root,
+        destination_root=destination_root,
+        destination_folder=destination_folder,
+        rows=rows,
+        transfer_action=DenTransferAction.COPY,
+    )
+
+
+def _persist_fetch_execution_plan(config: RawdogConfig, plan: DenPlan) -> ExecutionPlan:
+    skipped = sum(1 for row in plan.rows if row.status.startswith("skip"))
+    collisions = sum(1 for row in plan.rows if row.status == "collision")
+    expected = (
+        f"{plan.files_to_transfer} files should be at {plan.destination_folder}; "
+        f"{skipped} already-present files skipped; {collisions} collisions held for review."
+    )
+    with session(config.database_path) as connection:
+        execution_plan = create_execution_plan(
+            connection,
+            ExecutionPlanCreate(
+                plan_kind="fetch",
+                what="copy RAW/camera video files into a RAWDOG yard",
+                subject=f"{plan.source_root} -> {plan.destination_root}",
+                expected_result=expected,
+                execution_summary="Not started.",
+                post_audit_summary="Not audited.",
+                source_root=plan.source_root,
+                destination_root=plan.destination_root,
+            ),
+        )
+        add_execution_plan_rows(
+            connection,
+            execution_plan.plan_id,
+            [
+                ExecutionPlanRowCreate(
+                    source_path=row.source_path,
+                    destination_path=row.destination_path,
+                    size_bytes=row.size_bytes,
+                    transfer_action=DenTransferAction.COPY,
+                    status=row.status,
+                )
+                for row in plan.rows
+            ],
+        )
+    return execution_plan
+
+
 def _print_execution_plan_start(plan: ExecutionPlan) -> None:
     body = "\n".join(
         [
@@ -2656,6 +2937,129 @@ def _write_plan_operation_manifest(
 ) -> Path:
     path = export_path or _operation_manifest_path(config, plan_id)
     return write_operation_manifest(path, _operation_manifest_rows(rows))
+
+
+def _write_post_execution_reports(plan: ExecutionPlan, rows: list[ExecutionPlanRow]) -> list[Path]:
+    report_roots = _post_execution_report_roots(plan)
+    if not report_roots:
+        return []
+    skipped_rows = [row for row in rows if row.status.startswith("skip") or row.status.startswith("skipped")]
+    failed_rows = [row for row in rows if row.status == "failed" or bool(row.error)]
+    review_rows = [row for row in rows if _needs_plan_review(row)]
+    report_specs = [
+        ("summary", rows, "Plan summary and row status counts."),
+        (
+            "skipped",
+            skipped_rows,
+            "Rows RAWDOG did not copy or move. In a MOVE plan these files remain at the source path.",
+        ),
+        (
+            "failures",
+            failed_rows,
+            "Rows where the filesystem operation failed before RAWDOG could verify the destination.",
+        ),
+        (
+            "review",
+            review_rows,
+            "Rows requiring manual review before any cleanup decision.",
+        ),
+    ]
+    written: list[Path] = []
+    for root in report_roots:
+        reports_dir = root / "RAWDOG_REPORTS"
+        try:
+            reports_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            _print_error(f"Could not create report folder {reports_dir}: {exc}")
+            continue
+        for suffix, report_rows, meaning in report_specs:
+            path = reports_dir / f"PLAN_{plan.plan_id}_{suffix}.txt"
+            try:
+                path.write_text(
+                    _render_post_execution_report(plan, report_rows, meaning=meaning),
+                    encoding="utf-8",
+                )
+            except OSError as exc:
+                _print_error(f"Could not write report {path}: {exc}")
+                continue
+            written.append(path)
+    if written:
+        _print_notice("Post-run reports written:", style=STYLE_ROW_SELECTED)
+        for path in written[:12]:
+            console.print(str(path))
+        if len(written) > 12:
+            console.print(f"...and {len(written) - 12} more report files.")
+    return written
+
+
+def _post_execution_report_roots(plan: ExecutionPlan) -> list[Path]:
+    roots: list[Path] = []
+    seen: set[Path] = set()
+    for root in (plan.source_root, plan.destination_root):
+        if root is None:
+            continue
+        try:
+            resolved = root.expanduser().resolve()
+        except OSError:
+            continue
+        if resolved in seen or not resolved.is_dir():
+            continue
+        roots.append(resolved)
+        seen.add(resolved)
+    return roots
+
+
+def _render_post_execution_report(
+    plan: ExecutionPlan,
+    rows: list[ExecutionPlanRow],
+    *,
+    meaning: str,
+) -> str:
+    counts = Counter(row.status for row in rows)
+    lines = [
+        f"RAWDOG PLAN {plan.plan_id} REPORT",
+        "",
+        "Context:",
+        f"- What: {plan.what}",
+        f"- Subject: {plan.subject}",
+        f"- Source root: {plan.source_root or ''}",
+        f"- Destination root: {plan.destination_root or ''}",
+        f"- Plan status: {plan.status.value}",
+        f"- Execution summary: {plan.execution_summary}",
+        f"- Post audit summary: {plan.post_audit_summary}",
+        "",
+        "Meaning:",
+        f"- {meaning}",
+        "- This report is not a delete instruction.",
+        "- Do not remove originals unless the destination file is intentionally verified.",
+        "",
+        f"Rows in this report: {len(rows)}",
+    ]
+    if counts:
+        lines.append("Status counts:")
+        lines.extend(f"- {status}: {count}" for status, count in sorted(counts.items()))
+    lines.append("")
+    if not rows:
+        lines.append("No rows in this category.")
+        lines.append("")
+        return "\n".join(lines)
+    lines.append("Rows:")
+    for row in rows:
+        lines.extend(
+            [
+                f"- Row #{row.row_id}",
+                f"  Status: {row.status}",
+                f"  Audit: {row.audit_status or ''}",
+                f"  Reason: {_review_reason(row) if _needs_plan_review(row) else _skip_reason(row)}",
+                f"  Size: {_format_bytes(row.size_bytes)}",
+                f"  Source: {row.source_path}",
+                f"  Destination: {row.destination_path}",
+            ]
+        )
+        if row.error:
+            lines.append(f"  Error: {row.error}")
+    lines.append("")
+    return "\n".join(lines)
 
 
 def _print_plan_operation_review(
@@ -3126,6 +3530,9 @@ def _execute_persisted_plan_unlocked(
         finished = get_execution_plan(connection, plan_id)
     if finished is None:
         raise typer.BadParameter(f"Unknown plan: {plan_id}")
+    with session(config.database_path) as connection:
+        finished_rows = list_execution_plan_rows(connection, plan_id)
+    _write_post_execution_reports(finished, finished_rows)
     _print_ai_review_prompt(
         "rows needing manual review",
         [row.destination_path for row in review_rows],
@@ -3175,6 +3582,16 @@ def den(
         help="Only include files captured on or before this date.",
     ),
     limit: int | None = typer.Option(None, "--limit", min=1, help="Limit the planning scan for review."),
+    drop_preserved_folder: list[str] | None = typer.Option(
+        None,
+        "--drop-preserved-folder",
+        help="For preserve-dates, ignore this source folder name instead of keeping it as project/context.",
+    ),
+    reflow_den: bool = typer.Option(
+        False,
+        "--reflow-den",
+        help="Allow source and destination to be the same den for same-root cleanup moves.",
+    ),
     dry_run: bool = typer.Option(True, "--dry-run/--commit", help="Preview before execution."),
 ) -> None:
     """Consolidate a messy RAW source into a RAWDOG folder structure."""
@@ -3199,6 +3616,14 @@ def den(
     destination_root = parse_user_path(str(destination_value))
     effective_layout = loaded_workflow.layout_mode if loaded_workflow and not source else layout
     effective_action = loaded_workflow.transfer_action if loaded_workflow and not source else action
+    same_root_reflow = source_root.expanduser().resolve() == destination_root.expanduser().resolve()
+    if same_root_reflow:
+        if not reflow_den:
+            raise typer.BadParameter("source and destination are the same path. Use --reflow-den for same-den cleanup moves.")
+        if effective_action != DenTransferAction.MOVE:
+            raise typer.BadParameter("--reflow-den requires --action move.")
+        if effective_layout not in {DenLayoutMode.DATE, DenLayoutMode.PRESERVE_DATES}:
+            raise typer.BadParameter("--reflow-den requires --layout date or --layout preserve-dates.")
     destination_inside_source = _destination_inside_source(source_root, destination_root)
     if destination_inside_source and effective_action == DenTransferAction.MOVE:
         raise typer.BadParameter(
@@ -3209,11 +3634,12 @@ def den(
     try:
         ensure_existing_directory(source_root, "source")
         ensure_existing_directory(destination_root, "destination")
-        ensure_consolidation_roots(
-            source_root,
-            destination_root,
-            allow_destination_inside_source=destination_inside_source,
-        )
+        if not same_root_reflow:
+            ensure_consolidation_roots(
+                source_root,
+                destination_root,
+                allow_destination_inside_source=destination_inside_source,
+            )
     except SafetyError as exc:
         raise typer.BadParameter(str(exc)) from exc
     if effective_action == DenTransferAction.MOVE:
@@ -3223,6 +3649,8 @@ def den(
             raise typer.BadParameter(str(exc)) from exc
     with session(config.database_path) as connection:
         den_store = find_store_for_path(connection, destination_root, StoreKind.DEN)
+    if same_root_reflow and den_store is None:
+        raise typer.BadParameter("--reflow-den is only allowed when the destination is inside a registered den.")
     if den_store:
         console.print(
             "[bold green]Established den:[/] "
@@ -3274,6 +3702,7 @@ def den(
         start_date=start_date_value,
         end_date=end_date_value,
         limit=limit,
+        preserve_dates_drop_parts=set(drop_preserved_folder or []),
     )
     if workflow_name:
         with session(config.database_path) as connection:
@@ -3486,7 +3915,9 @@ def verify(
 @app.command()
 def junkyard(
     yard_name: str | None = typer.Option(None, "--yard", help="Limit report to one registered yard."),
+    source_root: Path | None = typer.Option(None, "--source", "--folder", help="Inspect an arbitrary source folder."),
     den_name: str | None = typer.Option(None, "--den", help="Limit report to one registered den."),
+    den_root: Path | None = typer.Option(None, "--destination", "--dest", help="Compare against an arbitrary den folder."),
     before: str | None = typer.Option(None, "--before", help="Only show yard files modified before YYYY-MM-DD."),
     validate_first: bool = typer.Option(
         False,
@@ -3504,44 +3935,155 @@ def junkyard(
     """Report working files that appear safe to scrap. This never deletes files."""
     _run_junkyard(
         yard_name=yard_name,
+        source_root=source_root,
         den_name=den_name,
+        den_root=den_root,
         before=before,
         validate_first=validate_first,
         hash_check=hash_check,
         yes=yes,
+        prompt_cleanup=False,
+    )
+
+
+def _resolve_junkyard_sources(
+    connection,
+    config: RawdogConfig,
+    *,
+    yard_name: str | None,
+    source_root: Path | None,
+) -> list[JunkyardSource]:
+    if yard_name:
+        yard_store = get_store_by_name(connection, yard_name, StoreKind.YARD)
+        if yard_store is None:
+            raise typer.BadParameter(f"Unknown yard: {yard_name}")
+        return [JunkyardSource(root_path=yard_store.root_path, store=yard_store)]
+    if source_root:
+        resolved = source_root.expanduser().resolve()
+        try:
+            ensure_existing_directory(resolved, "source")
+        except SafetyError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        store = find_store_for_path(connection, resolved, StoreKind.YARD)
+        return [JunkyardSource(root_path=resolved, store=store)]
+    return [
+        JunkyardSource(root_path=store.root_path, store=store)
+        for store in _list_configured_stores(connection, config, StoreKind.YARD)
+    ]
+
+
+def _resolve_junkyard_dens(
+    connection,
+    config: RawdogConfig,
+    *,
+    den_name: str | None,
+    den_root: Path | None,
+) -> tuple[list[Store], list[Path]]:
+    if den_name:
+        den_store = get_store_by_name(connection, den_name, StoreKind.DEN)
+        if den_store is None:
+            raise typer.BadParameter(f"Unknown den: {den_name}")
+        return [den_store], [den_store.root_path.expanduser().resolve()]
+    if den_root:
+        resolved = den_root.expanduser().resolve()
+        try:
+            ensure_existing_directory(resolved, "den")
+        except SafetyError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        store = find_store_for_path(connection, resolved, StoreKind.DEN)
+        stores = [store] if store else []
+        return stores, [resolved]
+    stores = _list_configured_stores(connection, config, StoreKind.DEN)
+    return stores, [store.root_path.expanduser().resolve() for store in stores]
+
+
+def _build_den_name_size_index(den_roots: list[Path]) -> dict[tuple[str, int], list[Path]]:
+    by_name_size: dict[tuple[str, int], list[Path]] = defaultdict(list)
+    for den_root in den_roots:
+        for item in scan_raw_files(den_root):
+            den_path = item.path.expanduser().resolve()
+            by_name_size[(den_path.name, item.size_bytes)].append(den_path)
+    return by_name_size
+
+
+def _match_junkyard_candidate(
+    *,
+    source_path: Path,
+    size_bytes: int,
+    den_by_source: dict[Path, object],
+    den_by_name_size: dict[tuple[str, int], list[Path]],
+    den_roots: list[Path],
+) -> JunkyardCandidate | None:
+    record = den_by_source.get(source_path)
+    if record is not None and getattr(record, "status", StoreFileStatus.PRESENT) != StoreFileStatus.DELETED:
+        den_path = record.store_path.expanduser().resolve()
+        if den_path != source_path and _path_is_under_any(den_path, den_roots):
+            return JunkyardCandidate(
+                source_path=source_path,
+                den_path=den_path,
+                size_bytes=size_bytes,
+                match_method="source-link",
+            )
+    den_options = [path for path in den_by_name_size.get((source_path.name, size_bytes), []) if path != source_path]
+    if len(den_options) != 1:
+        return None
+    return JunkyardCandidate(
+        source_path=source_path,
+        den_path=den_options[0],
+        size_bytes=size_bytes,
+        match_method="unique-name-size",
+    )
+
+
+def _prompt_junkyard_cleanup_next(config: RawdogConfig, report_path: Path, *, hash_check: bool) -> None:
+    choice = Prompt.ask(
+        _prompt("Next: single confirm, file-by-file, or report only"),
+        choices=["s", "single", "f", "file", "r", "report"],
+        default="s",
+        console=console,
+    ).strip().lower()
+    if choice in {"r", "report"}:
+        _print_notice("Report written; no cleanup run.", style=STYLE_ROW_SELECTED)
+        return
+    _run_junkyard_scrap(
+        config,
+        report_path,
+        dry_run=False,
+        hash_check=True,
+        confirm_each=choice in {"f", "file"},
     )
 
 
 def _run_junkyard(
     *,
     yard_name: str | None,
+    source_root: Path | None,
     den_name: str | None,
+    den_root: Path | None,
     before: str | date | datetime | None,
     validate_first: bool,
     hash_check: bool,
     yes: bool,
+    prompt_cleanup: bool,
 ) -> None:
     _, config = _load_or_exit()
+    if yard_name and source_root:
+        raise typer.BadParameter("--yard and --source cannot be used together.")
+    if den_name and den_root:
+        raise typer.BadParameter("--den and --destination cannot be used together.")
+    _ = validate_first
     before_dt = _parse_junkyard_before(before)
     with session(config.database_path) as connection:
-        if yard_name:
-            yard_store = get_store_by_name(connection, yard_name, StoreKind.YARD)
-            if yard_store is None:
-                raise typer.BadParameter(f"Unknown yard: {yard_name}")
-            yards = [yard_store]
-        else:
-            yards = _list_configured_stores(connection, config, StoreKind.YARD)
-        if den_name:
-            den_store = get_store_by_name(connection, den_name, StoreKind.DEN)
-            if den_store is None:
-                raise typer.BadParameter(f"Unknown den: {den_name}")
-            dens = [den_store]
-        else:
-            dens = _list_configured_stores(connection, config, StoreKind.DEN)
+        sources = _resolve_junkyard_sources(connection, config, yard_name=yard_name, source_root=source_root)
+        dens, den_roots = _resolve_junkyard_dens(connection, config, den_name=den_name, den_root=den_root)
+    if not sources:
+        raise typer.BadParameter("No source yards or folders available for junkyard review.")
+    if not den_roots:
+        raise typer.BadParameter("No den folders available for junkyard review.")
     den_by_source: dict[Path, object] = {}
     for den_store in dens:
         den_by_source.update(list_store_files_by_original_source(den_store))
-    den_roots = [den_store.root_path.expanduser().resolve() for den_store in dens]
+    den_by_name_size = _build_den_name_size_index(den_roots)
     if hash_check:
         _print_notice(
             "Hash check reads both yard and den files for exact byte matching. This may take a long time.",
@@ -3551,28 +4093,41 @@ def _run_junkyard(
             console.print("Hash check cancelled.")
             return
     table = _styled_table(title="RAWDOG Junkyard Report", style=STYLE_PANEL, row_styles=STYLE_ROWS, expand=True)
-    table.add_column("Yard File")
+    table.add_column("Source File")
     table.add_column("Matched Den File")
     table.add_column("Bytes", justify="right")
-    matches: list[tuple[Path, Path, int]] = []
-    for yard_store in yards:
-        for item in scan_raw_files(yard_store.root_path):
+    table.add_column("Match")
+    matches: list[JunkyardCandidate] = []
+    unmatched = 0
+    ambiguous = 0
+    source_roots = [source.root_path.expanduser().resolve() for source in sources]
+    for source in sources:
+        for item in scan_raw_files(source.root_path):
             if before_dt and datetime.fromtimestamp(item.path.stat().st_mtime, tz=UTC) >= before_dt:
                 continue
-            yard_path = item.path.expanduser().resolve()
-            record = den_by_source.get(yard_path)
-            if record is None:
+            source_path = item.path.expanduser().resolve()
+            candidate = _match_junkyard_candidate(
+                source_path=source_path,
+                size_bytes=item.size_bytes,
+                den_by_source=den_by_source,
+                den_by_name_size=den_by_name_size,
+                den_roots=den_roots,
+            )
+            if candidate is None:
+                key = (source_path.name, item.size_bytes)
+                den_options = [path for path in den_by_name_size.get(key, []) if path != source_path]
+                if len(den_options) > 1:
+                    ambiguous += 1
+                else:
+                    unmatched += 1
                 continue
-            den_path = record.store_path.expanduser().resolve()
-            if not _path_is_under_any(den_path, den_roots):
-                continue
-            matches.append((yard_path, den_path, item.size_bytes))
+            matches.append(candidate)
     candidates = 0
     missing_or_changed = 0
     hash_mismatches = 0
     total_bytes = 0
-    candidate_rows: list[tuple[Path, Path, int]] = []
-    total_hash_bytes = sum(size_bytes * 2 for _, _, size_bytes in matches)
+    candidate_rows: list[JunkyardCandidate] = []
+    total_hash_bytes = sum(candidate.size_bytes * 2 for candidate in matches)
     progress = None
     hash_task = None
     hashed_bytes = 0
@@ -3590,39 +4145,48 @@ def _run_junkyard(
         progress.start()
         hash_task = progress.add_task("Hash check", total=total_hash_bytes or 1, status=_format_bytes(0))
     try:
-        for yard_path, den_path, size_bytes in matches:
-            if not _file_matches_expected_size(yard_path, size_bytes):
+        for candidate in matches:
+            if not _file_matches_expected_size(candidate.source_path, candidate.size_bytes):
                 missing_or_changed += 1
                 continue
-            if not _file_matches_expected_size(den_path, size_bytes):
+            if not _file_matches_expected_size(candidate.den_path, candidate.size_bytes):
                 missing_or_changed += 1
                 continue
             if hash_check:
                 try:
-                    matched = verify_same_bytes(yard_path, den_path)
+                    matched = verify_same_bytes(candidate.source_path, candidate.den_path)
                 except OSError:
                     missing_or_changed += 1
                     continue
                 finally:
-                    hashed_bytes += size_bytes * 2
+                    hashed_bytes += candidate.size_bytes * 2
                     if progress and hash_task is not None:
                         progress.update(hash_task, completed=hashed_bytes, status=_format_bytes(hashed_bytes))
                 if not matched:
                     hash_mismatches += 1
                     continue
             candidates += 1
-            total_bytes += size_bytes
-            candidate_rows.append((yard_path, den_path, size_bytes))
-            table.add_row(str(yard_path), str(den_path), str(size_bytes))
+            total_bytes += candidate.size_bytes
+            candidate_rows.append(candidate)
+            table.add_row(
+                str(candidate.source_path),
+                str(candidate.den_path),
+                str(candidate.size_bytes),
+                candidate.match_method,
+            )
     finally:
         if progress:
             progress.stop()
     console.print(table)
-    manifest_path = _write_junkyard_report(config, candidate_rows) if candidate_rows else None
+    manifest_path = (
+        _write_junkyard_report(config, candidate_rows, source_roots=source_roots, den_roots=den_roots)
+        if candidate_rows
+        else None
+    )
     if candidates == 0 and matches == []:
         _print_notice(
-            "No source-linked junkyard candidates found. Junkyard only reports files archived through RAWDOG "
-            "with original source tracking; files copied manually or added by dens rebuild may not have source links.",
+            "No junkyard candidates found. J checks RAWDOG source links first, then unique filename + exact-size "
+            "matches in the selected den.",
             style=STYLE_ROW_SELECTED,
         )
     if hash_check:
@@ -3642,8 +4206,15 @@ def _run_junkyard(
             "RAWDOG did not delete or move anything.",
             style=STYLE_ROW_SELECTED,
         )
+    if unmatched or ambiguous:
+        _print_notice(
+            f"Skipped during matching: {unmatched} unmatched; {ambiguous} ambiguous filename + size matches.",
+            style=STYLE_ROW_SELECTED,
+        )
     if manifest_path:
         _print_junkyard_manual_cleanup_commands(manifest_path)
+        if prompt_cleanup:
+            _prompt_junkyard_cleanup_next(config, manifest_path, hash_check=hash_check)
 
 
 def _parse_junkyard_before(before: str | date | datetime | None) -> datetime | None:
@@ -3656,15 +4227,26 @@ def _parse_junkyard_before(before: str | date | datetime | None) -> datetime | N
     return datetime.combine(_parse_cli_date(before), datetime.min.time(), tzinfo=UTC)
 
 
-def _write_junkyard_report(config: RawdogConfig, candidate_rows: list[tuple[Path, Path, int]]) -> Path:
+def _write_junkyard_report(
+    config: RawdogConfig,
+    candidate_rows: list[JunkyardCandidate],
+    *,
+    source_roots: list[Path],
+    den_roots: list[Path],
+) -> Path:
     reports_dir = config.database_path.parent / "reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
     manifest_path = reports_dir / f"junkyard-candidates-{timestamp}.tsv"
     with manifest_path.open("w", encoding="utf-8") as handle:
-        handle.write("yard_path\tmatched_den_path\tsize_bytes\n")
-        for yard_path, den_path, size_bytes in candidate_rows:
-            handle.write(f"{yard_path}\t{den_path}\t{size_bytes}\n")
+        handle.write("# rawdog_junkyard_report\t1\n")
+        for root in source_roots:
+            handle.write(f"# source_root\t{root}\n")
+        for root in den_roots:
+            handle.write(f"# den_root\t{root}\n")
+        handle.write("source_path\tmatched_den_path\tsize_bytes\tmatch_method\n")
+        for row in candidate_rows:
+            handle.write(f"{row.source_path}\t{row.den_path}\t{row.size_bytes}\t{row.match_method}\n")
     return manifest_path
 
 
@@ -3686,6 +4268,7 @@ def _print_junkyard_manual_cleanup_commands(manifest_path: Path) -> None:
                     "",
                     "Commit report-based removal after review:",
                     f"rawdog junkyard-scrap {quoted_manifest} --commit",
+                    f"rawdog junkyard-scrap {quoted_manifest} --commit --each",
                 ]
             ),
             title="Manual Junkyard Cleanup",
@@ -3700,10 +4283,27 @@ def _print_junkyard_manual_cleanup_commands(manifest_path: Path) -> None:
 def junkyard_scrap(
     report: Path = typer.Argument(..., help="Junkyard TSV report written by rawdog junkyard."),
     dry_run: bool = typer.Option(True, "--dry-run/--commit", help="Preview before removing report paths."),
-    hash_check: bool = typer.Option(False, "--hash-check", help="Require exact SHA-256 match before removal."),
+    hash_check: bool = typer.Option(
+        True,
+        "--hash-check/--trust-size",
+        help="Require exact SHA-256 match before removal. --trust-size allows path + size only.",
+    ),
+    confirm_each: bool = typer.Option(False, "--each/--single-confirm", help="Confirm each removable file one at a time."),
 ) -> None:
     """Remove yard files listed in a junkyard report. Never touches den files."""
     _, config = _load_or_exit()
+    confirm_each = confirm_each if isinstance(confirm_each, bool) else False
+    _run_junkyard_scrap(config, report, dry_run=dry_run, hash_check=hash_check, confirm_each=confirm_each)
+
+
+def _run_junkyard_scrap(
+    config: RawdogConfig,
+    report: Path,
+    *,
+    dry_run: bool,
+    hash_check: bool,
+    confirm_each: bool,
+) -> None:
     report_path = report.expanduser().resolve()
     if not report_path.is_file():
         raise typer.BadParameter(f"Report does not exist: {report_path}")
@@ -3712,50 +4312,56 @@ def junkyard_scrap(
         dens = _list_configured_stores(connection, config, StoreKind.DEN)
     yard_roots = [yard.root_path.expanduser().resolve() for yard in yards]
     den_roots = [den.root_path.expanduser().resolve() for den in dens]
-    report_rows = _read_junkyard_report_rows(report_path)
-    allowed: list[tuple[Path, Store]] = []
+    parsed_report = _read_junkyard_report(report_path)
+    allowed_source_roots = [*yard_roots, *parsed_report.source_roots]
+    allowed_den_roots = [*den_roots, *parsed_report.den_roots]
+    allowed: list[JunkyardScrapCandidate] = []
     skipped: list[tuple[Path, str]] = []
-    for yard_path, den_path, size_bytes in report_rows:
-        yard_resolved = yard_path.expanduser().resolve()
-        den_resolved = den_path.expanduser().resolve()
-        if not _path_is_under_any(yard_resolved, yard_roots):
-            skipped.append((yard_resolved, "yard path is not under a registered yard"))
+    for row in parsed_report.rows:
+        source_resolved = row.source_path.expanduser().resolve()
+        den_resolved = row.den_path.expanduser().resolve()
+        if not _path_is_under_any(source_resolved, allowed_source_roots):
+            skipped.append((source_resolved, "source path is not under a registered yard or report source root"))
             continue
-        if not _path_is_under_any(den_resolved, den_roots):
-            skipped.append((yard_resolved, "matched den path is not under a registered den"))
+        if not _path_is_under_any(den_resolved, allowed_den_roots):
+            skipped.append((source_resolved, "matched den path is not under a registered den or report den root"))
             continue
-        if not _file_matches_expected_size(yard_resolved, size_bytes):
-            skipped.append((yard_resolved, "yard file missing or size changed"))
+        if not _file_matches_expected_size(source_resolved, row.size_bytes):
+            skipped.append((source_resolved, "source file missing or size changed"))
             continue
-        if not _file_matches_expected_size(den_resolved, size_bytes):
-            skipped.append((yard_resolved, "matched den file missing or size changed"))
+        if not _file_matches_expected_size(den_resolved, row.size_bytes):
+            skipped.append((source_resolved, "matched den file missing or size changed"))
             continue
-        if yard_resolved.is_symlink():
-            skipped.append((yard_resolved, "yard path is a symlink"))
+        if source_resolved.is_symlink():
+            skipped.append((source_resolved, "source path is a symlink"))
             continue
         if den_resolved.is_symlink():
-            skipped.append((yard_resolved, "matched den path is a symlink"))
+            skipped.append((source_resolved, "matched den path is a symlink"))
             continue
-        if hash_check and not verify_same_bytes(yard_resolved, den_resolved):
-            skipped.append((yard_resolved, "yard and den hashes differ"))
+        if hash_check and not verify_same_bytes(source_resolved, den_resolved):
+            skipped.append((source_resolved, "source and den hashes differ"))
             continue
-        yard_store = _store_for_path_from_list(yard_resolved, yards)
-        if yard_store is None:
-            skipped.append((yard_resolved, "yard path is not under a registered yard"))
-            continue
-        allowed.append((yard_resolved, yard_store))
+        allowed.append(
+            JunkyardScrapCandidate(
+                source_path=source_resolved,
+                den_path=den_resolved,
+                size_bytes=row.size_bytes,
+                yard_store=_store_for_path_from_list(source_resolved, yards),
+            )
+        )
 
-    total_bytes = sum(path.stat().st_size for path, _ in allowed)
+    total_bytes = sum(row.source_path.stat().st_size for row in allowed)
     table = _styled_table(title="Junkyard Scrap Preview")
     table.add_column("Metric")
     table.add_column("Value", justify="right")
     table.add_row("Report", str(report_path))
-    table.add_row("Report rows", str(len(report_rows)))
+    table.add_row("Report rows", str(len(parsed_report.rows)))
     table.add_row("Removable files", str(len(allowed)))
     table.add_row("Removable GB", f"{total_bytes / 1_000_000_000:.2f}")
     table.add_row("Skipped rows", str(len(skipped)))
     table.add_row("Validation", "path + size + SHA-256" if hash_check else "path + exact size")
-    table.add_row("Mode", "dry-run" if dry_run else "commit")
+    mode = "dry-run" if dry_run else ("file-by-file commit" if confirm_each else "single-confirm commit")
+    table.add_row("Mode", mode)
     console.print(table)
     if skipped:
         skipped_table = _styled_table(title="Skipped Report Rows")
@@ -3767,6 +4373,12 @@ def junkyard_scrap(
     if dry_run:
         _print_notice("Dry run only. Re-run with --commit to remove the removable files in this report.")
         return
+    if not allowed:
+        _print_notice("No removable files passed validation.", style=STYLE_ROW_SELECTED)
+        return
+    if confirm_each:
+        _run_junkyard_scrap_file_by_file(allowed)
+        return
     phrase = "SCRAP JUNKYARD REPORT"
     entered = Prompt.ask(
         f"Type {phrase!r} to remove {len(allowed)} files listed in this report",
@@ -3776,33 +4388,85 @@ def junkyard_scrap(
     if entered != phrase:
         _print_notice("Junkyard scrap cancelled.", style=STYLE_ROW_SELECTED)
         return
+    _remove_junkyard_candidates(allowed)
+
+
+def _run_junkyard_scrap_file_by_file(allowed: list[JunkyardScrapCandidate]) -> None:
+    selected: list[JunkyardScrapCandidate] = []
+    skipped = 0
+    for row in allowed:
+        console.print(
+            Panel(
+                "\n".join(
+                    [
+                        f"Source: {row.source_path}",
+                        f"Matched den: {row.den_path}",
+                        f"Bytes: {row.size_bytes}",
+                    ]
+                ),
+                title="Junkyard File Review",
+                border_style="yellow",
+                style=STYLE_PANEL,
+            )
+        )
+        if _yes_no("Remove this source file?", default=False):
+            selected.append(row)
+        else:
+            skipped += 1
+    if not selected:
+        _print_notice(f"No files removed. Skipped by operator: {skipped}.", style=STYLE_ROW_SELECTED)
+        return
+    _remove_junkyard_candidates(selected, operator_skipped=skipped)
+
+
+def _remove_junkyard_candidates(
+    allowed: list[JunkyardScrapCandidate],
+    *,
+    operator_skipped: int = 0,
+) -> None:
     deleted = 0
     failed = 0
     catalog_marked = 0
-    for path, yard_store in allowed:
+    for row in allowed:
         try:
-            path.unlink()
+            row.source_path.unlink()
             deleted += 1
-            if mark_store_file_deleted(yard_store, path):
+            if row.yard_store and mark_store_file_deleted(row.yard_store, row.source_path):
                 catalog_marked += 1
         except OSError as exc:
             failed += 1
-            _print_error(f"Failed to remove {path}: {exc}")
+            _print_error(f"Failed to remove {row.source_path}: {exc}")
+    skipped_fragment = f"; operator-skipped {operator_skipped}" if operator_skipped else ""
     _print_notice(
-        f"Junkyard scrap complete: removed {deleted} files; failed {failed}; "
+        f"Junkyard scrap complete: removed {deleted} files; failed {failed}{skipped_fragment}; "
         f"marked {catalog_marked} yard catalog rows deleted; den files were not touched.",
         style=STYLE_SAFE if failed == 0 else STYLE_WARN,
     )
 
 
 def _read_junkyard_report_rows(report_path: Path) -> list[tuple[Path, Path, int]]:
-    rows: list[tuple[Path, Path, int]] = []
+    return [(row.source_path, row.den_path, row.size_bytes) for row in _read_junkyard_report(report_path).rows]
+
+
+def _read_junkyard_report(report_path: Path) -> JunkyardReport:
+    rows: list[JunkyardCandidate] = []
+    source_roots: list[Path] = []
+    den_roots: list[Path] = []
     with report_path.open("r", encoding="utf-8") as handle:
         for index, raw_line in enumerate(handle):
             line = raw_line.rstrip("\n")
             if not line:
                 continue
-            if index == 0 and line.startswith("yard_path\t"):
+            if line.startswith("#"):
+                parts = line[1:].strip().split("\t", 1)
+                if len(parts) == 2 and parts[0] == "source_root":
+                    source_roots.append(Path(parts[1]))
+                elif len(parts) == 2 and parts[0] == "den_root":
+                    den_roots.append(Path(parts[1]))
+                continue
+            if (index == 0 or not rows) and (
+                line.startswith("yard_path\t") or line.startswith("source_path\t")
+            ):
                 continue
             parts = line.split("\t")
             if len(parts) < 3:
@@ -3811,8 +4475,16 @@ def _read_junkyard_report_rows(report_path: Path) -> list[tuple[Path, Path, int]
                 size_bytes = int(parts[2])
             except ValueError as exc:
                 raise typer.BadParameter(f"Invalid junkyard report size: {parts[2]}") from exc
-            rows.append((Path(parts[0]), Path(parts[1]), size_bytes))
-    return rows
+            match_method = parts[3] if len(parts) >= 4 and parts[3] else "source-link"
+            rows.append(
+                JunkyardCandidate(
+                    source_path=Path(parts[0]),
+                    den_path=Path(parts[1]),
+                    size_bytes=size_bytes,
+                    match_method=match_method,
+                )
+            )
+    return JunkyardReport(rows=rows, source_roots=source_roots, den_roots=den_roots)
 
 
 def _path_is_under_any(path: Path, roots: list[Path]) -> bool:
@@ -4334,6 +5006,7 @@ def plans_show(
         plan_id=plan_id,
         rows=review_rows,
     )
+    _print_force_move_duplicate_guidance(plan_id, rows)
     if ops:
         _print_plan_operation_review(config, plan_id, rows)
 
@@ -4348,6 +5021,41 @@ def _skip_reason(row: ExecutionPlanRow) -> str:
     if row.status.startswith("skip"):
         return "planned skip"
     return row.audit_status or "skipped"
+
+
+def _is_move_duplicate_skip(row: ExecutionPlanRow) -> bool:
+    return (
+        row.transfer_action == DenTransferAction.MOVE
+        and row.status in {"skipped_existing_same_name_size", "skip_existing_same_name_size"}
+    )
+
+
+def _print_force_move_duplicate_guidance(plan_id: int, rows: list[ExecutionPlanRow]) -> None:
+    candidates = [row for row in rows if _is_move_duplicate_skip(row)]
+    if not candidates:
+        return
+    console.print(
+        Panel(
+            "\n".join(
+                [
+                    f"{len(candidates)} skipped MOVE rows look like destination duplicates by name and size.",
+                    "To complete MOVE cleanup safely, RAWDOG must prove exact byte equality first.",
+                    "",
+                    "Review exact duplicates:",
+                    f"rawdog plans force-move-duplicates {plan_id}",
+                    "",
+                    "Commit only verified duplicates after review:",
+                    f"rawdog plans force-move-duplicates {plan_id} --commit",
+                    "",
+                    "This never overwrites the destination. It removes a source file only after SHA-256 matches.",
+                ]
+            ),
+            title="FORCE-MOVE-OF-DUPLICATES Review",
+            border_style="yellow",
+            style=STYLE_PANEL,
+            expand=True,
+        )
+    )
 
 
 def _print_active_run_notice(config: RawdogConfig) -> None:
@@ -4455,6 +5163,7 @@ def plans_skipped(
         _print_notice(f"Showing first {limit} of {len(skipped_rows)} skipped rows.", style=STYLE_ROW_SELECTED)
     if not skipped_rows:
         _print_notice("No skipped rows found for this plan.", style=STYLE_SAFE)
+    _print_force_move_duplicate_guidance(plan_id, skipped_rows)
 
 
 def _skipped_row_lines(row: ExecutionPlanRow) -> list[str]:
@@ -4465,6 +5174,266 @@ def _skipped_row_lines(row: ExecutionPlanRow) -> list[str]:
         f"Source: {row.source_path}",
         f"Destination: {row.destination_path}",
     ]
+
+
+@plans_app.command("force-move-duplicates")
+def plans_force_move_duplicates(
+    plan_id: int = typer.Argument(...),
+    limit: int = typer.Option(50, "--limit", min=1, max=500, help="Verified duplicate rows to show."),
+    dry_run: bool = typer.Option(True, "--dry-run/--commit", help="Preview before removing source duplicates."),
+    confirm_each: bool = typer.Option(False, "--each/--single-confirm", help="Confirm each verified duplicate one at a time."),
+) -> None:
+    """Hash-review skipped MOVE duplicates, then remove only exact source duplicates."""
+    _, config = _load_or_exit()
+    with session(config.database_path) as connection:
+        plan = get_execution_plan(connection, plan_id)
+        if plan is None:
+            raise typer.BadParameter(f"Unknown plan: {plan_id}")
+        rows = list_execution_plan_rows(connection, plan_id)
+    candidate_rows = [row for row in rows if _is_move_duplicate_skip(row)]
+    _print_execution_plan_start(plan)
+    if not candidate_rows:
+        _print_notice("No skipped MOVE duplicate rows found for this plan.", style=STYLE_SAFE)
+        return
+    _print_notice(
+        "Hash review reads source and destination files before any source removal. This may take a while.",
+        style=STYLE_ROW_SELECTED,
+    )
+    verified, rejected = _hash_review_move_duplicate_rows(candidate_rows)
+    _print_move_duplicate_review(plan_id, verified, rejected, limit=limit)
+    if dry_run:
+        _print_notice(
+            f"Dry run only. Re-run with --commit to remove {len(verified)} SHA-256 verified source duplicates.",
+            style=STYLE_ROW_SELECTED,
+        )
+        return
+    if not verified:
+        _print_notice("No exact duplicates passed SHA-256 review.", style=STYLE_ROW_SELECTED)
+        return
+    if confirm_each:
+        verified = _prompt_verified_move_duplicates(verified)
+        if not verified:
+            _print_notice("No files removed. Operator skipped every verified duplicate.", style=STYLE_ROW_SELECTED)
+            return
+    else:
+        phrase = f"FORCE MOVE DUPLICATES PLAN {plan_id}"
+        entered = Prompt.ask(
+            f"Type {phrase!r} to remove {len(verified)} source files verified by SHA-256",
+            default="",
+            console=console,
+        )
+        if entered != phrase:
+            _print_notice("Force-move duplicate cleanup cancelled.", style=STYLE_ROW_SELECTED)
+            return
+    _remove_verified_move_duplicates(config, plan, verified)
+
+
+def _hash_review_move_duplicate_rows(
+    rows: list[ExecutionPlanRow],
+) -> tuple[list[VerifiedMoveDuplicate], list[tuple[ExecutionPlanRow, str]]]:
+    verified: list[VerifiedMoveDuplicate] = []
+    rejected: list[tuple[ExecutionPlanRow, str]] = []
+    total_hash_bytes = sum(row.size_bytes * 2 for row in rows)
+    hashed_bytes = 0
+    progress = Progress(
+        SpinnerColumn(),
+        TextColumn("[bold bright_green on black]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        TextColumn("[bright_white on black]{task.fields[status]}"),
+        TimeElapsedColumn(),
+        TimeRemainingColumn(),
+        console=console,
+    )
+    progress.start()
+    task = progress.add_task("SHA-256 duplicate review", total=total_hash_bytes or 1, status=_format_bytes(0))
+    try:
+        for row in rows:
+            source = row.source_path.expanduser().resolve()
+            destination = row.destination_path.expanduser().resolve()
+            reason = _move_duplicate_precheck(row, source, destination)
+            if reason:
+                rejected.append((row, reason))
+                hashed_bytes += row.size_bytes * 2
+                progress.update(task, completed=hashed_bytes, status=_format_bytes(hashed_bytes))
+                continue
+
+            def advance(amount: int) -> None:
+                nonlocal hashed_bytes
+                hashed_bytes += amount
+                progress.update(task, completed=hashed_bytes, status=_format_bytes(hashed_bytes))
+
+            try:
+                source_hash = _sha256_file_with_progress(source, advance)
+                destination_hash = _sha256_file_with_progress(destination, advance)
+            except OSError as exc:
+                rejected.append((row, str(exc)))
+                continue
+            if source_hash != destination_hash:
+                rejected.append((row, "SHA-256 mismatch"))
+                continue
+            verified.append(
+                VerifiedMoveDuplicate(
+                    row=row,
+                    source_path=source,
+                    destination_path=destination,
+                    size_bytes=row.size_bytes,
+                    sha256=source_hash,
+                )
+            )
+    finally:
+        progress.stop()
+    return verified, rejected
+
+
+def _move_duplicate_precheck(row: ExecutionPlanRow, source: Path, destination: Path) -> str | None:
+    if source == destination:
+        return "source and destination are the same path"
+    if source.name != destination.name:
+        return "source and destination names differ"
+    if source.is_symlink() or destination.is_symlink():
+        return "source or destination is a symlink"
+    if not _file_matches_expected_size(source, row.size_bytes):
+        return "source missing or size changed"
+    if not _file_matches_expected_size(destination, row.size_bytes):
+        return "destination missing or size changed"
+    return None
+
+
+def _sha256_file_with_progress(path: Path, progress_callback) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+            progress_callback(len(chunk))
+    return digest.hexdigest()
+
+
+def _print_move_duplicate_review(
+    plan_id: int,
+    verified: list[VerifiedMoveDuplicate],
+    rejected: list[tuple[ExecutionPlanRow, str]],
+    *,
+    limit: int,
+) -> None:
+    table = _styled_table(title=f"Plan #{plan_id} FORCE-MOVE-OF-DUPLICATES Review")
+    table.add_column("Metric")
+    table.add_column("Value", justify="right")
+    table.add_row("SHA-256 verified duplicates", str(len(verified)))
+    table.add_row("Rejected rows", str(len(rejected)))
+    table.add_row("Removable bytes", _format_bytes(sum(row.size_bytes for row in verified)))
+    console.print(table)
+    if verified:
+        rows_table = _styled_table(title="Verified Source Duplicates", row_styles=STYLE_ROWS, expand=True)
+        rows_table.add_column("Row", justify="right")
+        rows_table.add_column("Size", justify="right")
+        rows_table.add_column("Source", overflow="fold")
+        rows_table.add_column("Destination", overflow="fold")
+        for candidate in verified[:limit]:
+            rows_table.add_row(
+                str(candidate.row.row_id),
+                _format_bytes(candidate.size_bytes),
+                str(candidate.source_path),
+                str(candidate.destination_path),
+            )
+        console.print(rows_table)
+        if len(verified) > limit:
+            _print_notice(f"Showing first {limit} of {len(verified)} verified duplicates.", style=STYLE_ROW_SELECTED)
+    if rejected:
+        rejected_table = _styled_table(title="Rejected Duplicate Rows", row_styles=STYLE_ROWS, expand=True)
+        rejected_table.add_column("Row", justify="right")
+        rejected_table.add_column("Reason")
+        rejected_table.add_column("Source", overflow="fold")
+        rejected_table.add_column("Destination", overflow="fold")
+        for row, reason in rejected[:limit]:
+            rejected_table.add_row(str(row.row_id), reason, str(row.source_path), str(row.destination_path))
+        console.print(rejected_table)
+        if len(rejected) > limit:
+            _print_notice(f"Showing first {limit} of {len(rejected)} rejected rows.", style=STYLE_ROW_SELECTED)
+
+
+def _prompt_verified_move_duplicates(candidates: list[VerifiedMoveDuplicate]) -> list[VerifiedMoveDuplicate]:
+    selected: list[VerifiedMoveDuplicate] = []
+    for candidate in candidates:
+        console.print(
+            Panel(
+                "\n".join(
+                    [
+                        f"Source: {candidate.source_path}",
+                        f"Destination: {candidate.destination_path}",
+                        f"Size: {_format_bytes(candidate.size_bytes)}",
+                        f"SHA-256: {candidate.sha256}",
+                    ]
+                ),
+                title=f"Verified Duplicate Row #{candidate.row.row_id}",
+                border_style="yellow",
+                style=STYLE_PANEL,
+                expand=True,
+            )
+        )
+        if _yes_no("Remove this verified source duplicate?", default=False):
+            selected.append(candidate)
+    return selected
+
+
+def _remove_verified_move_duplicates(
+    config: RawdogConfig,
+    plan: ExecutionPlan,
+    candidates: list[VerifiedMoveDuplicate],
+) -> None:
+    removed = 0
+    failed = 0
+    catalog_marked = 0
+    with session(config.database_path) as connection:
+        stores = list_stores(connection)
+    for candidate in candidates:
+        if not _file_matches_expected_size(candidate.source_path, candidate.size_bytes):
+            failed += 1
+            _print_error(f"Source changed before removal: {candidate.source_path}")
+            continue
+        if not _file_matches_expected_size(candidate.destination_path, candidate.size_bytes):
+            failed += 1
+            _print_error(f"Destination changed before removal: {candidate.destination_path}")
+            continue
+        try:
+            candidate.source_path.unlink()
+            removed += 1
+            source_store = _store_for_path_from_list(candidate.source_path, stores)
+            if source_store and mark_store_file_deleted(source_store, candidate.source_path):
+                catalog_marked += 1
+            with session(config.database_path) as connection:
+                destination_store = find_store_for_path(connection, candidate.destination_path, StoreKind.DEN)
+                if destination_store:
+                    record_store_file(
+                        destination_store,
+                        store_path=candidate.destination_path,
+                        original_source_path=candidate.source_path,
+                        size_bytes=candidate.size_bytes,
+                        execution_plan_id=plan.plan_id,
+                        execution_row_id=candidate.row.row_id,
+                    )
+                update_execution_plan_row(
+                    connection,
+                    candidate.row.row_id,
+                    status="source_removed_verified_duplicate",
+                    audit_status="source_removed_after_sha256_match",
+                )
+        except OSError as exc:
+            failed += 1
+            _print_error(f"Failed to remove {candidate.source_path}: {exc}")
+    with session(config.database_path) as connection:
+        updated_plan = get_execution_plan(connection, plan.plan_id)
+        updated_rows = list_execution_plan_rows(connection, plan.plan_id)
+    if updated_plan:
+        _write_post_execution_reports(updated_plan, updated_rows)
+    _print_notice(
+        f"FORCE-MOVE-OF-DUPLICATES complete: removed {removed} verified source duplicates; "
+        f"failed {failed}; marked {catalog_marked} catalog rows deleted; destinations were not overwritten.",
+        style=STYLE_SAFE if failed == 0 else STYLE_WARN,
+    )
 
 
 def _print_plan_review_rows(plan_id: int, rows: list[ExecutionPlanRow], *, start: int, page_size: int) -> None:
@@ -4512,6 +5481,7 @@ def plans_review(
     if not review_rows:
         _print_notice("No failed, skipped, held, or review-needed rows found.", style=STYLE_SAFE)
         return
+    _print_force_move_duplicate_guidance(plan_id, review_rows)
     offset = 0
     while True:
         _print_plan_review_rows(plan_id, review_rows, start=offset, page_size=page_size)

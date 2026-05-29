@@ -1,5 +1,6 @@
 # Author: Nicholas Corrieri
 
+import os
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -7,7 +8,7 @@ from rawdog import cli
 from rawdog.config import build_config
 from rawdog.db import initialize, session
 from rawdog.inventory import InventoryItem
-from rawdog.models import OrganizationMode, StoreCreate, StoreKind
+from rawdog.models import NamingConvention, OrganizationMode, StoreCreate, StoreKind
 from rawdog.stores import create_or_update_store
 
 
@@ -193,6 +194,118 @@ def test_home_backup_uses_copy_den_planner(monkeypatch) -> None:
     cli._home_backup()
 
     assert calls == [(cli.DenTransferAction.COPY, False)]
+
+
+def test_preserve_dates_folder_review_defaults_keep_and_rejects_n(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "source"
+    real_a = source / "Real Project" / "IMG_0001.CR3"
+    real_b = source / "Real Project" / "IMG_0002.CR3"
+    junk = source / "Probably Delete" / "IMG_0003.CR3"
+    real_a.parent.mkdir(parents=True)
+    junk.parent.mkdir(parents=True)
+    real_a.write_bytes(b"raw")
+    real_b.write_bytes(b"raw")
+    junk.write_bytes(b"raw")
+    defaults: list[str | None] = []
+    answers = iter(["k", "n"])
+
+    def fake_ask(*args, **kwargs) -> str:
+        defaults.append(kwargs.get("default"))
+        return next(answers)
+
+    monkeypatch.setattr(cli.Prompt, "ask", fake_ask)
+
+    drop_parts = cli._choose_preserve_dates_drop_parts(source, [])
+
+    assert drop_parts == {"Probably Delete"}
+    assert defaults == ["k", "k"]
+
+
+def test_den_command_allows_registered_same_root_reflow_plan(tmp_path: Path, monkeypatch) -> None:
+    database = tmp_path / "rawdog.sqlite"
+    den_root = tmp_path / "RAW_DEN"
+    raw_file = den_root / "Probably Delete" / "100CANON" / "IMG_0001.CR3"
+    raw_file.parent.mkdir(parents=True)
+    raw_file.write_bytes(b"raw")
+    captured_ts = datetime(2025, 3, 15, tzinfo=UTC).timestamp()
+    os.utime(raw_file, (captured_ts, captured_ts))
+    initialize(database)
+    with session(database) as connection:
+        create_or_update_store(connection, StoreCreate(name="primary", root_path=den_root, store_kind=StoreKind.DEN))
+    config = build_config(OrganizationMode.PROJECT, archive_root=den_root, database_path=database)
+    monkeypatch.setattr(cli, "_load_or_exit", lambda: (tmp_path / "config.json", config))
+
+    cli.den(
+        source=den_root,
+        destination=den_root,
+        project_name=None,
+        workflow_name=None,
+        layout=cli.DenLayoutMode.PRESERVE_DATES,
+        action=cli.DenTransferAction.MOVE,
+        template="YYYY/YYYY-MM",
+        group_by=None,
+        start_date=None,
+        end_date=None,
+        limit=None,
+        drop_preserved_folder=["Probably Delete"],
+        reflow_den=True,
+        dry_run=True,
+    )
+
+    with session(database) as connection:
+        plan = cli.get_latest_execution_plan(connection)
+        assert plan is not None
+        rows = cli.list_execution_plan_rows(connection, plan.plan_id)
+    assert rows[0].destination_path == den_root / "2025" / "2025-03" / "IMG_0001.CR3"
+
+
+def test_fetch_plan_ddd_flattens_camera_dump_into_destination_folder(tmp_path: Path) -> None:
+    source = tmp_path / "DCIM"
+    destination = tmp_path / "RAW_YARD"
+    destination_folder = destination / "2026" / "20260521_Date_Only"
+    (source / "100EOSR7").mkdir(parents=True)
+    destination.mkdir()
+    raw_file = source / "100EOSR7" / "IMG_0001.CR3"
+    raw_file.write_bytes(b"raw")
+
+    plan = cli._build_fetch_plan(source, destination, destination_folder, NamingConvention.DDD)
+
+    assert plan.files_to_transfer == 1
+    assert plan.rows[0].destination_path == destination_folder / "IMG_0001.CR3"
+    assert plan.rows[0].status == "plan_copy"
+
+
+def test_fetch_plan_keep_existing_preserves_source_relative_path(tmp_path: Path) -> None:
+    source = tmp_path / "DCIM"
+    destination = tmp_path / "RAW_YARD"
+    (source / "100EOSR7").mkdir(parents=True)
+    destination.mkdir()
+    raw_file = source / "100EOSR7" / "IMG_0001.CR3"
+    raw_file.write_bytes(b"raw")
+
+    plan = cli._build_fetch_plan(source, destination, destination, NamingConvention.KEEP_EXISTING)
+
+    assert plan.rows[0].destination_path == destination / "100EOSR7" / "IMG_0001.CR3"
+
+
+def test_fetch_commit_executes_persisted_copy_plan(tmp_path: Path) -> None:
+    database = tmp_path / "rawdog.sqlite"
+    source = tmp_path / "DCIM"
+    destination = tmp_path / "RAW_YARD"
+    destination_folder = destination / "2026" / "20260521_Date_Only"
+    (source / "100EOSR7").mkdir(parents=True)
+    destination.mkdir()
+    raw_file = source / "100EOSR7" / "IMG_0001.CR3"
+    raw_file.write_bytes(b"raw")
+    initialize(database)
+    config = build_config(OrganizationMode.PROJECT, database_path=database)
+    plan = cli._build_fetch_plan(source, destination, destination_folder, NamingConvention.DDD)
+    execution_plan = cli._persist_fetch_execution_plan(config, plan)
+
+    finished = cli._execute_persisted_plan(config, execution_plan.plan_id)
+
+    assert finished.status == cli.ExecutionPlanStatus.DONE
+    assert (destination_folder / "IMG_0001.CR3").read_bytes() == b"raw"
 
 
 def test_browse_den_destination_can_select_known_den_under_current_path(tmp_path: Path, monkeypatch) -> None:

@@ -156,6 +156,53 @@ def test_den_preserve_dates_does_not_duplicate_year_prefix_for_camera_dump(tmp_p
     assert destination / "2023" / "2023" not in plan.rows[0].destination_path.parents
 
 
+def test_den_preserve_dates_can_drop_rejected_folder_names(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "archive"
+    raw = source / "2024" / "Probably Delete" / "100CANON" / "IMG_0001.CR3"
+    raw.parent.mkdir(parents=True)
+    destination.mkdir()
+    raw.write_bytes(b"raw")
+    captured_ts = datetime(2025, 3, 15, tzinfo=UTC).timestamp()
+    os.utime(raw, (captured_ts, captured_ts))
+
+    plan = build_den_plan(
+        source,
+        destination,
+        layout_mode=DenLayoutMode.PRESERVE_DATES,
+        folder_template="YYYY/YYYY-MM",
+        preserve_dates_drop_parts={"2024", "Probably Delete"},
+    )
+
+    assert plan.rows[0].destination_path == destination / "2025" / "2025-03" / "IMG_0001.CR3"
+    assert "Probably Delete" not in plan.rows[0].destination_path.parts
+
+
+def test_den_marks_duplicate_planned_destinations_for_review(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "archive"
+    first = source / "100CANON" / "IMG_0001.CR3"
+    second = source / "101CANON" / "IMG_0001.CR3"
+    first.parent.mkdir(parents=True)
+    second.parent.mkdir(parents=True)
+    destination.mkdir()
+    first.write_bytes(b"raw")
+    second.write_bytes(b"raw")
+    captured_ts = datetime(2025, 3, 15, tzinfo=UTC).timestamp()
+    os.utime(first, (captured_ts, captured_ts))
+    os.utime(second, (captured_ts, captured_ts))
+
+    plan = build_den_plan(
+        source,
+        destination,
+        layout_mode=DenLayoutMode.DATE,
+        folder_template="YYYY/YYYY-MM",
+    )
+
+    assert [row.status for row in plan.rows] == ["plan_copy", "collision"]
+    assert plan.rows[0].destination_path == plan.rows[1].destination_path
+
+
 def test_den_project_dates_groups_project_by_file_date(tmp_path: Path) -> None:
     source = tmp_path / "102EOSR7"
     destination = tmp_path / "archive"
