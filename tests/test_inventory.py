@@ -87,6 +87,20 @@ def test_scan_raw_files_can_limit_preview(tmp_path: Path) -> None:
     assert len(items) == 1
 
 
+def test_scan_raw_files_reports_each_found_item(tmp_path: Path) -> None:
+    (tmp_path / "IMG_0001.CR3").write_bytes(b"raw")
+    (tmp_path / "IMG_0002.JPG").write_bytes(b"jpeg")
+    seen: list[Path] = []
+
+    items = scan_raw_files(tmp_path, on_item=lambda item: seen.append(item.relative_path))
+
+    assert [item.relative_path for item in items] == [
+        Path("IMG_0001.CR3"),
+        Path("IMG_0002.JPG"),
+    ]
+    assert seen == [Path("IMG_0001.CR3"), Path("IMG_0002.JPG")]
+
+
 def test_earliest_raw_capture_time_prefers_media_capture_date_for_recovered_cr3(
     tmp_path: Path,
     monkeypatch,

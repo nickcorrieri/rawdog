@@ -2,7 +2,10 @@
 
 import os
 from datetime import UTC, date, datetime
+from io import StringIO
 from pathlib import Path
+
+from rich.console import Console
 
 from rawdog import cli, metadata
 from rawdog.config import build_config
@@ -216,6 +219,87 @@ def test_keep_existing_original_fetch_plan_skips_capture_date_scan(tmp_path: Pat
     )
 
     assert plan.rows[0].destination_path == destination / "DCIM" / "100CANON" / "IMG_0001.CR3"
+
+
+def test_fetch_plan_reuses_preloaded_items_and_capture_times(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "yard"
+    destination_folder = destination / "2026" / "2026-05"
+    raw_file = source / "DCIM" / "100CANON" / "LS7A0001.CR3"
+    raw_file.parent.mkdir(parents=True)
+    destination_folder.mkdir(parents=True)
+    raw_file.write_bytes(b"raw")
+    item = InventoryItem(
+        path=raw_file,
+        relative_path=Path("DCIM/100CANON/LS7A0001.CR3"),
+        size_bytes=raw_file.stat().st_size,
+        mtime_ns=raw_file.stat().st_mtime_ns,
+    )
+    reviewed: list[tuple[Path, int, int]] = []
+
+    def fail_scan(*args, **kwargs):
+        raise AssertionError("preloaded fetch items should avoid a second source scan")
+
+    def fail_capture_times(*args, **kwargs):
+        raise AssertionError("preloaded capture times should avoid a second metadata read")
+
+    monkeypatch.setattr(cli, "scan_raw_files", fail_scan)
+    monkeypatch.setattr(cli, "capture_times", fail_capture_times)
+
+    plan = cli._build_fetch_plan(
+        source,
+        destination,
+        destination_folder,
+        NamingConvention.DDD,
+        DestinationFilenamePolicy.DATE_ORIGINAL,
+        items=[item],
+        item_capture_times={raw_file: datetime(2026, 5, 28, 13, 40, tzinfo=UTC)},
+        on_item=lambda item, index, total: reviewed.append((item.relative_path, index, total)),
+    )
+
+    assert plan.rows[0].destination_path == (
+        destination_folder / "20260528-134000-00__LS7A0001.CR3"
+    )
+    assert reviewed == [(Path("DCIM/100CANON/LS7A0001.CR3"), 1, 1)]
+
+
+def test_fetch_plan_progress_wrapper_reads_filename_dates_with_status(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "yard"
+    destination_folder = destination / "2026" / "2026-05"
+    raw_file = source / "DCIM" / "100CANON" / "LS7A0001.CR3"
+    raw_file.parent.mkdir(parents=True)
+    destination_folder.mkdir(parents=True)
+    raw_file.write_bytes(b"raw")
+    item = InventoryItem(
+        path=raw_file,
+        relative_path=Path("DCIM/100CANON/LS7A0001.CR3"),
+        size_bytes=raw_file.stat().st_size,
+        mtime_ns=raw_file.stat().st_mtime_ns,
+    )
+    capture_reads: list[list[Path]] = []
+
+    def fake_capture_times(items: list[InventoryItem]) -> dict[Path, datetime]:
+        capture_reads.append([candidate.path for candidate in items])
+        return {raw_file: datetime(2026, 5, 28, 13, 40, tzinfo=UTC)}
+
+    monkeypatch.setattr(cli, "_capture_times_for_fetch_items_with_progress", fake_capture_times)
+
+    plan = cli._build_fetch_plan_with_progress(
+        source,
+        destination,
+        destination_folder,
+        NamingConvention.DDD,
+        DestinationFilenamePolicy.DATE_ORIGINAL,
+        transfer_action=cli.DenTransferAction.COPY,
+        items=[item],
+    )
+
+    assert capture_reads == [[raw_file]]
+    assert plan.rows[0].destination_path.name == "20260528-134000-00__LS7A0001.CR3"
 
 
 def test_choose_path_can_browse_numbered_location(tmp_path: Path, monkeypatch) -> None:
@@ -536,6 +620,35 @@ def test_fetch_plan_ddd_flattens_camera_dump_into_destination_folder(tmp_path: P
     assert plan.rows[0].status == "plan_copy"
 
 
+def test_fetch_plan_example_prints_one_file_source_and_destination(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "DCIM"
+    destination = tmp_path / "RAW_YARD"
+    destination_folder = destination / "2026" / "2026-05"
+    raw_file = source / "100EOSR7" / "IMG_0001.CR3"
+    raw_file.parent.mkdir(parents=True)
+    destination_folder.mkdir(parents=True)
+    raw_file.write_bytes(b"raw")
+    plan = cli._build_fetch_plan(source, destination, destination_folder, NamingConvention.DDD)
+    output = StringIO()
+    monkeypatch.setattr(
+        cli,
+        "console",
+        Console(file=output, force_terminal=False, color_system=None, width=100),
+    )
+
+    cli._print_fetch_plan_example(plan)
+
+    rendered = output.getvalue()
+    assert "SOURCE:" in rendered
+    assert "100EOSR7" in rendered
+    assert "DESTINATION:" in rendered
+    assert "RAW_YARD" in rendered
+    assert "IMG_0001.CR3" in rendered
+
+
 def test_fetch_plan_date_suffixes_flattened_camera_names(tmp_path: Path) -> None:
     source = tmp_path / "DCIM"
     destination = tmp_path / "RAW_YARD"
@@ -680,7 +793,7 @@ def test_fetch_date_grouping_in_project_mode_uses_date_template_not_date_only(
     monkeypatch.setattr(
         metadata,
         "_read_exiftool_tags_for_paths",
-        lambda paths: {raw_file: {"DateTimeOriginal": "2025:04:05 17:37:06"}},
+        lambda paths, **kwargs: {raw_file: {"DateTimeOriginal": "2025:04:05 17:37:06"}},
     )
 
     cli.fetch(

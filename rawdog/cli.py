@@ -10,6 +10,7 @@ import sqlite3
 import subprocess
 import sys
 from collections import Counter, defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -1826,7 +1827,24 @@ def _home_fetch_workflow() -> None:
         "Fast fetch copies first using source folders and original names. Quick catalogue runs after execution.",
         style=STYLE_ROW_SELECTED,
     )
-    if not _yes_no("Use fast fetch-first mode?", default=True):
+    if not _yes_no(
+        "Copy first using the source folders and original file names?",
+        default=True,
+        help_items=[
+            HelpItem(
+                "y",
+                "Fast safe copy",
+                "Copy into the yard without date renaming first. This is quickest and easiest to review.",
+                STYLE_SAFE,
+            ),
+            HelpItem(
+                "n",
+                "Choose date organization",
+                "Go to the slower import planner where RAWDOG can build capture-date folders and rollover-safe names.",
+                STYLE_ACTION,
+            ),
+        ],
+    ):
         _home_yard_import(DenTransferAction.COPY)
         return
     source = _choose_source_path("Fetch source")
@@ -1844,6 +1862,197 @@ def _home_fetch_workflow() -> None:
         detect_sessions=False,
         action=DenTransferAction.COPY,
         dry_run=True,
+    )
+
+
+def _short_progress_path(path: Path, *, max_width: int = 58) -> str:
+    text = str(path)
+    if len(text) <= max_width:
+        return text
+    keep = max((max_width - 5) // 2, 10)
+    return f"{text[:keep]} ... {text[-keep:]}"
+
+
+def _scan_fetch_items_with_progress(source_root: Path) -> list[InventoryItem]:
+    count = 0
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[bold bright_green on black]{task.description}"),
+        TextColumn("[bright_white on black]{task.fields[status]}"),
+        TimeElapsedColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Finding camera files", total=None, status="starting")
+
+        def on_item(item: InventoryItem) -> None:
+            nonlocal count
+            count += 1
+            progress.update(
+                task,
+                status=f"{count} found - {_short_progress_path(item.relative_path)}",
+            )
+
+        items = scan_raw_files(source_root, on_item=on_item)
+        progress.update(task, total=count, completed=count, status=f"{count} files found")
+    return items
+
+
+def _capture_times_for_fetch_items_with_progress(items: list[InventoryItem]) -> dict[Path, datetime]:
+    if not items:
+        return {}
+    paths = [item.path for item in items]
+    relative_by_path = {item.path: item.relative_path for item in items}
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[bold bright_green on black]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        TextColumn("[bright_white on black]{task.fields[status]}"),
+        TimeElapsedColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Reading capture dates", total=len(items), status="starting")
+        if not has_media_metadata_reader():
+            times = {}
+            for index, item in enumerate(items, start=1):
+                times[item.path] = datetime.fromtimestamp(item.mtime_ns / 1_000_000_000, tz=UTC)
+                progress.update(
+                    task,
+                    completed=index,
+                    status=f"filesystem date - {_short_progress_path(item.relative_path)}",
+                )
+            return times
+
+        def on_progress(path: Path, completed: int, total: int) -> None:
+            progress.update(
+                task,
+                completed=completed,
+                total=total,
+                status=f"metadata - {_short_progress_path(relative_by_path.get(path, path))}",
+            )
+
+        times = capture_times(paths, on_progress=on_progress)
+        progress.update(task, completed=len(items), status=f"{len(items)} files reviewed")
+        return times
+
+
+def _build_fetch_plan_with_progress(
+    source_root: Path,
+    destination_root: Path,
+    destination_folder: Path,
+    naming: NamingConvention,
+    filename_policy: DestinationFilenamePolicy,
+    *,
+    transfer_action: DenTransferAction,
+    items: list[InventoryItem] | None = None,
+    item_capture_times: dict[Path, datetime] | None = None,
+) -> DenPlan:
+    items = items if items is not None else _scan_fetch_items_with_progress(source_root)
+    if item_capture_times is None and filename_policy != DestinationFilenamePolicy.ORIGINAL:
+        item_capture_times = _capture_times_for_fetch_items_with_progress(items)
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[bold bright_green on black]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        TextColumn("[bright_white on black]{task.fields[status]}"),
+        TimeElapsedColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Checking destination paths", total=len(items), status="starting")
+
+        def on_item(item: InventoryItem, index: int, total: int) -> None:
+            progress.update(
+                task,
+                completed=index,
+                total=total,
+                status=f"reviewing - {_short_progress_path(item.relative_path)}",
+            )
+
+        plan = _build_fetch_plan(
+            source_root,
+            destination_root,
+            destination_folder,
+            naming,
+            filename_policy,
+            transfer_action=transfer_action,
+            items=items,
+            item_capture_times=item_capture_times,
+            on_item=on_item,
+        )
+        progress.update(task, completed=len(items), status=f"{len(items)} files reviewed")
+        return plan
+
+
+def _print_fetch_preview_guidance(*, dry_run: bool) -> None:
+    action = "write a paused preview plan" if dry_run else "copy or move files after planning"
+    console.print(
+        Panel(
+            "\n".join(
+                [
+                    f"RAWDOG will {action}.",
+                    "The next step reviews camera files, reads capture dates when needed, and checks destination paths.",
+                    "No cleanup decision is made here. Review the one-file example before committing anything.",
+                ]
+            ),
+            title="Import Preview",
+            border_style="green",
+            style=STYLE_PANEL,
+            expand=True,
+        )
+    )
+
+
+def _print_fetch_plan_example(plan: DenPlan) -> None:
+    row = next((candidate for candidate in plan.rows if candidate.status == "plan_copy"), None)
+    row = row or (plan.rows[0] if plan.rows else None)
+    if row is None:
+        _print_notice("No camera files found for this import.", style=STYLE_ROW_SELECTED)
+        return
+    sep = _help_separator()
+    body = Text(style=STYLE_TEXT)
+    body.append(f"SOURCE: {sep}\n", style=STYLE_ROW_HEADER)
+    body.append(f"{row.source_path}\n", style=STYLE_PATH)
+    body.append("=" * len(sep) + "\n", style=STYLE_MUTED)
+    body.append(f"DESTINATION: {sep}\n", style=STYLE_ROW_HEADER)
+    body.append(f"{row.destination_path}\n", style=STYLE_PATH)
+    body.append(sep + "\n", style=STYLE_MUTED)
+    body.append(
+        "This is one example from the preview plan. RAWDOG has not copied this file yet. "
+        "Review the path shape before committing the plan.",
+        style=STYLE_SAFE,
+    )
+    console.print(
+        Panel(
+            body,
+            title="One File Example",
+            border_style="bright_green",
+            style=STYLE_PANEL,
+            expand=True,
+        )
+    )
+
+
+def _print_fetch_plan_summary(plan: DenPlan, *, dry_run: bool) -> None:
+    skipped = sum(1 for row in plan.rows if row.status.startswith("skip"))
+    collisions = sum(1 for row in plan.rows if row.status == "collision")
+    action = "dry-run preview" if dry_run else "commit"
+    console.print(
+        Panel(
+            "\n".join(
+                [
+                    f"Files to copy/move: {plan.files_to_transfer}",
+                    f"Bytes to copy/move: {_format_bytes(plan.bytes_to_transfer)}",
+                    f"Skipped because already present: {skipped}",
+                    f"Conflicts needing review: {collisions}",
+                    f"Mode: {plan.transfer_action.value} / {action}",
+                ]
+            ),
+            title="Fetch Preview Summary",
+            border_style="green",
+            style=STYLE_PANEL,
+            expand=True,
+        )
     )
 
 
@@ -4199,15 +4408,7 @@ def fetch(
     elif profile_name:
         console.print(f"Profile would be saved on commit: {profile_name}")
 
-    console.print("Yard import is preview-first and never assigns projects silently.")
-    console.print(f"Source: {source_root}")
-    console.print(f"Destination: {destination_root}")
-    console.print(f"Transfer action: {action.value}")
-    console.print(f"Mode: {effective_mode.value}")
-    console.print(f"Naming: {effective_naming.value} - {_naming_description(effective_naming)}")
-    console.print(f"File names: {effective_filename_policy.value} - {_filename_policy_description(effective_filename_policy)}")
-    console.print(f"Collision policy: {effective_collision_policy.value}")
-    console.print(f"Verify after copy: {'yes' if effective_verify else 'no'}")
+    _print_fetch_preview_guidance(dry_run=effective_dry_run)
     if not _confirm_fetch_preview_plan(dry_run=effective_dry_run, naming_was_detected=naming_was_detected):
         console.print("Import preview cancelled. No plan written and no files copied.")
         return
@@ -4215,16 +4416,23 @@ def fetch(
     if uses_capture_dates:
         _print_media_metadata_reader_warning("this import")
         _print_notice(
-            "Building import plan from capture dates. Large camera dumps can take a while; wait for the plan prompt.",
+            "Building import plan from capture dates. Progress will update as files are reviewed.",
             style=STYLE_ROW_SELECTED,
         )
     needs_project_date = bool(project_name and effective_naming != NamingConvention.KEEP_EXISTING)
-    earliest_capture_at = earliest_raw_capture_time(source_root) if uses_capture_dates or needs_project_date else None
+    needs_capture_times = uses_capture_dates or needs_project_date
+    items: list[InventoryItem] | None = None
+    item_capture_times: dict[Path, datetime] | None = None
+    earliest_capture_at = None
+    if needs_capture_times:
+        items = _scan_fetch_items_with_progress(source_root)
+        item_capture_times = _capture_times_for_fetch_items_with_progress(items)
+        if item_capture_times:
+            earliest_capture_at = min(item_capture_times.values())
     destination_folder = None
     plan_ran = False
     if effective_naming == NamingConvention.KEEP_EXISTING:
         destination_folder = destination_root
-        console.print(f"Default keep-existing root: {destination_folder}")
     elif project_name:
         preview_project_name = project.name if project else project_name
         destination_folder = default_project_destination(
@@ -4234,15 +4442,12 @@ def fetch(
             or (project.created_at if project else datetime.now(UTC)),
             (project.preferred_folder_template if project else None) or effective_template,
         )
-        console.print(f"Project: {preview_project_name}")
-        console.print(f"Default project folder: {destination_folder}")
     elif earliest_capture_at:
         destination_folder = default_date_only_destination(
             destination_root,
             earliest_capture_at,
             effective_template,
         )
-        console.print(f"Default DDD/date folder: {destination_folder}")
     if destination_folder:
         memory = build_destination_memory(
             organization_mode=effective_mode,
@@ -4254,35 +4459,22 @@ def fetch(
             earliest_capture_at=earliest_capture_at,
             profile_name=profile_name or profile,
         )
-        memory_path = write_destination_memory(memory, dry_run=True)
-        console.print(f"Destination memory planned: {memory_path}")
-        plan = _build_fetch_plan(
+        write_destination_memory(memory, dry_run=True)
+        plan = _build_fetch_plan_with_progress(
             source_root,
             destination_root,
             destination_folder,
             effective_naming,
             effective_filename_policy,
             transfer_action=action,
+            items=items,
+            item_capture_times=item_capture_times,
         )
+        _print_fetch_plan_example(plan)
         _print_camera_numbering_warning([row.source_path for row in plan.rows])
         execution_plan = _persist_fetch_execution_plan(config, plan)
         _print_execution_plan_start(execution_plan)
-        table = _styled_table(title="RAWDOG Fetch Plan")
-        table.add_column("Destination")
-        table.add_column("Files", justify="right")
-        table.add_column("GB", justify="right")
-        table.add_column("Mode")
-        table.add_row(
-            str(destination_folder),
-            str(plan.files_to_transfer),
-            f"{plan.bytes_to_transfer / 1_000_000_000:.2f}",
-            f"{action.value} / {'dry-run' if effective_dry_run else 'commit'}",
-        )
-        console.print(table)
-        skipped = sum(1 for row in plan.rows if row.status.startswith("skip"))
-        collisions = sum(1 for row in plan.rows if row.status == "collision")
-        console.print(f"Skipped existing: {skipped}")
-        console.print(f"Collisions needing review: {collisions}")
+        _print_fetch_plan_summary(plan, dry_run=effective_dry_run)
         if effective_dry_run:
             with session(config.database_path) as connection:
                 rows = list_execution_plan_rows(connection, execution_plan.plan_id)
@@ -4794,16 +4986,23 @@ def _build_fetch_plan(
     naming: NamingConvention,
     filename_policy: DestinationFilenamePolicy = DestinationFilenamePolicy.ORIGINAL,
     transfer_action: DenTransferAction = DenTransferAction.COPY,
+    *,
+    items: list[InventoryItem] | None = None,
+    item_capture_times: dict[Path, datetime] | None = None,
+    on_item: Callable[[InventoryItem, int, int], None] | None = None,
 ) -> DenPlan:
-    items = scan_raw_files(source_root)
-    item_capture_times = (
+    items = items if items is not None else scan_raw_files(source_root)
+    item_capture_times = item_capture_times if item_capture_times is not None else (
         capture_times([item.path for item in items])
         if filename_policy != DestinationFilenamePolicy.ORIGINAL
         else {}
     )
     planned_destinations: set[Path] = set()
     rows: list[DenPlanRow] = []
-    for item in items:
+    total = len(items)
+    for index, item in enumerate(items, start=1):
+        if on_item is not None:
+            on_item(item, index, total)
         destination_parent = (
             destination_folder / item.relative_path
             if naming == NamingConvention.KEEP_EXISTING

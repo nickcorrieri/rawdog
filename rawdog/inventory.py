@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -33,6 +34,7 @@ def scan_raw_files(
     *,
     exclude_roots: list[Path] | None = None,
     limit: int | None = None,
+    on_item: Callable[[InventoryItem], None] | None = None,
 ) -> list[InventoryItem]:
     root = root.expanduser().resolve()
     resolved_excludes = tuple(path.expanduser().resolve() for path in (exclude_roots or []))
@@ -52,14 +54,15 @@ def scan_raw_files(
             if _is_excluded(path, resolved_excludes) or not path.is_file() or not is_camera_capture_file(path):
                 continue
             stat = path.stat()
-            items.append(
-                InventoryItem(
-                    path=path,
-                    relative_path=path.relative_to(root),
-                    size_bytes=stat.st_size,
-                    mtime_ns=stat.st_mtime_ns,
-                )
+            item = InventoryItem(
+                path=path,
+                relative_path=path.relative_to(root),
+                size_bytes=stat.st_size,
+                mtime_ns=stat.st_mtime_ns,
             )
+            items.append(item)
+            if on_item is not None:
+                on_item(item)
             if limit is not None and len(items) >= limit:
                 return items
     return items

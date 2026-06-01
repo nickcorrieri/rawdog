@@ -6,6 +6,7 @@ import json
 import re
 import shutil
 import subprocess
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -109,13 +110,25 @@ def capture_time_fallback(path: Path) -> datetime:
     return capture_time(path)
 
 
-def capture_times(paths: list[Path] | tuple[Path, ...]) -> dict[Path, datetime]:
-    media_times = media_capture_times(paths)
+MetadataProgressCallback = Callable[[Path, int, int], None]
+
+
+def capture_times(
+    paths: list[Path] | tuple[Path, ...],
+    *,
+    on_progress: MetadataProgressCallback | None = None,
+) -> dict[Path, datetime]:
+    media_times = media_capture_times(paths, on_progress=on_progress)
     return {path: media_times.get(path) or filesystem_capture_time(path) for path in paths}
 
 
-def media_capture_times(paths: list[Path] | tuple[Path, ...]) -> dict[Path, datetime]:
-    tags_by_path = _read_exiftool_tags_for_paths(paths)
+def media_capture_times(
+    paths: list[Path] | tuple[Path, ...],
+    *,
+    on_progress: MetadataProgressCallback | None = None,
+) -> dict[Path, datetime]:
+    kwargs = {"on_progress": on_progress} if on_progress is not None else {}
+    tags_by_path = _read_exiftool_tags_for_paths(paths, **kwargs)
     captured: dict[Path, datetime] = {}
     for path, tags in tags_by_path.items():
         captured_at = _capture_time_from_tags(tags)
@@ -153,12 +166,17 @@ def _read_exiftool_tags_for_paths(
     paths: list[Path] | tuple[Path, ...],
     *,
     tags: tuple[str, ...] = EXIF_CAPTURE_TAGS,
+    on_progress: MetadataProgressCallback | None = None,
 ) -> dict[Path, dict[str, object]]:
     if not paths or not has_media_metadata_reader():
         return {}
     requested = {_path_key(path): path for path in paths}
     tags_by_path: dict[Path, dict[str, object]] = {}
+    processed = 0
+    total = len(paths)
     for chunk in _chunks(tuple(paths), 100):
+        if on_progress is not None and chunk:
+            on_progress(chunk[0], processed, total)
         try:
             result = subprocess.run(
                 ["exiftool", "-json", *[f"-{tag}" for tag in tags], *[str(path) for path in chunk]],
@@ -168,7 +186,13 @@ def _read_exiftool_tags_for_paths(
                 timeout=120,
             )
         except (OSError, subprocess.TimeoutExpired):
+            processed += len(chunk)
+            if on_progress is not None and chunk:
+                on_progress(chunk[-1], processed, total)
             continue
+        processed += len(chunk)
+        if on_progress is not None and chunk:
+            on_progress(chunk[-1], processed, total)
         if not result.stdout.strip():
             continue
         try:
