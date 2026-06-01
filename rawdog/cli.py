@@ -98,6 +98,7 @@ from rawdog.models import (
     ExecutionPlanStatus,
     ExecutionPlanTimeShiftRow,
     ExecutionPlanTimeShiftRowCreate,
+    ImportProfile,
     ImportProfileCreate,
     NamingConvention,
     OrganizationMode,
@@ -4046,7 +4047,7 @@ def fetch(
         "--naming",
         help=(
             "Destination naming/layout: detect chooses from the scan; keep-existing preserves source folders "
-            "under the yard; ddd puts camera dumps into the default dated Date_Only folder; project-label "
+            "under the yard; ddd puts camera-card files into capture-date folders; project-label "
             "puts files into the named project folder."
         ),
     ),
@@ -4144,6 +4145,8 @@ def fetch(
         if dry_run is not None
         else (loaded_profile.dry_run_default if loaded_profile else True)
     )
+    effective_mode = _fetch_effective_organization_mode(config, loaded_profile, effective_naming)
+    effective_template = _fetch_effective_folder_template(config, loaded_profile, effective_naming)
 
     project = None
     if project_name:
@@ -4162,10 +4165,8 @@ def fetch(
                         name=remembered_name,
                         source_root=source_root,
                         destination_root=destination_root,
-                        organization_mode=OrganizationMode.PROJECT,
-                        folder_template=(
-                            loaded_profile.folder_template if loaded_profile else config.project_folder_template
-                        ),
+                        organization_mode=effective_mode,
+                        folder_template=effective_template,
                         naming_convention=effective_naming,
                         collision_policy=effective_collision_policy,
                         verify_after_copy=effective_verify,
@@ -4184,12 +4185,8 @@ def fetch(
                     name=profile_name,
                     source_root=source_root,
                     destination_root=destination_root,
-                    organization_mode=config.organization_mode,
-                    folder_template=(
-                        config.project_folder_template
-                        if config.organization_mode == OrganizationMode.PROJECT
-                        else config.date_folder_template
-                    ),
+                    organization_mode=effective_mode,
+                    folder_template=effective_template,
                     naming_convention=effective_naming,
                     collision_policy=effective_collision_policy,
                     verify_after_copy=effective_verify,
@@ -4206,7 +4203,7 @@ def fetch(
     console.print(f"Source: {source_root}")
     console.print(f"Destination: {destination_root}")
     console.print(f"Transfer action: {action.value}")
-    console.print(f"Mode: {(loaded_profile.organization_mode if loaded_profile else config.organization_mode).value}")
+    console.print(f"Mode: {effective_mode.value}")
     console.print(f"Naming: {effective_naming.value} - {_naming_description(effective_naming)}")
     console.print(f"File names: {effective_filename_policy.value} - {_filename_policy_description(effective_filename_policy)}")
     console.print(f"Collision policy: {effective_collision_policy.value}")
@@ -4221,16 +4218,6 @@ def fetch(
             "Building import plan from capture dates. Large camera dumps can take a while; wait for the plan prompt.",
             style=STYLE_ROW_SELECTED,
         )
-    effective_mode = loaded_profile.organization_mode if loaded_profile else config.organization_mode
-    effective_template = (
-        loaded_profile.folder_template
-        if loaded_profile
-        else (
-            config.project_folder_template
-            if effective_mode == OrganizationMode.PROJECT
-            else config.date_folder_template
-        )
-    )
     needs_project_date = bool(project_name and effective_naming != NamingConvention.KEEP_EXISTING)
     earliest_capture_at = earliest_raw_capture_time(source_root) if uses_capture_dates or needs_project_date else None
     destination_folder = None
@@ -4707,10 +4694,34 @@ def _naming_description(naming: NamingConvention) -> str:
     descriptions = {
         NamingConvention.DETECT: "inspect the source and choose a layout recommendation",
         NamingConvention.KEEP_EXISTING: "preserve source folder paths under the destination yard",
-        NamingConvention.DDD: "copy camera-dump files into the default dated Date_Only folder",
+        NamingConvention.DDD: "copy loose camera-card files into capture-date folders",
         NamingConvention.PROJECT_LABEL: "copy files into the named project folder",
     }
     return descriptions[naming]
+
+
+def _fetch_effective_organization_mode(
+    config: RawdogConfig,
+    loaded_profile: ImportProfile | None,
+    naming: NamingConvention,
+) -> OrganizationMode:
+    if naming == NamingConvention.PROJECT_LABEL:
+        return OrganizationMode.PROJECT
+    if naming == NamingConvention.DDD:
+        return OrganizationMode.DATE
+    return loaded_profile.organization_mode if loaded_profile else config.organization_mode
+
+
+def _fetch_effective_folder_template(
+    config: RawdogConfig,
+    loaded_profile: ImportProfile | None,
+    naming: NamingConvention,
+) -> str:
+    if naming == NamingConvention.PROJECT_LABEL:
+        return loaded_profile.folder_template if loaded_profile else config.project_folder_template
+    if naming == NamingConvention.DDD:
+        return config.date_folder_template
+    return loaded_profile.folder_template if loaded_profile else config.date_folder_template
 
 
 def _fetch_plan_uses_capture_dates(

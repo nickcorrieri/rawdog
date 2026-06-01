@@ -646,13 +646,67 @@ def test_fetch_explicit_date_grouping_uses_media_date_not_project_date(
     destination_folder = cli.default_date_only_destination(
         destination,
         cli.earliest_raw_capture_time(source),
-        "YYYY/YYYYMMDD_Date_Only",
+        "YYYY/YYYYMMDD",
     )
 
     plan = cli._build_fetch_plan(source, destination, destination_folder, NamingConvention.DDD)
 
-    assert plan.rows[0].destination_path == destination / "2026" / "20260528_Date_Only" / "LS7A0001.CR3"
+    assert plan.rows[0].destination_path == destination / "2026" / "20260528" / "LS7A0001.CR3"
     assert "2025" not in plan.rows[0].destination_path.parts
+    assert "Date_Only" not in plan.rows[0].destination_path.parts
+
+
+def test_fetch_date_grouping_in_project_mode_uses_date_template_not_date_only(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database = tmp_path / "rawdog.sqlite"
+    source = tmp_path / "gold-testdisk" / "DCIM"
+    destination = tmp_path / "RAW_YARD"
+    raw_file = source / "100EOSR7" / "7P1A9918.CR3"
+    raw_file.parent.mkdir(parents=True)
+    destination.mkdir()
+    raw_file.write_bytes(b"recovered cr3")
+    initialize(database)
+    config = build_config(
+        OrganizationMode.PROJECT,
+        database_path=database,
+        date_folder_template="YYYY/YYYY-MM",
+        project_folder_template="YYYY/YYYYMMDD_PROJECT",
+        yard_filename_policy=DestinationFilenamePolicy.DATE_ORIGINAL,
+    )
+    monkeypatch.setattr(cli, "_load_or_exit", lambda: (tmp_path / "config.json", config))
+    monkeypatch.setattr(cli, "_prompt_dry_run_plan_next", lambda config, plan_id: None)
+    monkeypatch.setattr(
+        metadata,
+        "_read_exiftool_tags_for_paths",
+        lambda paths: {raw_file: {"DateTimeOriginal": "2025:04:05 17:37:06"}},
+    )
+
+    cli.fetch(
+        source=source,
+        destination=destination,
+        profile=None,
+        project_name=None,
+        profile_name=None,
+        naming=NamingConvention.DDD,
+        filename_policy=None,
+        collision_policy=None,
+        verify_after_copy=None,
+        detect_sessions=False,
+        action=cli.DenTransferAction.COPY,
+        dry_run=True,
+    )
+
+    with session(database) as connection:
+        plan = cli.get_latest_execution_plan(connection)
+        assert plan is not None
+        rows = cli.list_execution_plan_rows(connection, plan.plan_id)
+    assert str(destination / "2025" / "2025-04") in plan.expected_result
+    assert rows[0].destination_path == (
+        destination / "2025" / "2025-04" / "20250405-173706-00__7P1A9918.CR3"
+    )
+    assert "Date_Only" not in str(rows[0].destination_path)
 
 
 def test_fetch_keep_existing_project_name_does_not_override_no_date_grouping(
