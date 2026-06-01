@@ -80,3 +80,25 @@ def test_capture_time_falls_back_to_filesystem_when_media_date_missing(
     captured_at = capture_time_fallback(raw)
 
     assert captured_at == datetime(2026, 5, 28, 13, 40, tzinfo=UTC)
+
+
+def test_media_unique_ids_accepts_progress_callback(tmp_path: Path, monkeypatch) -> None:
+    raw = tmp_path / "LS7A0004.CR3"
+    raw.write_bytes(b"recovered cr3")
+    progress_calls: list[tuple[Path, int, int]] = []
+
+    def on_progress(path: Path, completed: int, total: int) -> None:
+        progress_calls.append((path, completed, total))
+
+    def fake_read(paths, **kwargs):
+        assert kwargs["tags"] == metadata.EXIF_UNIQUE_ID_TAGS
+        assert kwargs["on_progress"] is on_progress
+        kwargs["on_progress"](raw, 1, 1)
+        return {raw: {"ImageUniqueID": "ABCDEF1234567890"}}
+
+    monkeypatch.setattr(metadata, "_read_exiftool_tags_for_paths", fake_read)
+
+    unique_ids = metadata.media_unique_ids([raw], on_progress=on_progress)
+
+    assert unique_ids == {raw: "abcdef1234567890"}
+    assert progress_calls == [(raw, 1, 1)]

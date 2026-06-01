@@ -1865,7 +1865,7 @@ def _home_fetch_workflow() -> None:
     )
 
 
-def _short_progress_path(path: Path, *, max_width: int = 58) -> str:
+def _short_progress_path(path: Path | str, *, max_width: int = 58) -> str:
     text = str(path)
     if len(text) <= max_width:
         return text
@@ -1873,7 +1873,25 @@ def _short_progress_path(path: Path, *, max_width: int = 58) -> str:
     return f"{text[:keep]} ... {text[-keep:]}"
 
 
-def _scan_fetch_items_with_progress(source_root: Path) -> list[InventoryItem]:
+def _print_long_running_progress_note(title: str, lines: list[str]) -> None:
+    console.print(
+        Panel(
+            "\n".join(lines),
+            title=title,
+            border_style="yellow",
+            style=STYLE_PANEL,
+            expand=True,
+        )
+    )
+
+
+def _scan_items_with_progress(
+    root: Path,
+    *,
+    description: str,
+    exclude_roots: list[Path] | None = None,
+    limit: int | None = None,
+) -> list[InventoryItem]:
     count = 0
     with Progress(
         SpinnerColumn(),
@@ -1882,22 +1900,35 @@ def _scan_fetch_items_with_progress(source_root: Path) -> list[InventoryItem]:
         TimeElapsedColumn(),
         console=console,
     ) as progress:
-        task = progress.add_task("Finding camera files", total=None, status="starting")
+        task = progress.add_task(
+            description,
+            total=limit,
+            status="walking folders; total is unknown until this pass finishes",
+        )
 
         def on_item(item: InventoryItem) -> None:
             nonlocal count
             count += 1
-            progress.update(
-                task,
-                status=f"{count} found - {_short_progress_path(item.relative_path)}",
-            )
+            update_args = {"status": f"{count} camera files found - {_short_progress_path(item.relative_path)}"}
+            if limit is not None:
+                update_args["completed"] = count
+            progress.update(task, **update_args)
 
-        items = scan_raw_files(source_root, on_item=on_item)
-        progress.update(task, total=count, completed=count, status=f"{count} files found")
+        items = scan_raw_files(root, exclude_roots=exclude_roots or [], limit=limit, on_item=on_item)
+        progress.update(
+            task,
+            total=len(items),
+            completed=len(items),
+            status=f"{len(items)} camera files found",
+        )
     return items
 
 
-def _capture_times_for_fetch_items_with_progress(items: list[InventoryItem]) -> dict[Path, datetime]:
+def _capture_times_for_items_with_progress(
+    items: list[InventoryItem],
+    *,
+    description: str = "Reading capture dates",
+) -> dict[Path, datetime]:
     if not items:
         return {}
     paths = [item.path for item in items]
@@ -1909,9 +1940,10 @@ def _capture_times_for_fetch_items_with_progress(items: list[InventoryItem]) -> 
         TaskProgressColumn(),
         TextColumn("[bright_white on black]{task.fields[status]}"),
         TimeElapsedColumn(),
+        TimeRemainingColumn(),
         console=console,
     ) as progress:
-        task = progress.add_task("Reading capture dates", total=len(items), status="starting")
+        task = progress.add_task(description, total=len(items), status="starting")
         if not has_media_metadata_reader():
             times = {}
             for index, item in enumerate(items, start=1):
@@ -1919,7 +1951,7 @@ def _capture_times_for_fetch_items_with_progress(items: list[InventoryItem]) -> 
                 progress.update(
                     task,
                     completed=index,
-                    status=f"filesystem date - {_short_progress_path(item.relative_path)}",
+                    status=f"{index}/{len(items)} filesystem dates - {_short_progress_path(item.relative_path)}",
                 )
             return times
 
@@ -1928,12 +1960,88 @@ def _capture_times_for_fetch_items_with_progress(items: list[InventoryItem]) -> 
                 task,
                 completed=completed,
                 total=total,
-                status=f"metadata - {_short_progress_path(relative_by_path.get(path, path))}",
+                status=f"{completed}/{total} metadata dates - {_short_progress_path(relative_by_path.get(path, path))}",
             )
 
         times = capture_times(paths, on_progress=on_progress)
         progress.update(task, completed=len(items), status=f"{len(items)} files reviewed")
         return times
+
+
+def _media_capture_times_for_items_with_progress(
+    items: list[InventoryItem],
+    *,
+    description: str = "Reading media dates",
+) -> dict[Path, datetime]:
+    if not items or not has_media_metadata_reader():
+        return {}
+    paths = [item.path for item in items]
+    relative_by_path = {item.path: item.relative_path for item in items}
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[bold bright_green on black]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        TextColumn("[bright_white on black]{task.fields[status]}"),
+        TimeElapsedColumn(),
+        TimeRemainingColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task(description, total=len(items), status="starting")
+
+        def on_progress(path: Path, completed: int, total: int) -> None:
+            progress.update(
+                task,
+                completed=completed,
+                total=total,
+                status=f"{completed}/{total} metadata dates - {_short_progress_path(relative_by_path.get(path, path))}",
+            )
+
+        times = media_capture_times(paths, on_progress=on_progress)
+        progress.update(task, completed=len(items), status=f"{len(items)} files reviewed")
+        return times
+
+
+def _media_unique_ids_for_items_with_progress(
+    items: list[InventoryItem],
+    *,
+    description: str = "Reading media identifiers",
+) -> dict[Path, str]:
+    if not items or not has_media_metadata_reader():
+        return {}
+    paths = [item.path for item in items]
+    relative_by_path = {item.path: item.relative_path for item in items}
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[bold bright_green on black]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        TextColumn("[bright_white on black]{task.fields[status]}"),
+        TimeElapsedColumn(),
+        TimeRemainingColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task(description, total=len(items), status="starting")
+
+        def on_progress(path: Path, completed: int, total: int) -> None:
+            progress.update(
+                task,
+                completed=completed,
+                total=total,
+                status=f"{completed}/{total} media IDs - {_short_progress_path(relative_by_path.get(path, path))}",
+            )
+
+        unique_ids = media_unique_ids(paths, on_progress=on_progress)
+        progress.update(task, completed=len(items), status=f"{len(items)} files reviewed")
+        return unique_ids
+
+
+def _scan_fetch_items_with_progress(source_root: Path) -> list[InventoryItem]:
+    return _scan_items_with_progress(source_root, description="Finding camera files")
+
+
+def _capture_times_for_fetch_items_with_progress(items: list[InventoryItem]) -> dict[Path, datetime]:
+    return _capture_times_for_items_with_progress(items, description="Reading capture dates")
 
 
 def _build_fetch_plan_with_progress(
@@ -3018,6 +3126,14 @@ def _register_manual_catalogue_store(label: str) -> tuple[Store, Path]:
 
 
 def _run_quick_catalogue(store: Store, root: Path) -> StoreMediaCatalogResult:
+    _print_long_running_progress_note(
+        "Quick Catalogue",
+        [
+            "RAWDOG will scan camera files, read media dates when available, then update catalogue rows.",
+            "The first scan shows a live count because the total is unknown until the folder walk finishes.",
+            "Date/catalogue phases show percent complete once RAWDOG knows how many files it found.",
+        ],
+    )
     items = _scan_catalogue_items(store, root)
     entries = _quick_catalogue_entries(items)
     result = upsert_store_media_catalog(store, entries, full=False)
@@ -3026,11 +3142,19 @@ def _run_quick_catalogue(store: Store, root: Path) -> StoreMediaCatalogResult:
 
 
 def _run_full_catalogue(store: Store, root: Path) -> StoreMediaCatalogResult:
+    _print_long_running_progress_note(
+        "Full Catalogue",
+        [
+            "RAWDOG will scan files, read media dates and IDs, then hash every file with SHA-256.",
+            "SHA-256 is the slow part: RAWDOG must read every byte from the drive.",
+            "Progress shows the current phase, count, percent complete, and current file.",
+        ],
+    )
     items = _scan_catalogue_items(store, root)
     if not has_media_metadata_reader():
         _print_media_metadata_reader_warning("full catalogue media identifiers")
     entries = _quick_catalogue_entries(items)
-    unique_ids = media_unique_ids([entry.store_path for entry in entries])
+    unique_ids = _media_unique_ids_for_items_with_progress(items)
     if entries:
         with Progress(
             SpinnerColumn(),
@@ -3039,11 +3163,12 @@ def _run_full_catalogue(store: Store, root: Path) -> StoreMediaCatalogResult:
             TaskProgressColumn(),
             TextColumn("[bright_white on black]{task.fields[status]}"),
             TimeElapsedColumn(),
+            TimeRemainingColumn(),
             console=console,
         ) as progress:
             task = progress.add_task("Hashing catalogue files", total=len(entries), status="starting")
             full_entries = []
-            for entry in entries:
+            for index, entry in enumerate(entries, start=1):
                 sha = sha256_file(entry.store_path)
                 full_entries.append(
                     StoreMediaCatalogEntry(
@@ -3055,8 +3180,11 @@ def _run_full_catalogue(store: Store, root: Path) -> StoreMediaCatalogResult:
                         media_identifier=unique_ids.get(entry.store_path),
                     )
                 )
-                progress.update(task, status=entry.store_path.name)
-                progress.advance(task)
+                progress.update(
+                    task,
+                    completed=index,
+                    status=f"{index}/{len(entries)} hashing - {_short_progress_path(entry.store_path.name)}",
+                )
     else:
         full_entries = []
     result = upsert_store_media_catalog(store, full_entries, full=True)
@@ -3065,6 +3193,14 @@ def _run_full_catalogue(store: Store, root: Path) -> StoreMediaCatalogResult:
 
 
 def _run_catalogue_status(store: Store, root: Path) -> StoreMediaCatalogStatus:
+    _print_long_running_progress_note(
+        "Catalogue Status",
+        [
+            "RAWDOG will scan current files and compare them with the portable catalogue database.",
+            "This is read-only. It does not hash files, move files, or change your archive.",
+            "The scan shows a live count while RAWDOG walks the folders.",
+        ],
+    )
     items = _scan_catalogue_items(store, root)
     status = store_media_catalog_status(store, items)
     table = _styled_table(title="Catalogue Status")
@@ -3091,24 +3227,40 @@ def _scan_catalogue_items(store: Store, root: Path) -> list[InventoryItem]:
         ensure_existing_directory(scan_root, "catalogue target")
     except SafetyError as exc:
         raise typer.BadParameter(str(exc)) from exc
-    _print_notice(f"Scanning {scan_root}", style=STYLE_ROW_SELECTED)
-    return scan_raw_files(scan_root)
+    return _scan_items_with_progress(scan_root, description=f"Scanning {store.store_kind.value} catalogue")
 
 
 def _quick_catalogue_entries(items: list[InventoryItem]) -> list[StoreMediaCatalogEntry]:
-    paths = [item.path for item in items]
-    media_times = media_capture_times(paths)
+    media_times = _media_capture_times_for_items_with_progress(items)
     entries = []
-    for item in items:
-        media_time = media_times.get(item.path)
-        entries.append(
-            StoreMediaCatalogEntry(
-                store_path=item.path,
-                size_bytes=item.size_bytes,
-                date_created=media_time or _file_created_time(item.path),
-                date_type="media" if media_time else "filesystem",
+    if not items:
+        return entries
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[bold bright_green on black]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        TextColumn("[bright_white on black]{task.fields[status]}"),
+        TimeElapsedColumn(),
+        TimeRemainingColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Preparing catalogue rows", total=len(items), status="starting")
+        for index, item in enumerate(items, start=1):
+            media_time = media_times.get(item.path)
+            entries.append(
+                StoreMediaCatalogEntry(
+                    store_path=item.path,
+                    size_bytes=item.size_bytes,
+                    date_created=media_time or _file_created_time(item.path),
+                    date_type="media" if media_time else "filesystem",
+                )
             )
-        )
+            progress.update(
+                task,
+                completed=index,
+                status=f"{index}/{len(items)} rows - {_short_progress_path(item.relative_path)}",
+            )
     return entries
 
 
@@ -3298,11 +3450,18 @@ def _choose_audit_root(label: str) -> Path:
 
 def _run_hardcore_audit(root: Path, *, hash_check: bool = False) -> None:
     root = root.expanduser().resolve()
-    _print_notice(f"Scanning files under: {root}", style=STYLE_ROW_SELECTED)
-    items = scan_raw_files(root)
+    _print_long_running_progress_note(
+        "Slow Full Audit",
+        [
+            "RAWDOG will scan camera files, read capture dates, then summarize dates and duplicate names.",
+            "If SHA-256 is enabled, RAWDOG only hashes same-size duplicate candidates.",
+            "The first scan shows a live count; date and hash phases show percent complete.",
+        ],
+    )
+    items = _scan_items_with_progress(root, description="Scanning audit files")
     total_bytes = sum(item.size_bytes for item in items)
     extensions = Counter(item.path.suffix.lower() or "[none]" for item in items)
-    item_capture_times = capture_times([item.path for item in items])
+    item_capture_times = _capture_times_for_items_with_progress(items, description="Reading audit capture dates")
     years = Counter(str(item_capture_times[item.path].year) for item in items)
     duplicate_names = _duplicate_name_groups(items)
     duplicate_camera_ids = _camera_identity_groups([item.path for item in items])
@@ -3336,7 +3495,15 @@ def _run_den_organization_report(config: RawdogConfig, root: Path) -> DenOrganiz
         ensure_existing_directory(root, "den")
     except SafetyError as exc:
         raise typer.BadParameter(str(exc)) from exc
-    report = _build_den_organization_report(root)
+    _print_long_running_progress_note(
+        "DEN Organization Report",
+        [
+            "RAWDOG will scan the den and check each file path against expected date-bucket shapes.",
+            "This report is read-only. It does not rename, move, or delete files.",
+            "The scan shows a live count; the path check shows percent complete.",
+        ],
+    )
+    report = _build_den_organization_report(root, show_progress=True)
     by_reason = Counter(finding.reason for finding in report.findings)
 
     table = _styled_table(title="DEN Organization Summary")
@@ -3356,11 +3523,35 @@ def _run_den_organization_report(config: RawdogConfig, root: Path) -> DenOrganiz
     return report
 
 
-def _build_den_organization_report(root: Path) -> DenOrganizationReport:
-    items = scan_raw_files(root)
+def _build_den_organization_report(root: Path, *, show_progress: bool = False) -> DenOrganizationReport:
+    items = (
+        _scan_items_with_progress(root, description="Scanning den organization")
+        if show_progress
+        else scan_raw_files(root)
+    )
     findings: list[DenOrganizationFinding] = []
-    for item in items:
-        findings.extend(_den_organization_findings_for_item(root, item.path, item.relative_path, item.size_bytes))
+    if show_progress and items:
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[bold bright_green on black]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            TextColumn("[bright_white on black]{task.fields[status]}"),
+            TimeElapsedColumn(),
+            TimeRemainingColumn(),
+            console=console,
+        ) as progress:
+            task = progress.add_task("Checking den paths", total=len(items), status="starting")
+            for index, item in enumerate(items, start=1):
+                findings.extend(_den_organization_findings_for_item(root, item.path, item.relative_path, item.size_bytes))
+                progress.update(
+                    task,
+                    completed=index,
+                    status=f"{index}/{len(items)} checked - {_short_progress_path(item.relative_path)}",
+                )
+    else:
+        for item in items:
+            findings.extend(_den_organization_findings_for_item(root, item.path, item.relative_path, item.size_bytes))
     finding_paths = {finding.path for finding in findings}
     return DenOrganizationReport(
         root=root,
@@ -3590,6 +3781,14 @@ def _run_store_reflow_plan(
     if store is None:
         raise typer.BadParameter(f"{store_label} reflow is only allowed inside a registered {store_kind.value}.")
     _print_media_metadata_reader_warning(f"this {store_kind.value} reflow")
+    _print_long_running_progress_note(
+        f"{store_label} Reflow Plan",
+        [
+            f"RAWDOG will build a preview plan inside this {store_kind.value}; it will not move files until commit.",
+            "First it scans files, then reads capture dates, then checks proposed destination paths for conflicts.",
+            "The scan shows a live count. Date and conflict-check phases show percent complete.",
+        ],
+    )
     plan = _build_den_reflow_plan(
         root,
         group_by=group_by,
@@ -3598,6 +3797,7 @@ def _run_store_reflow_plan(
         filename_policy=filename_policy,
         time_shift=time_shift,
         limit=limit,
+        show_progress=True,
     )
     execution_plan = _persist_reflow_execution_plan(config, plan, store_kind=store_kind)
     _print_execution_plan_start(execution_plan)
@@ -3664,14 +3864,24 @@ def _build_den_reflow_plan(
     filename_policy: DestinationFilenamePolicy = DestinationFilenamePolicy.ORIGINAL,
     time_shift: timedelta = timedelta(),
     limit: int | None = None,
+    show_progress: bool = False,
 ) -> DenPlan:
-    items = scan_raw_files(root, limit=limit)
+    items = (
+        _scan_items_with_progress(root, description="Scanning reflow files", limit=limit)
+        if show_progress
+        else scan_raw_files(root, limit=limit)
+    )
     rows: list[DenPlanRow] = []
     time_shift_rows: list[ReflowTimeShiftPlanRow] = []
     planned_destinations: set[Path] = set()
     shift_seconds = int(time_shift.total_seconds())
-    item_capture_times = capture_times([item.path for item in items])
-    for item in items:
+    item_capture_times = (
+        _capture_times_for_items_with_progress(items, description="Reading reflow capture dates")
+        if show_progress
+        else capture_times([item.path for item in items])
+    )
+
+    def build_row(item: InventoryItem) -> None:
         capture = _reflow_capture_time_info(
             item.path,
             time_shift=time_shift,
@@ -3725,6 +3935,29 @@ def _build_den_reflow_plan(
                     basis=capture.basis,
                 )
             )
+
+    if show_progress and items:
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[bold bright_green on black]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            TextColumn("[bright_white on black]{task.fields[status]}"),
+            TimeElapsedColumn(),
+            TimeRemainingColumn(),
+            console=console,
+        ) as progress:
+            task = progress.add_task("Checking reflow destinations", total=len(items), status="starting")
+            for index, item in enumerate(items, start=1):
+                build_row(item)
+                progress.update(
+                    task,
+                    completed=index,
+                    status=f"{index}/{len(items)} planned - {_short_progress_path(item.relative_path)}",
+                )
+    else:
+        for item in items:
+            build_row(item)
     return DenPlan(
         source_root=root,
         destination_root=root,
@@ -3863,18 +4096,25 @@ def _print_hash_duplicate_audit(items, *, limit: int = 20) -> None:
         TextColumn("[progress.description]{task.description}"),
         BarColumn(),
         TaskProgressColumn(),
+        TextColumn("[bright_white on black]{task.fields[status]}"),
         TimeElapsedColumn(),
         TimeRemainingColumn(),
         console=console,
     ) as progress:
-        task = progress.add_task("Hashing same-size files", total=total_candidates)
+        task = progress.add_task("Hashing same-size files", total=total_candidates, status="starting")
+        completed = 0
         for paths in candidates:
             for path in paths:
                 try:
                     digest_groups[sha256_file(path)].append(path)
                 except OSError:
                     _print_error(f"Could not hash: {path}")
-                progress.advance(task)
+                completed += 1
+                progress.update(
+                    task,
+                    completed=completed,
+                    status=f"{completed}/{total_candidates} hashing - {_short_progress_path(path.name)}",
+                )
     duplicate_hashes = {digest: paths for digest, paths in digest_groups.items() if len(paths) > 1}
     if not duplicate_hashes:
         _print_notice("No byte-identical duplicate groups found.", style=STYLE_SAFE)

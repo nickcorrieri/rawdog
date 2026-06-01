@@ -137,8 +137,13 @@ def media_capture_times(
     return captured
 
 
-def media_unique_ids(paths: list[Path] | tuple[Path, ...]) -> dict[Path, str]:
-    tags_by_path = _read_exiftool_tags_for_paths(paths, tags=EXIF_UNIQUE_ID_TAGS)
+def media_unique_ids(
+    paths: list[Path] | tuple[Path, ...],
+    *,
+    on_progress: MetadataProgressCallback | None = None,
+) -> dict[Path, str]:
+    kwargs = {"on_progress": on_progress} if on_progress is not None else {}
+    tags_by_path = _read_exiftool_tags_for_paths(paths, tags=EXIF_UNIQUE_ID_TAGS, **kwargs)
     unique_ids: dict[Path, str] = {}
     for path, tags in tags_by_path.items():
         value = tags.get("ImageUniqueID")

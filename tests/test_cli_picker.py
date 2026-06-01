@@ -544,6 +544,30 @@ def test_den_reflow_plan_can_convert_month_to_day_and_keep_context(tmp_path: Pat
     assert plan.rows[0].status == "plan_copy"
 
 
+def test_den_reflow_plan_progress_mode_builds_same_plan(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "2024" / "Project" / "2024-07" / "IMG_0001.CR3"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"raw")
+    captured_ts = datetime(2024, 7, 15, tzinfo=UTC).timestamp()
+    os.utime(source, (captured_ts, captured_ts))
+    monkeypatch.setattr(
+        cli,
+        "console",
+        Console(file=StringIO(), force_terminal=False, color_system=None, width=100),
+    )
+
+    plan = cli._build_den_reflow_plan(
+        tmp_path,
+        group_by=cli.DateGroupMode.DAY,
+        keep_context=True,
+        drop_context=set(),
+        show_progress=True,
+    )
+
+    assert plan.rows[0].destination_path == tmp_path / "2024" / "Project" / "20240715" / "IMG_0001.CR3"
+    assert plan.rows[0].status == "plan_copy"
+
+
 def test_den_reflow_plan_checks_conflicts_before_moves(tmp_path: Path) -> None:
     source = tmp_path / "2024" / "2024-07" / "IMG_0001.CR3"
     destination = tmp_path / "2024" / "20240715" / "IMG_0001.CR3"
