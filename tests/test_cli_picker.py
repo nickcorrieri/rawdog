@@ -507,6 +507,61 @@ def test_preserve_dates_folder_candidates_skip_pure_date_containers(tmp_path: Pa
     ]
 
 
+def test_parse_number_selection_accepts_commas_and_ranges() -> None:
+    assert cli._parse_number_selection("1,3-5", max_index=6) == {1, 3, 4, 5}
+    assert cli._parse_number_selection("5-3", max_index=6) == {3, 4, 5}
+
+
+def test_parse_number_selection_rejects_invalid_input() -> None:
+    try:
+        cli._parse_number_selection("2,x", max_index=3)
+    except ValueError as exc:
+        assert "Use numbers" in str(exc)
+    else:
+        raise AssertionError("invalid selection should raise")
+
+    try:
+        cli._parse_number_selection("4", max_index=3)
+    except ValueError as exc:
+        assert "out of range" in str(exc)
+    else:
+        raise AssertionError("out-of-range selection should raise")
+
+
+def test_reflow_context_policy_reviews_and_keeps_selected_names(tmp_path: Path, monkeypatch) -> None:
+    real = tmp_path / "Real Project" / "IMG_0001.CR3"
+    real_second = tmp_path / "Real Project" / "IMG_0003.CR3"
+    junk = tmp_path / "Probably Delete" / "IMG_0002.CR3"
+    real.parent.mkdir(parents=True)
+    junk.parent.mkdir(parents=True)
+    real.write_bytes(b"raw")
+    real_second.write_bytes(b"raw")
+    junk.write_bytes(b"raw")
+    monkeypatch.setattr(cli.Prompt, "ask", _answers("y", "2", "c"))
+    monkeypatch.setattr(
+        cli,
+        "console",
+        Console(file=StringIO(), force_terminal=False, color_system=None, width=100),
+    )
+
+    keep_context, drop_context = cli._choose_reflow_context_policy(tmp_path, default_keep=True)
+
+    assert keep_context is True
+    assert drop_context == {"Probably Delete"}
+
+
+def test_reflow_context_policy_can_choose_pure_date_buckets(tmp_path: Path, monkeypatch) -> None:
+    project = tmp_path / "Real Project" / "IMG_0001.CR3"
+    project.parent.mkdir(parents=True)
+    project.write_bytes(b"raw")
+    monkeypatch.setattr(cli.Prompt, "ask", _answers("n"))
+
+    keep_context, drop_context = cli._choose_reflow_context_policy(tmp_path, default_keep=True)
+
+    assert keep_context is False
+    assert drop_context == set()
+
+
 def test_den_organization_report_flags_bad_den_shapes(tmp_path: Path) -> None:
     valid = tmp_path / "2024" / "2024-07" / "IMG_0001.CR3"
     valid_context = tmp_path / "2024" / "Project" / "2024-07" / "IMG_0002.CR3"

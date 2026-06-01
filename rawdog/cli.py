@@ -2648,11 +2648,18 @@ def _preserve_dates_folder_candidates(
     source_root: Path,
     *,
     exclude_roots: list[Path] | None = None,
+    show_progress: bool = False,
+    description: str = "Scanning context folders",
 ) -> list[PreserveDatesFolderCandidate]:
     counts: Counter[str] = Counter()
     examples: dict[str, Path] = {}
     resolved_source = source_root.expanduser().resolve()
-    for item in scan_raw_files(resolved_source, exclude_roots=exclude_roots or []):
+    items = (
+        _scan_items_with_progress(resolved_source, description=description, exclude_roots=exclude_roots or [])
+        if show_progress
+        else scan_raw_files(resolved_source, exclude_roots=exclude_roots or [])
+    )
+    for item in items:
         for part in item.relative_path.parent.parts:
             if (
                 not part
@@ -2704,6 +2711,152 @@ def _is_preserve_dates_container_part(part: str) -> bool:
             ):
                 return True
     return False
+
+
+def _choose_reflow_context_policy(root: Path, *, default_keep: bool) -> tuple[bool, set[str]]:
+    keep_any = _yes_no(
+        "Review and keep any non-date project/context folder names?",
+        default=default_keep,
+        help_items=[
+            HelpItem(
+                "y",
+                "Review context names",
+                "RAWDOG scans the selected store, lists folder names that are not dates/camera wrappers, and lets you choose which names stay in destination paths.",
+                STYLE_SAFE,
+            ),
+            HelpItem(
+                "n",
+                "Pure date buckets",
+                "Ignore all non-date folder names during reflow. Files land under generated date folders such as YYYY/YYYYMMDD or YYYY/YYYY-MM.",
+                STYLE_WARN,
+            ),
+        ],
+    )
+    if not keep_any:
+        return False, set()
+
+    candidates = _preserve_dates_folder_candidates(
+        root,
+        exclude_roots=[],
+        show_progress=True,
+        description="Finding project/context folders",
+    )
+    if not candidates:
+        _print_notice("No non-date project/context folder names found. Reflow will use generated date buckets only.")
+        return False, set()
+
+    selected_names = _choose_reflow_context_names(candidates, default_keep=default_keep)
+    drop_context = {candidate.name for candidate in candidates if candidate.name not in selected_names}
+    if selected_names:
+        _print_notice("Keeping context folder names: " + ", ".join(sorted(selected_names)), style=STYLE_SAFE)
+        if drop_context:
+            _print_notice("Dropping context folder names: " + ", ".join(sorted(drop_context)), style=STYLE_ROW_SELECTED)
+        return True, drop_context
+    _print_notice("No context folder names selected. Reflow will use generated date buckets only.", style=STYLE_ROW_SELECTED)
+    return False, set()
+
+
+def _choose_reflow_context_names(
+    candidates: list[PreserveDatesFolderCandidate],
+    *,
+    default_keep: bool,
+) -> set[str]:
+    selected = {candidate.name for candidate in candidates} if default_keep else set()
+    _print_reflow_context_review(candidates, selected)
+    while True:
+        raw = Prompt.ask(
+            "Folder names to KEEP [a all / n none / numbers toggle / c choose selected / ? help]",
+            default="c",
+            console=console,
+        ).strip()
+        choice = raw.lower()
+        if choice == "?":
+            _print_verbose_help(
+                "Project/Context Folder Review",
+                [
+                    HelpItem("a", "Select all", "Keep every listed folder name as project/context.", STYLE_SAFE),
+                    HelpItem("n", "Select none", "Drop every listed folder name and use pure generated date buckets.", STYLE_WARN),
+                    HelpItem("1,3,5", "Toggle numbers", "Toggle one or more listed folder names by number.", STYLE_ACTION),
+                    HelpItem("2-6", "Toggle range", "Toggle every folder in an inclusive range.", STYLE_ACTION),
+                    HelpItem("r", "Review list", "Print the folder review table again.", STYLE_PATH),
+                    HelpItem("c", "Choose selected", "Continue with the currently selected folder names.", STYLE_ROW_SELECTED),
+                ],
+            )
+            continue
+        if choice in {"c", "choose", "done", ""}:
+            return selected
+        if choice in {"a", "all"}:
+            selected = {candidate.name for candidate in candidates}
+            _print_notice(f"Selected all {len(selected)} folder names.", style=STYLE_SAFE)
+            continue
+        if choice in {"n", "none"}:
+            selected = set()
+            _print_notice("Selected no context folder names.", style=STYLE_ROW_SELECTED)
+            continue
+        if choice in {"r", "review"}:
+            _print_reflow_context_review(candidates, selected)
+            continue
+        try:
+            indexes = _parse_number_selection(choice, max_index=len(candidates))
+        except ValueError as exc:
+            _print_error(str(exc))
+            continue
+        for index in indexes:
+            name = candidates[index - 1].name
+            if name in selected:
+                selected.remove(name)
+            else:
+                selected.add(name)
+        _print_notice(f"Selected {len(selected)} of {len(candidates)} folder names. Type c to continue or r to review.")
+
+
+def _parse_number_selection(raw: str, *, max_index: int) -> set[int]:
+    selected: set[int] = set()
+    for token in raw.replace(" ", "").split(","):
+        if not token:
+            continue
+        if "-" in token:
+            start_raw, end_raw = token.split("-", 1)
+            if not start_raw.isdigit() or not end_raw.isdigit():
+                raise ValueError("Use numbers like 1,3,5 or ranges like 2-6.")
+            start = int(start_raw)
+            end = int(end_raw)
+            if start > end:
+                start, end = end, start
+            selected.update(range(start, end + 1))
+            continue
+        if not token.isdigit():
+            raise ValueError("Use numbers like 1,3,5 or ranges like 2-6.")
+        selected.add(int(token))
+    if not selected:
+        raise ValueError("Choose at least one number, or use a, n, c, or ?.")
+    out_of_range = [index for index in sorted(selected) if index < 1 or index > max_index]
+    if out_of_range:
+        raise ValueError(f"Folder number out of range: {out_of_range[0]}. Choose 1-{max_index}.")
+    return selected
+
+
+def _print_reflow_context_review(candidates: list[PreserveDatesFolderCandidate], selected_names: set[str]) -> None:
+    table = _styled_table(title="Project / Context Folder Review")
+    table.add_column("Keep")
+    table.add_column("#", justify="right")
+    table.add_column("Folder Name")
+    table.add_column("Files", justify="right")
+    table.add_column("Example", overflow="fold")
+    for index, candidate in enumerate(candidates, start=1):
+        keep = "yes" if candidate.name in selected_names else "no"
+        table.add_row(
+            keep,
+            str(index),
+            candidate.name,
+            str(candidate.files),
+            str(candidate.example_path),
+        )
+    console.print(table)
+    _print_notice(
+        "Toggle numbers like 1,3,5 or 2-6. Use a for all, n for none, r to reprint, c to choose selected.",
+        style=STYLE_ROW_SELECTED,
+    )
 
 
 def _valid_date_parts(year: str, month: str, day: str) -> bool:
@@ -3350,9 +3503,7 @@ def _home_den_organization() -> None:
     if not _yes_no("Build an in-place same-DEN rename/move reflow plan?", default=False):
         return
     group_by = _choose_date_grouping(DenLayoutMode.DATE)
-    keep_context = _yes_no("Keep non-date project/context folders while reflowing?", default=True)
-    drop_raw = _optional_prompt("Folder names to drop from context, comma-separated, or Enter for none")
-    drop_context = [part.strip() for part in drop_raw.split(",") if part.strip()] if drop_raw else []
+    keep_context, drop_context = _choose_reflow_context_policy(root, default_keep=True)
     time_shift = _prompt_time_shift()
     dry_run = not _yes_no("Commit same-DEN rename/move plan now? Dry-run is safer.", default=False)
     _run_den_reflow_plan(
@@ -3360,7 +3511,7 @@ def _home_den_organization() -> None:
         root,
         group_by=group_by,
         keep_context=keep_context,
-        drop_context=set(drop_context),
+        drop_context=drop_context,
         filename_policy=config.den_filename_policy,
         time_shift=time_shift,
         dry_run=dry_run,
@@ -3387,9 +3538,7 @@ def _home_yard_reflow() -> None:
     root = _choose_store_path("YARD to reflow", StoreKind.YARD)
     _, config = _load_or_exit()
     group_by = _choose_date_grouping(DenLayoutMode.DATE)
-    keep_context = _yes_no("Keep non-date project/context folders while reflowing?", default=False)
-    drop_raw = _optional_prompt("Folder names to drop from context, comma-separated, or Enter for none")
-    drop_context = [part.strip() for part in drop_raw.split(",") if part.strip()] if drop_raw else []
+    keep_context, drop_context = _choose_reflow_context_policy(root, default_keep=False)
     filename_policy = _prompt_filename_policy(
         "YARD Reflow File Names",
         default=config.yard_filename_policy,
@@ -3401,7 +3550,7 @@ def _home_yard_reflow() -> None:
         root,
         group_by=group_by,
         keep_context=keep_context,
-        drop_context=set(drop_context),
+        drop_context=drop_context,
         filename_policy=filename_policy,
         time_shift=time_shift,
         dry_run=dry_run,
