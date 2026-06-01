@@ -66,14 +66,24 @@ from rawdog.execution import (
     update_execution_plan_row,
     update_execution_plan_time_shift_row,
 )
-from rawdog.filenames import camera_identity_key, destination_path_for_filename_policy, filename_capture_time
-from rawdog.inventory import earliest_raw_capture_time, scan_raw_files
+from rawdog.filenames import (
+    camera_identity_key,
+    destination_path_for_filename_policy,
+    filename_capture_time,
+)
+from rawdog.inventory import InventoryItem, earliest_raw_capture_time, scan_raw_files
 from rawdog.layout import LayoutAnalysis, analyze_source_layout, is_camera_dump_part
 from rawdog.memory import (
     build_destination_memory,
     write_destination_memory,
 )
-from rawdog.metadata import capture_time_fallback, capture_times, has_media_metadata_reader
+from rawdog.metadata import (
+    capture_time_fallback,
+    capture_times,
+    has_media_metadata_reader,
+    media_capture_times,
+    media_unique_ids,
+)
 from rawdog.models import (
     CollisionPolicy,
     ConsolidationWorkflowCreate,
@@ -101,7 +111,11 @@ from rawdog.models import (
     StoreFileStatus,
     StoreKind,
 )
-from rawdog.planner import default_date_only_destination, default_project_destination, plan_append_only_copy
+from rawdog.planner import (
+    default_date_only_destination,
+    default_project_destination,
+    plan_append_only_copy,
+)
 from rawdog.profiles import (
     create_or_update_profile,
     get_last_profile,
@@ -138,6 +152,9 @@ from rawdog.safety import (
 )
 from rawdog.stores import (
     StoreCatalogRebuildResult,
+    StoreMediaCatalogEntry,
+    StoreMediaCatalogResult,
+    StoreMediaCatalogStatus,
     create_or_update_store,
     find_store_for_path,
     get_store_by_name,
@@ -148,6 +165,9 @@ from rawdog.stores import (
     rebuild_store_catalog,
     record_store_file,
     remove_store_registration,
+    store_db_path,
+    store_media_catalog_status,
+    upsert_store_media_catalog,
 )
 from rawdog.verifier import sha256_file, verify_same_bytes
 from rawdog.workflows import (
@@ -198,6 +218,14 @@ RAWDOG_ASCII = r"""
   |      /_____/   U                                               |
   '----------------------------------------------------------------'
 """
+
+
+@dataclass(frozen=True)
+class HelpItem:
+    key: str
+    label: str
+    detail: str
+    style: str = STYLE_SAFE
 
 
 @dataclass(frozen=True)
@@ -363,6 +391,61 @@ def _print_error(text: str) -> None:
     _print_full_row([(text, STYLE_WARN)], style=STYLE_WARN)
 
 
+def _help_separator() -> str:
+    return "-" * min(max(_terminal_width() - 4, 24), 78)
+
+
+def _print_verbose_help(title: str, items: list[HelpItem], *, footer: str | None = None) -> None:
+    body = Text(style=STYLE_TEXT)
+    for item in items:
+        body.append(_help_separator() + "\n", style=STYLE_MUTED)
+        body.append(f"{item.key}  {item.label}\n", style=item.style)
+        body.append(f"{item.detail}\n", style=STYLE_TEXT)
+    body.append(_help_separator(), style=STYLE_MUTED)
+    if footer:
+        body.append(f"\n{footer}", style=STYLE_ROW_SELECTED)
+    console.print(
+        Panel(
+            body,
+            title=f"{title} Help",
+            border_style="bright_yellow",
+            style=STYLE_PANEL,
+            expand=True,
+        )
+    )
+
+
+def _ask_with_help(
+    label: str,
+    *,
+    choices: list[str] | tuple[str, ...] | None = None,
+    default: str | None = None,
+    help_title: str,
+    help_items: list[HelpItem],
+    styled: bool = True,
+) -> str:
+    prompt = _prompt(f"{label} (? for help)") if styled else f"{label} (? for help)"
+    allowed = set(choices or [])
+    while True:
+        raw = Prompt.ask(prompt, default=default, console=console)
+        choice = raw.strip()
+        if choice == "?":
+            _print_verbose_help(help_title, help_items, footer="Press ? on this screen any time to show this help again.")
+            continue
+        if not choices or choice in allowed:
+            return choice
+        _print_error("Choose one of: " + ", ".join(choices) + ". Use ? for help.")
+
+
+def _generic_path_help(label: str) -> list[HelpItem]:
+    return [
+        HelpItem("number", "Choose listed item", f"Select one of the visible {label} options by number.", STYLE_ACTION),
+        HelpItem("bN", "Browse inside item", "Use b plus a number, like b1, to open that listed folder.", STYLE_SAFE),
+        HelpItem("0", "Manual path", "Type 0 when you want to enter or browse a path that is not listed.", STYLE_ROW_SELECTED),
+        HelpItem("/path", "Direct path", "Paste an absolute path, ~/ path, or ./ relative path when supported.", STYLE_PATH),
+    ]
+
+
 def _print_media_metadata_reader_warning(context: str) -> None:
     if has_media_metadata_reader():
         return
@@ -454,9 +537,14 @@ def _choose_path(label: str, *, browse_number_selection: bool = False) -> Path:
         _print_option("0.", "Other / type a path directly")
         _print_notice("Tip: enter b7 to browse option 7, or type a full path directly.")
         prompt = "Choose a folder to browse, or type a path" if browse_number_selection else "Choose a path or type one"
-        selection = Prompt.ask(_prompt(prompt), default="1", console=console).strip()
+        selection = _ask_with_help(
+            prompt,
+            default="1",
+            help_title=label,
+            help_items=_generic_path_help("path"),
+        )
         if selection == "0":
-            return parse_user_path(Prompt.ask(_prompt("Path"), console=console))
+            return parse_user_path(_ask_with_help("Path", help_title="Manual Path", help_items=_generic_path_help("path")))
         if selection.lower().startswith("b") and len(selection) > 1:
             try:
                 browse_index = int(selection[1:])
@@ -497,7 +585,17 @@ def _choose_source_path(label: str) -> Path:
             _print_notice("No RAWDOG yards registered yet.", style=STYLE_ROW_SELECTED)
         _print_option("9.", "Explore common folders / volumes")
         _print_option("0.", "Enter manual path")
-        selection = Prompt.ask(_prompt("Choose existing source folder"), default="9", console=console).strip()
+        selection = _ask_with_help(
+            "Choose existing source folder",
+            default="9",
+            help_title=label,
+            help_items=[
+                HelpItem("1-5", "Registered yard", "Use a known working yard as the source.", STYLE_SAFE),
+                HelpItem("6", "Next yards", "Page through registered yards when more are available.", STYLE_ACTION),
+                HelpItem("9", "Explore", "Browse common folders and mounted volumes.", STYLE_PATH),
+                HelpItem("0", "Manual path", "Type an exact existing source path.", STYLE_ROW_SELECTED),
+            ],
+        )
         if selection == "6" and yards and _has_next_store_page(yards, page):
             page = _next_store_page(yards, page)
             continue
@@ -553,11 +651,17 @@ def _choose_den_destination_path(label: str) -> Path:
         _print_option("2.", "Pick a registered den")
         _print_option("3.", "Pick a volume / drive / path")
         _print_option("0.", "Enter manual path")
-        selection = Prompt.ask(
-            _prompt("Choose den destination"),
+        selection = _ask_with_help(
+            "Choose den destination",
             default="1" if default_den else "2",
-            console=console,
-        ).strip()
+            help_title=label,
+            help_items=[
+                HelpItem("1", "Default/primary den", "Use the configured archive root or primary registered den.", STYLE_SAFE),
+                HelpItem("2", "Registered den", "Pick from RAWDOG den registrations.", STYLE_ACTION),
+                HelpItem("3", "Browse path", "Browse mounted volumes or folders and choose/create a den destination.", STYLE_PATH),
+                HelpItem("0", "Manual path", "Type an exact destination path.", STYLE_ROW_SELECTED),
+            ],
+        )
         if selection == "1":
             if not default_den:
                 console.print("[bold yellow]No default den configured.[/]")
@@ -591,7 +695,12 @@ def _choose_standard_root(label: str) -> Path:
         for index, (name, path) in enumerate(choices, start=1):
             _print_path_option(str(index), name, path)
         _print_option("0.", "Enter manual path")
-        selection = Prompt.ask(_prompt("Choose starting folder"), default="1", console=console).strip()
+        selection = _ask_with_help(
+            "Choose starting folder",
+            default="1",
+            help_title=label,
+            help_items=_generic_path_help("starting folder"),
+        )
         if selection == "0":
             path = _manual_existing_directory("Starting path")
             if path:
@@ -650,7 +759,18 @@ def _browse_folder(
         _print_option("8", "Parent folder")
         _print_option("9", confirm_label)
         _print_option("0", "Manual path")
-        selection = Prompt.ask(_prompt("Choose folder (Ctrl-C to exit)"), default="9", console=console).strip()
+        selection = _ask_with_help(
+            "Choose folder (Ctrl-C to exit)",
+            default="9",
+            help_title="Folder Browser",
+            help_items=[
+                HelpItem("1-6", "Open folder", "Enter a visible folder number to browse into it.", STYLE_SAFE),
+                HelpItem("7", "More folders", "Page through additional folders when this option is visible.", STYLE_ACTION),
+                HelpItem("8 / ..", "Parent", "Move up to the parent folder.", STYLE_MUTED),
+                HelpItem("9 / .", "Use current folder", f"Select the current folder for: {confirm_label}.", STYLE_ROW_SELECTED),
+                HelpItem("0", "Manual path", "Type or browse an exact path instead of using the listed folders.", STYLE_PATH),
+            ],
+        )
         if selection in {".", "9"}:
             return current
         if selection == "7" and len(all_folders) > max_children:
@@ -672,7 +792,13 @@ def _browse_folder(
                 if path:
                     return path
                 continue
-            current = parse_user_path(Prompt.ask(_prompt("Path"), console=console)).expanduser().resolve()
+            current = parse_user_path(
+                _ask_with_help(
+                    "Path",
+                    help_title="Manual Path",
+                    help_items=_generic_path_help("path"),
+                )
+            ).expanduser().resolve()
             folder_page = 0
             continue
         if selection.startswith(("/", "~", ".")):
@@ -720,7 +846,20 @@ def _browse_den_destination(start: Path, dens: list) -> Path:
         _print_option("8", "Parent folder")
         _print_option("9", "Create / use DEN here")
         _print_option("0", "Manual path")
-        selection = Prompt.ask(_prompt("Choose destination folder (Ctrl-C to exit)"), default="9", console=console).strip()
+        selection = _ask_with_help(
+            "Choose destination folder (Ctrl-C to exit)",
+            default="9",
+            help_title="Destination Browser",
+            help_items=[
+                HelpItem("D1-D5", "Known den", "Choose a registered den shown in the current path.", STYLE_SAFE),
+                HelpItem("1-5", "Open folder", "Browse into a visible child folder.", STYLE_PATH),
+                HelpItem("6", "More folders", "Page through additional child folders when visible.", STYLE_ACTION),
+                HelpItem("7", "Registered den list", "Open a selector for known dens under this path.", STYLE_SAFE),
+                HelpItem("8", "Parent", "Move up to the parent folder.", STYLE_MUTED),
+                HelpItem("9", "Create/use here", "Use the current folder as the den destination.", STYLE_ROW_SELECTED),
+                HelpItem("0", "Manual path", "Type an exact destination path.", STYLE_PATH),
+            ],
+        )
         if selection.lower().startswith("d") and len(selection) > 1:
             try:
                 den_index = int(selection[1:])
@@ -909,7 +1048,16 @@ def _pick_registered_store(stores: list[Store], noun: str) -> Path | None:
         if _has_next_store_page(stores, page):
             _print_option("6.", f"Next {noun}s")
         _print_option("0.", "Back")
-        selection = Prompt.ask(_prompt(f"Choose RAWDOG {noun}"), default="1", console=console).strip()
+        selection = _ask_with_help(
+            f"Choose RAWDOG {noun}",
+            default="1",
+            help_title=f"Registered {noun.title()}",
+            help_items=[
+                HelpItem("1-5", f"Choose {noun}", f"Select one visible registered RAWDOG {noun}.", STYLE_SAFE),
+                HelpItem("6", "Next page", "Page through additional registered stores when visible.", STYLE_ACTION),
+                HelpItem("0", "Back", "Return without choosing a registered store.", STYLE_MUTED),
+            ],
+        )
         if selection == "0":
             return None
         if selection == "6" and _has_next_store_page(stores, page):
@@ -928,7 +1076,9 @@ def _pick_registered_store(stores: list[Store], noun: str) -> Path | None:
 
 
 def _manual_existing_directory(label: str) -> Path | None:
-    path = parse_user_path(Prompt.ask(_prompt(label), console=console)).expanduser().resolve()
+    path = parse_user_path(
+        _ask_with_help(label, help_title="Manual Existing Path", help_items=_generic_path_help("existing folder"))
+    ).expanduser().resolve()
     return path if _is_existing_directory(path) else None
 
 
@@ -940,7 +1090,14 @@ def _is_existing_directory(path: Path) -> bool:
 
 
 def _manual_destination_path(label: str, initial: str | None = None) -> Path | None:
-    raw = initial if initial is not None else Prompt.ask(_prompt(label), console=console)
+    raw = initial if initial is not None else _ask_with_help(
+        label,
+        help_title="Manual Destination",
+        help_items=[
+            HelpItem("/path", "Destination path", "Type a destination folder path. Parent folder must already exist.", STYLE_PATH),
+            HelpItem("new folder", "Create leaf folder", "If only the final folder is missing, RAWDOG asks before creating it.", STYLE_SAFE),
+        ],
+    )
     return _confirm_destination_path(parse_user_path(raw).expanduser().resolve())
 
 
@@ -1094,7 +1251,17 @@ def _choose_store_path(label: str, store_kind: StoreKind) -> Path:
             _print_option("6.", f"Next {noun}s")
         _print_option("0.", "Other / browse common paths")
         _print_notice("Tip: enter b1 to browse inside an established store.")
-        selection = Prompt.ask(_prompt("Choose store, browse, or type a path"), default="1", console=console).strip()
+        selection = _ask_with_help(
+            "Choose store, browse, or type a path",
+            default="1",
+            help_title=label,
+            help_items=[
+                HelpItem("1-5", f"Known {noun}", f"Use a registered RAWDOG {noun}.", STYLE_SAFE),
+                HelpItem("6", "Next page", "Page through additional stores when visible.", STYLE_ACTION),
+                HelpItem("bN", "Browse inside store", "Use b plus a number, like b1, to browse inside that store.", STYLE_PATH),
+                HelpItem("0", "Other path", "Browse common paths or type a path directly.", STYLE_ROW_SELECTED),
+            ],
+        )
         if selection == "0":
             return _choose_path(label, browse_number_selection=True)
         if selection == "6" and _has_next_store_page(stores, page):
@@ -1135,23 +1302,48 @@ def _choose_project_root(label: str, folder_name: str) -> Path:
         _print_option("3.", "Use this root directly")
         _print_option("4.", "Enter exact path")
         _print_option("0.", "Pick a different base")
-        choice = Prompt.ask(
+        choice = _ask_with_help(
             "Choose folder action (Ctrl-C to exit)",
             choices=["0", "1", "2", "3", "4"],
             default="2",
-            console=console,
+            help_title=label,
+            help_items=[
+                HelpItem("1", "Search under base", "Look for an existing folder under the selected base path.", STYLE_PATH),
+                HelpItem("2", f"Create {folder_name}", "Create or reuse the standard RAWDOG folder under the base.", STYLE_SAFE),
+                HelpItem("3", "Use base directly", "Use the selected base itself as the library root.", STYLE_WARN),
+                HelpItem("4", "Exact path", "Type the exact desired path.", STYLE_ROW_SELECTED),
+                HelpItem("0", "Different base", "Return to the base picker.", STYLE_MUTED),
+            ],
+            styled=False,
         )
         if choice == "0":
             base = _choose_path(f"{label} base location")
             continue
         if choice == "1":
-            found = _search_folders(base, Prompt.ask("Folder name search", console=console).strip())
+            query = _ask_with_help(
+                "Folder name search",
+                help_title="Folder Search",
+                help_items=[
+                    HelpItem("text", "Search text", "Type part of the folder name you want to find under the selected base.", STYLE_SAFE),
+                ],
+                styled=False,
+            )
+            found = _search_folders(base, query.strip())
             if not found:
                 _print_notice("No matching folders found.", style=STYLE_ROW_SELECTED)
                 continue
             for index, path in enumerate(found, start=1):
                 _print_path_option(str(index), path.name, path)
-            picked = Prompt.ask("Choose folder", default="1", console=console).strip()
+            picked = _ask_with_help(
+                "Choose folder",
+                choices=[str(index) for index in range(1, len(found) + 1)],
+                default="1",
+                help_title="Folder Search Results",
+                help_items=[
+                    HelpItem("number", "Use result", "Choose one of the listed matching folders by number.", STYLE_SAFE),
+                ],
+                styled=False,
+            )
             try:
                 return found[int(picked) - 1]
             except (ValueError, IndexError):
@@ -1170,7 +1362,9 @@ def _choose_project_root(label: str, folder_name: str) -> Path:
             ):
                 return base
             continue
-        return parse_user_path(Prompt.ask("Exact path", console=console))
+        return parse_user_path(
+            _ask_with_help("Exact path", help_title="Exact Path", help_items=_generic_path_help("path"), styled=False)
+        )
 
 
 def _search_folders(base: Path, query: str) -> list[Path]:
@@ -1356,8 +1550,9 @@ def _show_home_menu() -> None:
         table.add_column("Key", style=STYLE_ACTION, justify="right")
         table.add_column("Workflow", style=STYLE_SAFE)
         table.add_column("Action", style=STYLE_PATH)
+        table.add_row("F", "Fetch", "Go get files into a yard first, then catalogue/audit")
         table.add_row("D", "Den", "Copy, move, or re-organize archive files")
-        table.add_row("Y", "Yard", "Copy, move, or re-organize working files")
+        table.add_row("Y", "Yard", "Working yard maintenance and reflow")
         table.add_row("S", "Sniff / audit", "Inspect, score, rebuild catalogs, or run deeper audits")
         table.add_row("P", "Plans", "View, inspect, run, resume, or prune plans")
         table.add_row("W", "Work queue", "Build or preview longer safe queued jobs")
@@ -1378,7 +1573,7 @@ def _show_home_menu() -> None:
         if not _is_initialized():
             _print_init_guidance()
         _print_latest_plan_hint()
-        choice = _ask_home_choice(default="m" if not _is_initialized() else "y")
+        choice = _ask_home_choice(default="m" if not _is_initialized() else "f")
         if choice == "q":
             _print_notice("Goodbye.", style=STYLE_SAFE)
             return
@@ -1390,19 +1585,43 @@ def _show_home_menu() -> None:
             _print_error(f"Safety stop: {exc}")
         except KeyboardInterrupt:
             _print_notice("Cancelled.", style=STYLE_ROW_SELECTED)
-        Prompt.ask(
-            _prompt("Press Enter to return to RAWDOG"),
-            console=console,
+        _ask_with_help(
+            "Press Enter to return to RAWDOG",
+            default="",
+            help_title="Return To Menu",
+            help_items=[
+                HelpItem("Enter", "Return", "Go back to the main RAWDOG workflow menu.", STYLE_SAFE),
+                HelpItem("?", "Help", "Show this explanation again before returning.", STYLE_ACTION),
+            ],
         )
 
 
 def _ask_home_choice(default: str) -> str:
     while True:
-        choice = Prompt.ask(_prompt("CHOOSE A WORKFLOW"), default=default, console=console)
+        choice = _ask_with_help(
+            "CHOOSE A WORKFLOW",
+            default=default,
+            help_title="Choose A Workflow",
+            help_items=_home_help_items(),
+        )
         normalized = _normalize_home_choice(choice)
         if normalized:
             return normalized
-        _print_error("Choose one of: D, Y, S, P, W, M, H, Q.")
+        _print_error("Choose one of: F, D, Y, S, P, W, M, H, Q.")
+
+
+def _home_help_items() -> list[HelpItem]:
+    return [
+        HelpItem("F", "Fetch", "Copy/import into a yard first, then run catalogue/audit work after execution.", STYLE_SAFE),
+        HelpItem("D", "Den", "Archive-side workflows: copy into a den, same-drive move into a den, or reorganize an existing den.", STYLE_ACTION),
+        HelpItem("Y", "Yard", "Working-side yard maintenance, same-drive move, and reflow workflows.", STYLE_SAFE),
+        HelpItem("S", "Sniff / Audit", "Read-only inspection, scoring, catalog rebuilds, slow audits, and den/yard organization reports.", STYLE_PATH),
+        HelpItem("P", "Plans", "Review persisted operation plans, inspect rows, run, resume, prune, or resolve review work.", STYLE_ROW_SELECTED),
+        HelpItem("W", "Work Queue", "Build longer safe queues from sniff, score, and den steps before committing work.", STYLE_MUTED),
+        HelpItem("M", "Manage", "Initial setup, store registration, store lists, forget registrations, and filename defaults.", STYLE_SAFE),
+        HelpItem("H", "Help", "Show copy-paste command examples for common RAWDOG workflows.", STYLE_ACTION),
+        HelpItem("Q", "Quit", "Exit the interactive RAWDOG menu without changing files.", STYLE_WARN),
+    ]
 
 
 def _normalize_home_choice(choice: str) -> str | None:
@@ -1411,6 +1630,10 @@ def _normalize_home_choice(choice: str) -> str | None:
         "d": "d",
         "den": "d",
         "archive": "d",
+        "f": "f",
+        "fetch": "f",
+        "import": "f",
+        "ingest": "f",
         "y": "y",
         "yard": "y",
         "working": "y",
@@ -1460,20 +1683,63 @@ def _print_latest_plan_hint() -> None:
 
 
 def _optional_prompt(label: str) -> str | None:
-    value = Prompt.ask(label, default="", console=console).strip()
-    return value or None
+    while True:
+        value = Prompt.ask(f"{label} (? for help)", default="", console=console).strip()
+        if value == "?":
+            _print_verbose_help(
+                label,
+                [
+                    HelpItem("Enter", "Skip", "Leave this value blank and keep the default or no-label behavior.", STYLE_ACTION),
+                    HelpItem("text", "Provide value", "Type the project name, folder list, or label requested by this prompt.", STYLE_SAFE),
+                ],
+            )
+            continue
+        return value or None
 
 
-def _yes_no(label: str, default: bool = False) -> bool:
+def _yes_no(label: str, default: bool = False, *, help_items: list[HelpItem] | None = None) -> bool:
     suffix = "[Y/n]" if default else "[y/N]"
     while True:
-        raw = Prompt.ask(f"{label} {suffix}", default="y" if default else "n", console=console)
+        raw = Prompt.ask(f"{label} {suffix} (? for help)", default="y" if default else "n", console=console)
         answer = raw.strip().lower()
+        if answer == "?":
+            _print_verbose_help(
+                label,
+                help_items
+                or [
+                    HelpItem("y", "Yes", "Proceed with this action or enable this option.", STYLE_SAFE),
+                    HelpItem("n", "No", "Skip this action or leave this option disabled.", STYLE_WARN),
+                ],
+            )
+            continue
         if answer in {"y", "yes"}:
             return True
         if answer in {"n", "no"}:
             return False
         console.print("[bold red]Please answer y or n.[/]")
+
+
+def _confirm_fetch_preview_plan(*, dry_run: bool, naming_was_detected: bool) -> bool:
+    if not dry_run or not naming_was_detected or not sys.stdin.isatty():
+        return True
+    return _yes_no(
+        "Proceed with building this import preview plan?",
+        default=True,
+        help_items=[
+            HelpItem(
+                "y",
+                "Build preview",
+                "Scan capture dates and write a paused execution plan. No files are copied yet.",
+                STYLE_SAFE,
+            ),
+            HelpItem(
+                "n",
+                "Cancel",
+                "Stop before capture-date planning or writing the preview plan.",
+                STYLE_WARN,
+            ),
+        ],
+    )
 
 
 def _parse_cli_date(value: str) -> date:
@@ -1537,6 +1803,8 @@ def _run_home_choice(choice: str) -> None:
     normalized = _normalize_home_choice(choice) or choice
     if normalized == "d":
         _home_den_workflow()
+    elif normalized == "f":
+        _home_fetch_workflow()
     elif normalized == "y":
         _home_yard_workflow()
     elif normalized == "s":
@@ -1551,17 +1819,50 @@ def _run_home_choice(choice: str) -> None:
         _show_command_examples()
 
 
+def _home_fetch_workflow() -> None:
+    _print_section_row("Fetch")
+    _print_notice(
+        "Fast fetch copies first using source folders and original names. Quick catalogue runs after execution.",
+        style=STYLE_ROW_SELECTED,
+    )
+    if not _yes_no("Use fast fetch-first mode?", default=True):
+        _home_yard_import(DenTransferAction.COPY)
+        return
+    source = _choose_source_path("Fetch source")
+    destination = _choose_store_path("Fetch destination", StoreKind.YARD)
+    fetch(
+        source=source,
+        destination=destination,
+        profile=None,
+        project_name=None,
+        profile_name=None,
+        naming=NamingConvention.KEEP_EXISTING,
+        filename_policy=DestinationFilenamePolicy.ORIGINAL,
+        collision_policy=None,
+        verify_after_copy=None,
+        detect_sessions=False,
+        action=DenTransferAction.COPY,
+        dry_run=True,
+    )
+
+
 def _home_den_workflow() -> None:
     _print_section_row("Den")
     _print_option("1.", "Copy into den")
     _print_option("2.", "Move into den")
     _print_option("3.", "Re-organize existing den")
     _print_option("0.", "Back")
-    choice = Prompt.ask(
-        _prompt("Choose den action"),
+    choice = _ask_with_help(
+        "Choose den action",
         choices=["0", "1", "2", "3", "copy", "move", "reorganize", "re-organize"],
         default="1",
-        console=console,
+        help_title="Den",
+        help_items=[
+            HelpItem("1 / copy", "Copy into den", "Archive files into the den while leaving source files in place.", STYLE_SAFE),
+            HelpItem("2 / move", "Move into den", "Same-drive consolidation using rename moves. Successful rows leave the source.", STYLE_WARN),
+            HelpItem("3 / re-organize", "Re-organize den", "Build an in-place same-den reflow plan after checking conflicts first.", STYLE_ACTION),
+            HelpItem("0", "Back", "Return to the top-level RAWDOG workflow menu.", STYLE_MUTED),
+        ],
     )
     if choice == "0":
         return
@@ -1580,11 +1881,17 @@ def _home_yard_workflow() -> None:
     _print_option("2.", "Move into yard")
     _print_option("3.", "Re-organize existing yard")
     _print_option("0.", "Back")
-    choice = Prompt.ask(
-        _prompt("Choose yard action"),
+    choice = _ask_with_help(
+        "Choose yard action",
         choices=["0", "1", "2", "3", "copy", "move", "reorganize", "re-organize"],
         default="1",
-        console=console,
+        help_title="Yard",
+        help_items=[
+            HelpItem("1 / copy", "Copy/import into yard", "Bring card or folder media into a working yard while keeping source files.", STYLE_SAFE),
+            HelpItem("2 / move", "Move into yard", "Same-drive cleanup into a yard. Successful rows leave the source.", STYLE_WARN),
+            HelpItem("3 / re-organize", "Re-organize yard", "Build an in-place yard reflow plan for date buckets and rollover-safe names.", STYLE_ACTION),
+            HelpItem("0", "Back", "Return to the top-level RAWDOG workflow menu.", STYLE_MUTED),
+        ],
     )
     if choice == "0":
         return
@@ -1598,11 +1905,16 @@ def _home_yard_workflow() -> None:
 
 
 def _home_init() -> None:
-    mode_choice = Prompt.ask(
+    mode_choice = _ask_with_help(
         "How do you organize your shoots?",
         choices=["date", "project"],
         default="project",
-        console=console,
+        help_title="Initial Setup",
+        help_items=[
+            HelpItem("project", "Project mode", "Default project-oriented folders like YYYY/YYYYMMDD_PROJECT.", STYLE_SAFE),
+            HelpItem("date", "Date mode", "Default date-oriented folders like YYYY/YYYY-MM.", STYLE_ACTION),
+        ],
+        styled=False,
     )
     working_root = (
         _choose_project_root("Default working library", "RAWDOG_YARD")
@@ -1652,15 +1964,28 @@ def _home_yard_import(action: DenTransferAction = DenTransferAction.COPY) -> Non
             ensure_same_filesystem(source, destination)
         except SafetyError as exc:
             raise typer.BadParameter(f"Yard move is same-drive only: {exc}. Use yard copy instead.") from exc
-    project_name = _optional_prompt("Project name, or Enter for date/layout detection")
-    detect_dates = _yes_no("Detect date layout from source folders/media?", default=True)
+    project_name = _optional_prompt("Project name, or Enter to use the layout choices below")
+    detect_dates = _yes_no(
+        "Allow RAWDOG to recommend date folders for this import?",
+        default=True,
+        help_items=[
+            HelpItem("y", "Allow date folders", "RAWDOG may recommend capture-date folders for loose camera-card files. Media capture dates still win over filesystem dates.", STYLE_SAFE),
+            HelpItem("n", "Preserve source folders", "Do not create generated date/project folders for this import. Keep the source folder shape under the yard.", STYLE_WARN),
+        ],
+    )
     group_by_date = (
-        _yes_no("Group camera-dump files by capture date?", default=True)
+        _yes_no(
+            "When this looks like a camera card, put files in capture-date folders?",
+            default=True,
+            help_items=[
+                HelpItem("y", "Create date folders", "Use media capture dates to place loose camera files into folders such as 2026/2026-05.", STYLE_SAFE),
+                HelpItem("n", "Keep card folders", "Keep folders such as DCIM/100CANON instead of flattening into generated date buckets.", STYLE_WARN),
+            ],
+        )
         if detect_dates
         else False
     )
     naming = None if detect_dates and group_by_date else NamingConvention.KEEP_EXISTING
-    detect_sessions = _yes_no("Detect sessions by time gaps?")
     fetch(
         source=source,
         destination=destination,
@@ -1670,24 +1995,10 @@ def _home_yard_import(action: DenTransferAction = DenTransferAction.COPY) -> Non
         naming=naming,
         collision_policy=None,
         verify_after_copy=None,
-        detect_sessions=detect_sessions,
+        detect_sessions=False,
         action=action,
         dry_run=True,
     )
-    if _yes_no(f"Commit this {action.value.upper()} import now?"):
-        fetch(
-            source=source,
-            destination=destination,
-            profile=None,
-            project_name=project_name,
-            profile_name=None,
-            naming=naming,
-            collision_policy=None,
-            verify_after_copy=None,
-            detect_sessions=detect_sessions,
-            action=action,
-            dry_run=False,
-        )
 
 
 def _print_yard_move_guidance() -> None:
@@ -1907,11 +2218,19 @@ def _choose_den_layout(default_layout: str) -> DenLayoutMode:
     default_choice = next((key for key, layout in options if layout.value == default_layout), "2")
     _print_den_layout_guidance(options)
     while True:
-        choice = Prompt.ask(
+        choice = _ask_with_help(
             "Choose layout",
             choices=[key for key, _ in options] + [layout.value for _, layout in options],
             default=default_choice,
-            console=console,
+            help_title="DEN Layout Options",
+            help_items=[
+                HelpItem("1 / preserve", "Preserve", "Mirror source folders exactly. No generated date grouping.", STYLE_SAFE),
+                HelpItem("2 / preserve-dates", "Preserve dates", "Keep meaningful folders, normalize date-like folders, and route camera-dump rows by capture date.", STYLE_ACTION),
+                HelpItem("3 / date", "Date", "Ignore source folders and group every file by capture date.", STYLE_WARN),
+                HelpItem("4 / project", "Project", "Create one dated project/session folder from the earliest capture date.", STYLE_PATH),
+                HelpItem("5 / project-dates", "Project dates", "Create project/context plus generated capture-date buckets.", STYLE_ROW_SELECTED),
+            ],
+            styled=False,
         )
         if choice in by_key:
             return by_key[choice]
@@ -1943,11 +2262,16 @@ def _choose_date_grouping(layout: DenLayoutMode) -> DateGroupMode:
         table.add_row("1", "month", "2026/2026-01")
         table.add_row("2", "day", "2026/20260115")
     console.print(table)
-    choice = Prompt.ask(
+    choice = _ask_with_help(
         "Group generated date folders by",
         choices=["1", "2", "month", "day"],
         default="1",
-        console=console,
+        help_title="Date Grouping",
+        help_items=[
+            HelpItem("1 / month", "Month buckets", "Group by YYYY/YYYY-MM. Fewer folders, easier scanning.", STYLE_SAFE),
+            HelpItem("2 / day", "Day buckets", "Group by YYYY/YYYYMMDD. More precise, useful for dense shoots.", STYLE_ACTION),
+        ],
+        styled=False,
     )
     return DateGroupMode.DAY if choice in {"2", "day"} else DateGroupMode.MONTH
 
@@ -1978,14 +2302,19 @@ def _choose_preserve_dates_drop_parts(source_root: Path, exclude_roots: list[Pat
             example = candidate.example_path.relative_to(source_root.expanduser().resolve())
         except ValueError:
             example = candidate.example_path
-        choice = Prompt.ask(
+        choice = _ask_with_help(
             _prompt(
                 f"Keep '{candidate.name}' as project/context? "
                 f"({candidate.files} files; example: {example})"
             ),
             choices=["k", "keep", "n", "no"],
             default="k",
-            console=console,
+            help_title="Project Folder Review",
+            help_items=[
+                HelpItem("k / keep", "Keep as context", "Preserve this folder name in the destination path as project/context.", STYLE_SAFE),
+                HelpItem("n / no", "Drop as junk wrapper", "Do not preserve this folder name; use generated date organization instead.", STYLE_WARN),
+            ],
+            styled=False,
         ).strip().lower()
         if choice in {"n", "no"}:
             drop_parts.add(candidate.name)
@@ -2162,8 +2491,26 @@ def _choose_project_date_scope(
     if not _yes_no("Scope this project plan to a date range?", default=False):
         return None, None
     while True:
-        start_raw = Prompt.ask("Start date YYYY-MM-DD", default=dates[0].isoformat(), console=console)
-        end_raw = Prompt.ask("End date YYYY-MM-DD", default=dates[-1].isoformat(), console=console)
+        start_raw = _ask_with_help(
+            "Start date YYYY-MM-DD",
+            default=dates[0].isoformat(),
+            help_title="Project Date Range Start",
+            help_items=[
+                HelpItem("YYYY-MM-DD", "Start date", "Only include files captured on or after this date.", STYLE_SAFE),
+                HelpItem("default", "Earliest date", f"Use {dates[0].isoformat()}, the earliest detected capture date.", STYLE_ACTION),
+            ],
+            styled=False,
+        )
+        end_raw = _ask_with_help(
+            "End date YYYY-MM-DD",
+            default=dates[-1].isoformat(),
+            help_title="Project Date Range End",
+            help_items=[
+                HelpItem("YYYY-MM-DD", "End date", "Only include files captured on or before this date.", STYLE_SAFE),
+                HelpItem("default", "Latest date", f"Use {dates[-1].isoformat()}, the latest detected capture date.", STYLE_ACTION),
+            ],
+            styled=False,
+        )
         try:
             start = _parse_cli_date(start_raw)
             end = _parse_cli_date(end_raw)
@@ -2261,16 +2608,18 @@ def _print_den_guidance() -> None:
 
 def _home_inspect() -> None:
     _print_section_row("Audit / Inspect")
-    _print_option("1.", "Sniff a folder, yard, or den")
-    _print_option("2.", "Score a folder for consolidation readiness")
-    _print_option("3.", "Rebuild a den catalog from files on disk")
-    _print_option("4.", "Rebuild a yard catalog from files on disk")
-    _print_option("5.", "Slow full audit: inventory, dates, duplicates, optional hashes")
-    _print_option("6.", "DEN organization report / date-bucket reflow plan")
-    _print_option("7.", "YARD date-bucket / filename reflow plan")
+    _print_option("1.", "Quick catalogue: names, sizes, dates, date source")
+    _print_option("2.", "Full catalogue: quick fields plus SHA-256 and media identifier")
+    _print_option("3.", "Status report: audited, quick catalogued, full catalogued")
+    _print_option("4.", "Sniff a folder, yard, or den")
+    _print_option("5.", "Score a folder for consolidation readiness")
+    _print_option("6.", "Slow full audit: inventory, dates, duplicates, optional hashes")
+    _print_option("7.", "DEN organization report / date-bucket reflow plan")
+    _print_option("8.", "YARD date-bucket / filename reflow plan")
+    _print_option("9.", "Rebuild a den/yard catalog from files on disk")
     _print_option("0.", "Back")
-    action = Prompt.ask(
-        _prompt("Choose audit action"),
+    action = _ask_with_help(
+        "Choose audit action",
         choices=[
             "0",
             "1",
@@ -2280,13 +2629,22 @@ def _home_inspect() -> None:
             "5",
             "6",
             "7",
+            "8",
+            "9",
+            "quick",
+            "quick-catalogue",
+            "quick-catalog",
+            "full",
+            "full-catalogue",
+            "full-catalog",
+            "status",
+            "status-report",
             "sniff",
             "score",
             "rebuild",
             "rebuild-den",
             "rebuild-yard",
             "slow",
-            "full",
             "hardcore",
             "den-org",
             "den-organization",
@@ -2294,30 +2652,295 @@ def _home_inspect() -> None:
             "yard-reflow",
         ],
         default="1",
-        console=console,
+        help_title="Audit / Inspect",
+        help_items=[
+            HelpItem("1 / quick", "Quick catalogue", "Save file name, size, created date, and date source.", STYLE_SAFE),
+            HelpItem("2 / full", "Full catalogue", "Save quick fields plus SHA-256 and media unique identifier when available.", STYLE_WARN),
+            HelpItem("3 / status", "Status report", "Count audited, quick catalogued, and full catalogued files.", STYLE_ACTION),
+            HelpItem("4 / sniff", "Sniff", "Fast read-only inventory summary for a folder, yard, or den.", STYLE_SAFE),
+            HelpItem("5 / score", "Score", "Read-only consolidation readiness check: duplicates, year spread, and risk notes.", STYLE_ACTION),
+            HelpItem("6 / slow", "Slow full audit", "Deeper inventory, capture years, duplicate filenames, and optional SHA-256 duplicate grouping.", STYLE_PATH),
+            HelpItem("7 / den-org", "DEN organization", "Report double-year paths, misplaced files, and optionally build a same-den reflow plan.", STYLE_ROW_SELECTED),
+            HelpItem("8 / yard-reflow", "YARD reflow", "Build a same-yard date bucket and filename cleanup plan.", STYLE_ROW_SELECTED),
+            HelpItem("9 / rebuild", "Rebuild catalog", "Re-scan a den or yard and rebuild its portable audit catalog.", STYLE_WARN),
+            HelpItem("0", "Back", "Return to the main menu.", STYLE_MUTED),
+        ],
     )
     if action == "0":
         return
-    if action in {"3", "rebuild", "rebuild-den"}:
-        _home_rebuild_store_catalog(StoreKind.DEN)
+    if action in {"1", "quick", "quick-catalogue", "quick-catalog"}:
+        store, root = _choose_catalogue_target("Quick catalogue target")
+        _run_quick_catalogue(store, root)
         return
-    if action in {"4", "rebuild-yard"}:
-        _home_rebuild_store_catalog(StoreKind.YARD)
+    if action in {"2", "full", "full-catalogue", "full-catalog"}:
+        store, root = _choose_catalogue_target("Full catalogue target")
+        _run_full_catalogue(store, root)
         return
-    if action in {"5", "slow", "full", "hardcore"}:
+    if action in {"3", "status", "status-report"}:
+        store, root = _choose_catalogue_target("Catalogue status target")
+        _run_catalogue_status(store, root)
+        return
+    if action in {"9", "rebuild", "rebuild-den", "rebuild-yard"}:
+        store, _ = _choose_catalogue_target("Store catalog to rebuild", allow_manual_registration=False)
+        dry_run = not _yes_no(f"Write rebuilt {store.store_kind.value} catalog now?", default=False)
+        _rebuild_store_catalog(store, dry_run=dry_run)
+        return
+    if action in {"6", "slow", "hardcore"}:
         _home_hardcore_audit()
         return
-    if action in {"6", "den-org", "den-organization", "reflow"}:
+    if action in {"7", "den-org", "den-organization", "reflow"}:
         _home_den_organization()
         return
-    if action in {"7", "yard-reflow"}:
+    if action in {"8", "yard-reflow"}:
         _home_yard_reflow()
         return
     root = _choose_source_path("Folder to inspect")
-    if action in {"2", "score"}:
+    if action in {"5", "score"}:
         score(root=root)
         return
     sniff(roots=[root])
+
+
+def _choose_catalogue_target(
+    label: str,
+    *,
+    allow_manual_registration: bool = True,
+) -> tuple[Store, Path]:
+    _print_section_row(label)
+    _print_option("Y.", "Registered yard")
+    _print_option("D.", "Registered den")
+    if allow_manual_registration:
+        _print_option("M.", "Manual folder")
+    choices = ["y", "yard", "d", "den"]
+    if allow_manual_registration:
+        choices.extend(["m", "manual", "folder"])
+    choice = _ask_with_help(
+        "Catalogue a yard, den, or manual folder",
+        choices=choices,
+        default="y",
+        help_title=label,
+        help_items=[
+            HelpItem("Y", "Yard", "Use an established RAWDOG working yard.", STYLE_SAFE),
+            HelpItem("D", "Den", "Use an established RAWDOG archive den.", STYLE_ACTION),
+            HelpItem(
+                "M",
+                "Manual folder",
+                "Browse common paths and register the selected folder as a temporary yard or den.",
+                STYLE_ROW_SELECTED,
+            ),
+        ]
+        if allow_manual_registration
+        else [
+            HelpItem("Y", "Yard", "Use an established RAWDOG working yard.", STYLE_SAFE),
+            HelpItem("D", "Den", "Use an established RAWDOG archive den.", STYLE_ACTION),
+        ],
+    )
+    normalized = choice.strip().lower()
+    if normalized in {"y", "yard"}:
+        return _choose_registered_catalogue_store(StoreKind.YARD, label)
+    if normalized in {"d", "den"}:
+        return _choose_registered_catalogue_store(StoreKind.DEN, label)
+    return _register_manual_catalogue_store(label)
+
+
+def _choose_registered_catalogue_store(store_kind: StoreKind, label: str) -> tuple[Store, Path]:
+    stores = _known_stores(store_kind)
+    if not stores:
+        raise typer.BadParameter(f"No registered {store_kind.value}s. Choose manual folder first.")
+    path = _pick_registered_store(stores, store_kind.value)
+    if path is None:
+        raise typer.BadParameter("No store selected.")
+    store = _store_for_exact_path(path, store_kind)
+    if store is None:
+        raise typer.BadParameter(f"Selected {store_kind.value} is not registered.")
+    _mark_store_used(store)
+    return store, store.root_path
+
+
+def _register_manual_catalogue_store(label: str) -> tuple[Store, Path]:
+    _print_notice(
+        "Manual folders need RAWDOG store metadata for catalogue status. "
+        "Set this up as a yard or den; for a temporary spot, use the default temporary name.",
+        style=STYLE_ROW_SELECTED,
+    )
+    root = _choose_path(label, browse_number_selection=True)
+    kind_choice = _ask_with_help(
+        "Set this folder up as a yard or den",
+        choices=["y", "yard", "d", "den"],
+        default="y",
+        help_title="Manual Catalogue Folder",
+        help_items=[
+            HelpItem("Y", "Temporary yard", "Working-side folder or temporary import holding area.", STYLE_SAFE),
+            HelpItem("D", "Temporary den", "Archive-side folder or temporary archive review area.", STYLE_ACTION),
+        ],
+    )
+    store_kind = StoreKind.DEN if kind_choice.lower() in {"d", "den"} else StoreKind.YARD
+    default_name = f"temp {store_kind.value} {date.today():%Y%m%d}"
+    name = _ask_with_help(
+        f"Store name, or Enter for {default_name}",
+        default=default_name,
+        help_title="Temporary Store Name",
+        help_items=[
+            HelpItem("Enter", "Use default", f"Register as {default_name}.", STYLE_SAFE),
+            HelpItem("name", "Custom name", "Use a short label you will recognize later.", STYLE_ACTION),
+        ],
+        styled=False,
+    ).strip() or default_name
+    _, config = _load_or_exit()
+    root_path = parse_user_path(str(root))
+    try:
+        ensure_existing_directory(root_path, f"{store_kind.value} root")
+    except SafetyError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    with session(config.database_path) as connection:
+        store = create_or_update_store(
+            connection,
+            StoreCreate(
+                name=name,
+                root_path=root_path,
+                store_kind=store_kind,
+                notes="Temporary store registered by catalogue workflow.",
+            ),
+        )
+        store = mark_store_used(connection, store.store_id)
+    _print_notice(f"Registered {store.store_kind.value}: {store.name} -> {store.root_path}", style=STYLE_SAFE)
+    return store, store.root_path
+
+
+def _run_quick_catalogue(store: Store, root: Path) -> StoreMediaCatalogResult:
+    items = _scan_catalogue_items(store, root)
+    entries = _quick_catalogue_entries(items)
+    result = upsert_store_media_catalog(store, entries, full=False)
+    _print_media_catalogue_result(store, root, result, title="Quick Catalogue")
+    return result
+
+
+def _run_full_catalogue(store: Store, root: Path) -> StoreMediaCatalogResult:
+    items = _scan_catalogue_items(store, root)
+    if not has_media_metadata_reader():
+        _print_media_metadata_reader_warning("full catalogue media identifiers")
+    entries = _quick_catalogue_entries(items)
+    unique_ids = media_unique_ids([entry.store_path for entry in entries])
+    if entries:
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[bold bright_green on black]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            TextColumn("[bright_white on black]{task.fields[status]}"),
+            TimeElapsedColumn(),
+            console=console,
+        ) as progress:
+            task = progress.add_task("Hashing catalogue files", total=len(entries), status="starting")
+            full_entries = []
+            for entry in entries:
+                sha = sha256_file(entry.store_path)
+                full_entries.append(
+                    StoreMediaCatalogEntry(
+                        store_path=entry.store_path,
+                        size_bytes=entry.size_bytes,
+                        date_created=entry.date_created,
+                        date_type=entry.date_type,
+                        sha256=sha,
+                        media_identifier=unique_ids.get(entry.store_path),
+                    )
+                )
+                progress.update(task, status=entry.store_path.name)
+                progress.advance(task)
+    else:
+        full_entries = []
+    result = upsert_store_media_catalog(store, full_entries, full=True)
+    _print_media_catalogue_result(store, root, result, title="Full Catalogue")
+    return result
+
+
+def _run_catalogue_status(store: Store, root: Path) -> StoreMediaCatalogStatus:
+    items = _scan_catalogue_items(store, root)
+    status = store_media_catalog_status(store, items)
+    table = _styled_table(title="Catalogue Status")
+    table.add_column("Metric")
+    table.add_column("Value", justify="right")
+    table.add_row("Store", f"{store.name} ({store.store_kind.value})")
+    table.add_row("Root", str(root))
+    table.add_row("Files scanned now", str(status.scanned_files))
+    table.add_row("Scanned size", _format_bytes(status.total_bytes))
+    table.add_row("Audited files", str(status.audited_files))
+    table.add_row("Quick catalogued files", str(status.quick_cataloged_files))
+    table.add_row("Full catalogued files", str(status.full_cataloged_files))
+    table.add_row("Stale audit rows", str(status.stale_audit_rows))
+    table.add_row("Stale catalogue rows", str(status.stale_catalog_rows))
+    console.print(table)
+    return status
+
+
+def _scan_catalogue_items(store: Store, root: Path) -> list[InventoryItem]:
+    scan_root = parse_user_path(str(root)).expanduser().resolve()
+    if scan_root != store.root_path and store.root_path not in scan_root.parents:
+        raise typer.BadParameter(f"Catalogue target must be inside {store.store_kind.value}: {store.root_path}")
+    try:
+        ensure_existing_directory(scan_root, "catalogue target")
+    except SafetyError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    _print_notice(f"Scanning {scan_root}", style=STYLE_ROW_SELECTED)
+    return scan_raw_files(scan_root)
+
+
+def _quick_catalogue_entries(items: list[InventoryItem]) -> list[StoreMediaCatalogEntry]:
+    paths = [item.path for item in items]
+    media_times = media_capture_times(paths)
+    entries = []
+    for item in items:
+        media_time = media_times.get(item.path)
+        entries.append(
+            StoreMediaCatalogEntry(
+                store_path=item.path,
+                size_bytes=item.size_bytes,
+                date_created=media_time or _file_created_time(item.path),
+                date_type="media" if media_time else "filesystem",
+            )
+        )
+    return entries
+
+
+def _file_created_time(path: Path) -> datetime:
+    stat = path.stat()
+    timestamp = getattr(stat, "st_birthtime", stat.st_mtime)
+    return datetime.fromtimestamp(timestamp, tz=UTC)
+
+
+def _print_media_catalogue_result(
+    store: Store,
+    root: Path,
+    result: StoreMediaCatalogResult,
+    *,
+    title: str,
+) -> None:
+    table = _styled_table(title=title)
+    table.add_column("Metric")
+    table.add_column("Value", justify="right")
+    table.add_row("Store", f"{store.name} ({store.store_kind.value})")
+    table.add_row("Root", str(root))
+    table.add_row("Files catalogued", str(result.quick_cataloged))
+    table.add_row("Full rows updated", str(result.full_cataloged))
+    table.add_row("Catalogued size", _format_bytes(result.total_bytes))
+    table.add_row("Media dates", str(result.media_date_files))
+    table.add_row("Filesystem dates", str(result.filesystem_date_files))
+    table.add_row("Portable DB", str(store_db_path(store.root_path)))
+    console.print(table)
+
+
+def _run_post_fetch_quick_catalogue(destination_root: Path, scan_root: Path) -> None:
+    try:
+        _, config = _load_or_exit()
+        with session(config.database_path) as connection:
+            store = find_store_for_path(connection, destination_root, StoreKind.YARD)
+            if store is None:
+                return
+            store = mark_store_used(connection, store.store_id)
+        _print_notice("Fetch completed. Running quick catalogue on copied/moved files.", style=STYLE_ROW_SELECTED)
+        _run_quick_catalogue(store, scan_root)
+    except (OSError, sqlite3.Error, typer.BadParameter) as exc:
+        _print_notice(f"Post-fetch quick catalogue skipped: {exc}", style=STYLE_WARN)
 
 
 def _home_hardcore_audit() -> None:
@@ -2405,13 +3028,9 @@ def _home_yard_reflow() -> None:
     keep_context = _yes_no("Keep non-date project/context folders while reflowing?", default=False)
     drop_raw = _optional_prompt("Folder names to drop from context, comma-separated, or Enter for none")
     drop_context = [part.strip() for part in drop_raw.split(",") if part.strip()] if drop_raw else []
-    filename_policy = DestinationFilenamePolicy(
-        Prompt.ask(
-            "Destination file names",
-            choices=[policy.value for policy in DestinationFilenamePolicy],
-            default=config.yard_filename_policy.value,
-            console=console,
-        )
+    filename_policy = _prompt_filename_policy(
+        "YARD Reflow File Names",
+        default=config.yard_filename_policy,
     )
     time_shift = _prompt_time_shift()
     dry_run = not _yes_no("Commit same-YARD rename/move plan now? Dry-run is safer.", default=False)
@@ -2436,7 +3055,17 @@ def _choose_audit_root(label: str) -> Path:
         _print_option("2.", f"Pick registered den ({len(dens)} available)")
         _print_option("3.", "Browse common folders / volumes")
         _print_option("0.", "Enter manual existing path")
-        selection = Prompt.ask(_prompt("Choose audit target type"), default="3", console=console).strip()
+        selection = _ask_with_help(
+            "Choose audit target type",
+            default="3",
+            help_title=label,
+            help_items=[
+                HelpItem("1", "Registered yard", "Pick a known working yard.", STYLE_SAFE),
+                HelpItem("2", "Registered den", "Pick a known archive den.", STYLE_ACTION),
+                HelpItem("3", "Browse folders", "Browse common folders or mounted volumes.", STYLE_PATH),
+                HelpItem("0", "Manual path", "Type an exact existing folder path.", STYLE_ROW_SELECTED),
+            ],
+        )
         if selection == "1":
             path = _pick_registered_store(yards, "yard")
             if path:
@@ -3103,17 +3732,25 @@ def _home_status() -> None:
     if not _yes_no("Review operation paths for a recent plan?", default=False):
         return
     plan_ids = {str(plan.plan_id): plan.plan_id for plan in plans}
-    plan_choice = Prompt.ask(
+    plan_choice = _ask_with_help(
         "Plan ID",
         choices=list(plan_ids),
         default=str(plans[0].plan_id),
-        console=console,
+        help_title="Recent Plan Selection",
+        help_items=[
+            HelpItem(str(plan.plan_id), plan.status.value, plan.what, STYLE_SAFE)
+            for plan in plans
+        ],
     )
-    mode = Prompt.ask(
+    mode = _ask_with_help(
         "Review mode",
         choices=["concise", "verbose"],
         default="concise",
-        console=console,
+        help_title="Plan Review Mode",
+        help_items=[
+            HelpItem("concise", "Concise", "Show shorter operation paths for quick inspection.", STYLE_SAFE),
+            HelpItem("verbose", "Verbose", "Show more row/path detail for debugging or LLM handoff.", STYLE_ACTION),
+        ],
     )
     with session(config.database_path) as connection:
         rows = list_execution_plan_rows(connection, plan_ids[plan_choice])
@@ -3138,11 +3775,22 @@ def _home_store_setup() -> None:
         _print_option("7.", "Forget a yard registration")
         _print_option("8.", "Configure default destination file names")
         _print_option("0.", "Back")
-        choice = Prompt.ask(
-            _prompt("Choose manage action"),
+        choice = _ask_with_help(
+            "Choose manage action",
             choices=["0", "1", "2", "3", "4", "5", "6", "7", "8"],
             default="1",
-            console=console,
+            help_title="Manage RAWDOG",
+            help_items=[
+                HelpItem("1", "Initial setup", "Create/update config, default roots, filename defaults, and metadata tooling warning.", STYLE_SAFE),
+                HelpItem("2", "Register DEN", "Register or relink an archive den. This writes store metadata, not media files.", STYLE_ACTION),
+                HelpItem("3", "Register YARD", "Register or relink a working yard. This writes store metadata, not media files.", STYLE_ACTION),
+                HelpItem("4", "List dens", "Show registered archive dens.", STYLE_PATH),
+                HelpItem("5", "List yards", "Show registered working yards.", STYLE_PATH),
+                HelpItem("6", "Forget den", "Remove a den registration from RAWDOG memory without deleting files.", STYLE_WARN),
+                HelpItem("7", "Forget yard", "Remove a yard registration from RAWDOG memory without deleting files.", STYLE_WARN),
+                HelpItem("8", "Filename defaults", "Configure default destination filename policies for future yard and den plans.", STYLE_ROW_SELECTED),
+                HelpItem("0", "Back", "Return to the main menu.", STYLE_MUTED),
+            ],
         )
         if choice == "0":
             return
@@ -3162,12 +3810,32 @@ def _home_store_setup() -> None:
             _print_store_table(StoreKind.YARD)
             continue
         if choice == "6":
-            identifier = Prompt.ask("Den name or store ID to forget", console=console).strip()
+            identifier = _ask_with_help(
+                "Den name or store ID to forget",
+                default="",
+                help_title="Forget DEN Registration",
+                help_items=[
+                    HelpItem("name", "Store name", "Forget a den by its visible registered name.", STYLE_SAFE),
+                    HelpItem("store_id", "Store ID", "Forget a den by its stable store ID. Media files are not deleted.", STYLE_ACTION),
+                    HelpItem("Enter", "Cancel", "Leave blank to keep the den registration.", STYLE_MUTED),
+                ],
+                styled=False,
+            ).strip()
             if identifier:
                 _remove_store(identifier, StoreKind.DEN)
             continue
         if choice == "7":
-            identifier = Prompt.ask("Yard name or store ID to forget", console=console).strip()
+            identifier = _ask_with_help(
+                "Yard name or store ID to forget",
+                default="",
+                help_title="Forget YARD Registration",
+                help_items=[
+                    HelpItem("name", "Store name", "Forget a yard by its visible registered name.", STYLE_SAFE),
+                    HelpItem("store_id", "Store ID", "Forget a yard by its stable store ID. Media files are not deleted.", STYLE_ACTION),
+                    HelpItem("Enter", "Cancel", "Leave blank to keep the yard registration.", STYLE_MUTED),
+                ],
+                styled=False,
+            ).strip()
             if identifier:
                 _remove_store(identifier, StoreKind.YARD)
             continue
@@ -3215,11 +3883,15 @@ def _prompt_filename_policy(title: str, *, default: DestinationFilenamePolicy) -
     key_by_policy = {policy: key for key, policy in options}
     policy_by_choice = {key: policy for key, policy in options}
     policy_by_choice.update({policy.value: policy for _, policy in options})
-    choice = Prompt.ask(
-        _prompt("Choose filename policy"),
+    choice = _ask_with_help(
+        "Choose filename policy",
         choices=list(policy_by_choice),
         default=key_by_policy.get(default, "1"),
-        console=console,
+        help_title=title,
+        help_items=[
+            HelpItem(key, policy.value, f"{_filename_policy_sample(policy)} - {_filename_policy_description(policy)}", STYLE_SAFE)
+            for key, policy in options
+        ],
     )
     return policy_by_choice[choice]
 
@@ -3242,7 +3914,16 @@ def _home_register_store(store_kind: StoreKind) -> None:
         f"Register/relink a {label}. If the folder already has .rawdog metadata, RAWDOG will reuse it.",
         style=STYLE_ROW_SELECTED,
     )
-    name = Prompt.ask("Store name", default="primary", console=console)
+    name = _ask_with_help(
+        "Store name",
+        default="primary",
+        help_title=f"Register {store_kind.value.upper()} Name",
+        help_items=[
+            HelpItem("name", "Friendly label", "Use a short label you will recognize in menus.", STYLE_SAFE),
+            HelpItem("primary", "Default", "Use primary when this is your main den or yard.", STYLE_ACTION),
+        ],
+        styled=False,
+    )
     root = _choose_path(f"{store_kind.value.title()} root")
     _print_notice("Optional description only; this is for your own label, not RAWDOG behavior.")
     notes = _optional_prompt("Store description, or Enter to skip")
@@ -3384,7 +4065,11 @@ def fetch(
         "--verify/--no-verify",
         help="Remember verify preference.",
     ),
-    detect_sessions: bool = typer.Option(False, "--detect-sessions", help="Suggest time-gap splits."),
+    detect_sessions: bool = typer.Option(
+        False,
+        "--detect-sessions",
+        help="Reserved for future time-gap split suggestions; this flag does not change destination paths yet.",
+    ),
     action: DenTransferAction = typer.Option(
         DenTransferAction.COPY,
         "--action",
@@ -3435,6 +4120,7 @@ def fetch(
     effective_naming = naming or (
         loaded_profile.naming_convention if loaded_profile else NamingConvention.DETECT
     )
+    naming_was_detected = effective_naming == NamingConvention.DETECT
     if effective_naming == NamingConvention.DETECT:
         if layout_analysis.recommendation == "keep-existing":
             effective_naming = NamingConvention.KEEP_EXISTING
@@ -3525,8 +4211,16 @@ def fetch(
     console.print(f"File names: {effective_filename_policy.value} - {_filename_policy_description(effective_filename_policy)}")
     console.print(f"Collision policy: {effective_collision_policy.value}")
     console.print(f"Verify after copy: {'yes' if effective_verify else 'no'}")
-    if _fetch_plan_uses_capture_dates(effective_naming, effective_filename_policy):
+    if not _confirm_fetch_preview_plan(dry_run=effective_dry_run, naming_was_detected=naming_was_detected):
+        console.print("Import preview cancelled. No plan written and no files copied.")
+        return
+    uses_capture_dates = _fetch_plan_uses_capture_dates(effective_naming, effective_filename_policy)
+    if uses_capture_dates:
         _print_media_metadata_reader_warning("this import")
+        _print_notice(
+            "Building import plan from capture dates. Large camera dumps can take a while; wait for the plan prompt.",
+            style=STYLE_ROW_SELECTED,
+        )
     effective_mode = loaded_profile.organization_mode if loaded_profile else config.organization_mode
     effective_template = (
         loaded_profile.folder_template
@@ -3537,10 +4231,14 @@ def fetch(
             else config.date_folder_template
         )
     )
-    earliest_capture_at = earliest_raw_capture_time(source_root)
+    needs_project_date = bool(project_name and effective_naming != NamingConvention.KEEP_EXISTING)
+    earliest_capture_at = earliest_raw_capture_time(source_root) if uses_capture_dates or needs_project_date else None
     destination_folder = None
     plan_ran = False
-    if project_name and effective_naming != NamingConvention.KEEP_EXISTING:
+    if effective_naming == NamingConvention.KEEP_EXISTING:
+        destination_folder = destination_root
+        console.print(f"Default keep-existing root: {destination_folder}")
+    elif project_name:
         preview_project_name = project.name if project else project_name
         destination_folder = default_project_destination(
             destination_root,
@@ -3552,16 +4250,12 @@ def fetch(
         console.print(f"Project: {preview_project_name}")
         console.print(f"Default project folder: {destination_folder}")
     elif earliest_capture_at:
-        if effective_naming == NamingConvention.KEEP_EXISTING:
-            destination_folder = destination_root
-            console.print(f"Default keep-existing root: {destination_folder}")
-        else:
-            destination_folder = default_date_only_destination(
-                destination_root,
-                earliest_capture_at,
-                effective_template,
-            )
-            console.print(f"Default DDD/date folder: {destination_folder}")
+        destination_folder = default_date_only_destination(
+            destination_root,
+            earliest_capture_at,
+            effective_template,
+        )
+        console.print(f"Default DDD/date folder: {destination_folder}")
     if destination_folder:
         memory = build_destination_memory(
             organization_mode=effective_mode,
@@ -3621,7 +4315,9 @@ def fetch(
             plan_ran = bool(finished and finished.completed_at)
         if plan_ran:
             write_destination_memory(memory, dry_run=False)
-    console.print(f"Session detection: {'on' if detect_sessions else 'off'}")
+            _run_post_fetch_quick_catalogue(destination_root, destination_folder or destination_root)
+    if detect_sessions:
+        console.print("Session split suggestions: requested, but not applied to destination paths yet.")
     console.print(f"Dry run: {'yes' if effective_dry_run else 'no'}")
     if effective_dry_run and not plan_ran:
         transfer_verb = "moved" if action == DenTransferAction.MOVE else "copied"
@@ -4089,7 +4785,11 @@ def _build_fetch_plan(
     transfer_action: DenTransferAction = DenTransferAction.COPY,
 ) -> DenPlan:
     items = scan_raw_files(source_root)
-    item_capture_times = capture_times([item.path for item in items])
+    item_capture_times = (
+        capture_times([item.path for item in items])
+        if filename_policy != DestinationFilenamePolicy.ORIGINAL
+        else {}
+    )
     planned_destinations: set[Path] = set()
     rows: list[DenPlanRow] = []
     for item in items:
@@ -4103,7 +4803,7 @@ def _build_fetch_plan(
         destination_path = destination_path_for_filename_policy(
             item.path,
             destination_parent,
-            item_capture_times[item.path],
+            item_capture_times.get(item.path) or datetime.fromtimestamp(item.mtime_ns / 1_000_000_000, tz=UTC),
             policy=filename_policy,
             reserved_destinations=planned_destinations,
             size_bytes=item.size_bytes,
@@ -4544,11 +5244,15 @@ def _prompt_run_reviewed_plan(config: RawdogConfig, plan_id: int) -> None:
     if not sys.stdin.isatty():
         _print_notice(f"Next: run `rawdog plans run {plan_id}` to execute this reviewed plan.", style=STYLE_ROW_SELECTED)
         return
-    choice = Prompt.ask(
-        _prompt(f"Next for plan #{plan_id}: r = run, p = pause"),
+    choice = _ask_with_help(
+        f"Next for plan #{plan_id}: r = run, p = pause",
         choices=["r", "p"],
         default="p",
-        console=console,
+        help_title=f"Plan #{plan_id}",
+        help_items=[
+            HelpItem("r", "Run", "Execute this already-reviewed persisted plan now.", STYLE_WARN),
+            HelpItem("p", "Pause", "Leave the plan in the database for later review or execution.", STYLE_SAFE),
+        ],
     )
     if choice == "r":
         _confirm_and_execute_plan(config, plan_id, action="Run", review_already_shown=True)
@@ -4561,11 +5265,17 @@ def _prompt_dry_run_plan_next(config: RawdogConfig, plan_id: int) -> None:
         _print_notice(f"Next: run `rawdog plans ops {plan_id}` to inspect paths.", style=STYLE_ROW_SELECTED)
         return
     while True:
-        choice = Prompt.ask(
-            _prompt(f"Next for dry-run plan #{plan_id}: c = concise paths, v = verbose, r = run, p = pause"),
+        choice = _ask_with_help(
+            f"Next for dry-run plan #{plan_id}: c = concise paths, v = verbose, r = run, p = pause",
             choices=["c", "v", "r", "p"],
             default="c",
-            console=console,
+            help_title=f"Dry-run Plan #{plan_id}",
+            help_items=[
+                HelpItem("c", "Concise paths", "Show a short review of planned operations and destination paths.", STYLE_SAFE),
+                HelpItem("v", "Verbose paths", "Show more operation detail before deciding whether to run.", STYLE_ACTION),
+                HelpItem("r", "Run", "Move into the commit confirmation flow for this persisted plan.", STYLE_WARN),
+                HelpItem("p", "Pause", "Leave the plan paused for later review.", STYLE_MUTED),
+            ],
         )
         if choice in {"c", "v"}:
             with session(config.database_path) as connection:
@@ -4608,10 +5318,14 @@ def _confirm_and_execute_plan(
         [("Anything else leaves the plan paused.", STYLE_ROW_SELECTED)],
         style=STYLE_ROW_SELECTED,
     )
-    confirmed = Prompt.ask(
-        _prompt(f"{action} this execution plan"),
+    confirmed = _ask_with_help(
+        f"{action} this execution plan",
         default="no",
-        console=console,
+        help_title=f"{action} Plan #{plan_id}",
+        help_items=[
+            HelpItem(commit_phrase, "Commit", "Execute every writable row in this persisted plan.", STYLE_WARN),
+            HelpItem("anything else", "Leave paused", "Do not run the plan now. You can review or resume it later.", STYLE_SAFE),
+        ],
     )
     if confirmed != commit_phrase:
         console.print("Plan not executed.")
@@ -5416,11 +6130,16 @@ def _match_junkyard_candidate(
 
 
 def _prompt_junkyard_cleanup_next(config: RawdogConfig, report_path: Path, *, hash_check: bool) -> None:
-    choice = Prompt.ask(
-        _prompt("Next: single confirm, file-by-file, or report only"),
+    choice = _ask_with_help(
+        "Next: single confirm, file-by-file, or report only",
         choices=["s", "single", "f", "file", "r", "report"],
         default="s",
-        console=console,
+        help_title="Junkyard Cleanup Review",
+        help_items=[
+            HelpItem("s / single", "Single confirm", "Review the report, then use one confirmation for the report-based cleanup command.", STYLE_SAFE),
+            HelpItem("f / file", "File-by-file", "Confirm each candidate one at a time before any source file is removed.", STYLE_ACTION),
+            HelpItem("r / report", "Report only", "Write the candidate report and stop. Nothing is removed.", STYLE_ROW_SELECTED),
+        ],
     ).strip().lower()
     if choice in {"r", "report"}:
         _print_notice("Report written; no cleanup run.", style=STYLE_ROW_SELECTED)
@@ -5763,10 +6482,15 @@ def _run_junkyard_scrap(
         _run_junkyard_scrap_file_by_file(allowed)
         return
     phrase = "SCRAP JUNKYARD REPORT"
-    entered = Prompt.ask(
+    entered = _ask_with_help(
         f"Type {phrase!r} to remove {len(allowed)} files listed in this report",
         default="",
-        console=console,
+        help_title="Junkyard Scrap Confirmation",
+        help_items=[
+            HelpItem(phrase, "Remove files", "Remove only files in this report that already passed validation.", STYLE_WARN),
+            HelpItem("anything else", "Cancel", "Leave all source files in place.", STYLE_SAFE),
+        ],
+        styled=False,
     )
     if entered != phrase:
         _print_notice("Junkyard scrap cancelled.", style=STYLE_ROW_SELECTED)
@@ -6333,10 +7057,15 @@ def plans_prune(
     if dry_run:
         console.print("Dry run only. Re-run with --commit to prune these plans.")
         return
-    confirmed = Prompt.ask(
-        "[bold red]Delete these plan records and operation manifests? Type PRUNE PLANS[/]",
+    confirmed = _ask_with_help(
+        "Delete these plan records and operation manifests? Type PRUNE PLANS",
         default="no",
-        console=console,
+        help_title="Prune Plans Confirmation",
+        help_items=[
+            HelpItem("PRUNE PLANS", "Delete plan records", "Remove only prunable dry-run plan records and their operation manifests.", STYLE_WARN),
+            HelpItem("anything else", "Cancel", "Keep plan history unchanged.", STYLE_SAFE),
+        ],
+        styled=False,
     )
     if confirmed != "PRUNE PLANS":
         console.print("Plans not pruned.")
@@ -6688,10 +7417,15 @@ def plans_force_move_duplicates(
             return
     else:
         phrase = f"FORCE MOVE DUPLICATES PLAN {plan_id}"
-        entered = Prompt.ask(
+        entered = _ask_with_help(
             f"Type {phrase!r} to remove {len(verified)} source files verified by SHA-256",
             default="",
-            console=console,
+            help_title="Force Move Duplicates Confirmation",
+            help_items=[
+                HelpItem(phrase, "Remove verified duplicates", "Remove source files only after SHA-256 confirms they exactly match the destination.", STYLE_WARN),
+                HelpItem("anything else", "Cancel", "Keep every source file in place.", STYLE_SAFE),
+            ],
+            styled=False,
         )
         if entered != phrase:
             _print_notice("Force-move duplicate cleanup cancelled.", style=STYLE_ROW_SELECTED)
@@ -6972,10 +7706,14 @@ def plans_review(
                 style=STYLE_ROW_SELECTED,
             )
             return
-        choice = Prompt.ask(
-            _prompt("Press Enter for next page, or 0 to quit inspection"),
+        choice = _ask_with_help(
+            "Press Enter for next page, or 0 to quit inspection",
             default="",
-            console=console,
+            help_title="Plan Row Paging",
+            help_items=[
+                HelpItem("Enter", "Next page", "Show the next page of review rows.", STYLE_SAFE),
+                HelpItem("0", "Stop", "Stop inspecting this plan and leave it unchanged.", STYLE_WARN),
+            ],
         ).strip()
         if choice == "0":
             _print_notice("Inspection stopped.", style=STYLE_ROW_SELECTED)
@@ -7315,10 +8053,15 @@ def queue_run(
         )
         return
 
-    confirmed = Prompt.ask(
-        "[bold red]Execute this safe queue? Type yes[/]",
+    confirmed = _ask_with_help(
+        "Execute this safe queue? Type yes",
         default="no",
-        console=console,
+        help_title="Queue Execution Confirmation",
+        help_items=[
+            HelpItem("yes", "Execute queue", "Run the persisted writable plans created from this queue.", STYLE_WARN),
+            HelpItem("anything else", "Cancel", "Leave the queue and plans unchanged.", STYLE_SAFE),
+        ],
+        styled=False,
     )
     if confirmed.lower() != "yes":
         console.print("Queue not executed.")

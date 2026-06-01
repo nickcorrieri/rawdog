@@ -8,7 +8,13 @@ from rawdog import cli, metadata
 from rawdog.config import build_config
 from rawdog.db import initialize, session
 from rawdog.inventory import InventoryItem
-from rawdog.models import DestinationFilenamePolicy, NamingConvention, OrganizationMode, StoreCreate, StoreKind
+from rawdog.models import (
+    DestinationFilenamePolicy,
+    NamingConvention,
+    OrganizationMode,
+    StoreCreate,
+    StoreKind,
+)
 from rawdog.stores import create_or_update_store
 
 
@@ -22,6 +28,8 @@ def test_choose_path_accepts_direct_path_without_exiting(tmp_path: Path, monkeyp
 
 
 def test_home_choice_uses_letter_workflows_and_hides_init_under_manage() -> None:
+    assert cli._normalize_home_choice("F") == "f"
+    assert cli._normalize_home_choice("fetch") == "f"
     assert cli._normalize_home_choice("D") == "d"
     assert cli._normalize_home_choice("den") == "d"
     assert cli._normalize_home_choice("Y") == "y"
@@ -34,6 +42,30 @@ def test_home_choice_uses_letter_workflows_and_hides_init_under_manage() -> None
     assert cli._normalize_home_choice("Q") == "q"
     assert cli._normalize_home_choice("DM") is None
     assert cli._normalize_home_choice("2") is None
+
+
+def test_home_fetch_runs_fetch_workflow(monkeypatch) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(cli, "_home_fetch_workflow", lambda: calls.append("fetch"))
+
+    cli._run_home_choice("f")
+
+    assert calls == ["fetch"]
+
+
+def test_home_fetch_fast_mode_preserves_layout_and_original_names(tmp_path: Path, monkeypatch) -> None:
+    fetch_calls: list[dict] = []
+
+    monkeypatch.setattr(cli, "_yes_no", lambda label, default=False, **kwargs: True)
+    monkeypatch.setattr(cli, "_choose_source_path", lambda label: tmp_path / "source")
+    monkeypatch.setattr(cli, "_choose_store_path", lambda label, store_kind: tmp_path / "yard")
+    monkeypatch.setattr(cli, "fetch", lambda **kwargs: fetch_calls.append(kwargs))
+
+    cli._home_fetch_workflow()
+
+    assert fetch_calls[0]["naming"] == NamingConvention.KEEP_EXISTING
+    assert fetch_calls[0]["filename_policy"] == DestinationFilenamePolicy.ORIGINAL
+    assert fetch_calls[0]["dry_run"] is True
 
 
 def test_filename_policy_menu_accepts_numbered_choice(monkeypatch) -> None:
@@ -56,6 +88,134 @@ def test_filename_policy_menu_accepts_policy_value(monkeypatch) -> None:
     )
 
     assert policy == DestinationFilenamePolicy.UNIQUE_ID_ORIGINAL
+
+
+def test_ask_with_help_shows_help_then_accepts_choice(monkeypatch) -> None:
+    shown: list[str] = []
+    monkeypatch.setattr(cli.Prompt, "ask", _answers("?", "2"))
+    monkeypatch.setattr(cli, "_print_verbose_help", lambda title, items, footer=None: shown.append(title))
+
+    choice = cli._ask_with_help(
+        "Pick one",
+        choices=["1", "2"],
+        default="1",
+        help_title="Picker",
+        help_items=[cli.HelpItem("1", "One", "First option"), cli.HelpItem("2", "Two", "Second option")],
+    )
+
+    assert choice == "2"
+    assert shown == ["Picker"]
+
+
+def test_yes_no_shows_help_then_accepts_answer(monkeypatch) -> None:
+    shown: list[str] = []
+    monkeypatch.setattr(cli.Prompt, "ask", _answers("?", "n"))
+    monkeypatch.setattr(cli, "_print_verbose_help", lambda title, items, footer=None: shown.append(title))
+
+    answer = cli._yes_no(
+        "Enable option?",
+        default=True,
+        help_items=[cli.HelpItem("y", "Yes", "Enable it"), cli.HelpItem("n", "No", "Skip it")],
+    )
+
+    assert answer is False
+    assert shown == ["Enable option?"]
+
+
+def test_home_yard_import_does_not_ask_unused_session_question(tmp_path: Path, monkeypatch) -> None:
+    labels: list[str] = []
+    fetch_calls: list[dict] = []
+
+    def fake_yes_no(label: str, default: bool = False, **kwargs) -> bool:
+        labels.append(label)
+        assert "session" not in label.lower()
+        return label.startswith("Allow") or label.startswith("When")
+
+    def fake_fetch(**kwargs) -> None:
+        fetch_calls.append(kwargs)
+
+    monkeypatch.setattr(cli, "_choose_source_path", lambda label: tmp_path / "source")
+    monkeypatch.setattr(cli, "_choose_store_path", lambda label, store_kind: tmp_path / "yard")
+    monkeypatch.setattr(cli, "_optional_prompt", lambda label: None)
+    monkeypatch.setattr(cli, "_yes_no", fake_yes_no)
+    monkeypatch.setattr(cli, "fetch", fake_fetch)
+
+    cli._home_yard_import()
+
+    assert labels == [
+        "Allow RAWDOG to recommend date folders for this import?",
+        "When this looks like a camera card, put files in capture-date folders?",
+    ]
+    assert len(fetch_calls) == 1
+    assert fetch_calls[0]["detect_sessions"] is False
+
+
+def test_fetch_detected_layout_requires_preview_confirmation_before_planning(tmp_path: Path, monkeypatch) -> None:
+    database = tmp_path / "rawdog.sqlite"
+    source_root = tmp_path / "source"
+    source = source_root / "DCIM" / "100CANON"
+    destination = tmp_path / "RAW_YARD"
+    raw_file = source / "IMG_0001.CR3"
+    raw_file.parent.mkdir(parents=True)
+    destination.mkdir()
+    raw_file.write_bytes(b"raw")
+    initialize(database)
+    config = build_config(OrganizationMode.PROJECT, database_path=database)
+    prompts: list[str] = []
+
+    def fake_yes_no(label: str, default: bool = False, **kwargs) -> bool:
+        prompts.append(label)
+        return False
+
+    def fail_plan(*args, **kwargs):
+        raise AssertionError("fetch should stop before capture-date planning")
+
+    monkeypatch.setattr(cli, "_load_or_exit", lambda: (tmp_path / "config.json", config))
+    monkeypatch.setattr(cli.sys, "stdin", type("FakeStdin", (), {"isatty": lambda self: True})())
+    monkeypatch.setattr(cli, "_yes_no", fake_yes_no)
+    monkeypatch.setattr(cli, "earliest_raw_capture_time", fail_plan)
+    monkeypatch.setattr(cli, "_build_fetch_plan", fail_plan)
+
+    cli.fetch(
+        source=source_root,
+        destination=destination,
+        profile=None,
+        project_name=None,
+        profile_name=None,
+        naming=None,
+        filename_policy=DestinationFilenamePolicy.ORIGINAL,
+        collision_policy=None,
+        verify_after_copy=None,
+        detect_sessions=False,
+        action=cli.DenTransferAction.COPY,
+        dry_run=True,
+    )
+
+    assert prompts == ["Proceed with building this import preview plan?"]
+
+
+def test_keep_existing_original_fetch_plan_skips_capture_date_scan(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "yard"
+    raw_file = source / "DCIM" / "100CANON" / "IMG_0001.CR3"
+    raw_file.parent.mkdir(parents=True)
+    destination.mkdir()
+    raw_file.write_bytes(b"raw")
+
+    def fail_capture_times(paths):
+        raise AssertionError("original-name keep-existing fetch should not read capture dates")
+
+    monkeypatch.setattr(cli, "capture_times", fail_capture_times)
+
+    plan = cli._build_fetch_plan(
+        source,
+        destination,
+        destination,
+        NamingConvention.KEEP_EXISTING,
+        DestinationFilenamePolicy.ORIGINAL,
+    )
+
+    assert plan.rows[0].destination_path == destination / "DCIM" / "100CANON" / "IMG_0001.CR3"
 
 
 def test_choose_path_can_browse_numbered_location(tmp_path: Path, monkeypatch) -> None:

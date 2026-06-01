@@ -2,12 +2,14 @@
 
 import json
 import sqlite3
+from datetime import UTC, datetime
 from pathlib import Path
 
 from rawdog.db import initialize, session
 from rawdog.inventory import scan_raw_files
 from rawdog.models import StoreCreate, StoreKind
 from rawdog.stores import (
+    StoreMediaCatalogEntry,
     create_or_update_store,
     find_store_for_path,
     list_store_files_by_original_source,
@@ -18,6 +20,8 @@ from rawdog.stores import (
     remove_store_registration,
     store_db_path,
     store_json_path,
+    store_media_catalog_status,
+    upsert_store_media_catalog,
 )
 
 
@@ -128,6 +132,56 @@ def test_rebuild_store_catalog_can_rebuild_yard_catalog(tmp_path: Path) -> None:
     with sqlite3.connect(store_db_path(yard_root)) as connection:
         rows = connection.execute("SELECT relative_path, size_bytes FROM store_files").fetchall()
     assert rows == [("Game/IMG_0001.JPG", 4)]
+
+
+def test_store_media_catalog_tracks_quick_full_and_status(tmp_path: Path) -> None:
+    database = tmp_path / "rawdog.sqlite"
+    yard_root = tmp_path / "yard"
+    raw_file = yard_root / "IMG_0001.CR3"
+    raw_file.parent.mkdir(parents=True)
+    raw_file.write_bytes(b"raw")
+    initialize(database)
+
+    with session(database) as connection:
+        store = create_or_update_store(
+            connection,
+            StoreCreate(name="primary", root_path=yard_root, store_kind=StoreKind.YARD),
+        )
+    entry = StoreMediaCatalogEntry(
+        store_path=raw_file,
+        size_bytes=3,
+        date_created=datetime.fromtimestamp(raw_file.stat().st_mtime, tz=UTC),
+        date_type="filesystem",
+    )
+
+    quick = upsert_store_media_catalog(store, [entry], full=False)
+    status_after_quick = store_media_catalog_status(store, scan_raw_files(yard_root))
+    full = upsert_store_media_catalog(
+        store,
+        [
+            StoreMediaCatalogEntry(
+                store_path=entry.store_path,
+                size_bytes=entry.size_bytes,
+                date_created=entry.date_created,
+                date_type=entry.date_type,
+                sha256="abc",
+                media_identifier="abc12345",
+            )
+        ],
+        full=True,
+    )
+    status_after_full = store_media_catalog_status(store, scan_raw_files(yard_root))
+
+    assert quick.quick_cataloged == 1
+    assert status_after_quick.quick_cataloged_files == 1
+    assert status_after_quick.full_cataloged_files == 0
+    assert full.full_cataloged == 1
+    assert status_after_full.full_cataloged_files == 1
+    with sqlite3.connect(store_db_path(yard_root)) as connection:
+        rows = connection.execute(
+            "SELECT file_name, size_bytes, date_type, sha256, media_identifier FROM media_catalog"
+        ).fetchall()
+    assert rows == [("IMG_0001.CR3", 3, "filesystem", "abc", "abc12345")]
 
 
 def test_stores_track_last_used_and_keep_primary_first(tmp_path: Path) -> None:

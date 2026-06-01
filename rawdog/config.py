@@ -7,7 +7,12 @@ from pathlib import Path
 
 from platformdirs import user_config_dir, user_data_dir
 
-from rawdog.models import DestinationFilenamePolicy, OrganizationMode, RawdogConfig, model_to_json_data
+from rawdog.models import (
+    DestinationFilenamePolicy,
+    OrganizationMode,
+    RawdogConfig,
+    model_to_json_data,
+)
 
 APP_NAME = "rawdog"
 

@@ -28,6 +28,37 @@ class StoreCatalogRebuildResult:
     dry_run: bool
 
 
+@dataclass(frozen=True)
+class StoreMediaCatalogEntry:
+    store_path: Path
+    size_bytes: int
+    date_created: datetime
+    date_type: str
+    sha256: str | None = None
+    media_identifier: str | None = None
+
+
+@dataclass(frozen=True)
+class StoreMediaCatalogResult:
+    scanned_files: int
+    total_bytes: int
+    quick_cataloged: int
+    full_cataloged: int
+    media_date_files: int
+    filesystem_date_files: int
+
+
+@dataclass(frozen=True)
+class StoreMediaCatalogStatus:
+    scanned_files: int
+    total_bytes: int
+    audited_files: int
+    quick_cataloged_files: int
+    full_cataloged_files: int
+    stale_audit_rows: int
+    stale_catalog_rows: int
+
+
 def _now() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -314,6 +345,139 @@ def rebuild_store_catalog(
     )
 
 
+def upsert_store_media_catalog(
+    store: Store,
+    entries: list[StoreMediaCatalogEntry],
+    *,
+    full: bool = False,
+) -> StoreMediaCatalogResult:
+    _initialize_store_db(store.root_path)
+    now = _now()
+    total_bytes = 0
+    media_date_files = 0
+    filesystem_date_files = 0
+    rows = []
+    for entry in entries:
+        resolved = entry.store_path.expanduser().resolve()
+        relative = resolved.relative_to(store.root_path)
+        total_bytes += entry.size_bytes
+        if entry.date_type == "media":
+            media_date_files += 1
+        else:
+            filesystem_date_files += 1
+        rows.append(
+            (
+                store.store_id,
+                str(resolved),
+                str(relative),
+                resolved.name,
+                entry.size_bytes,
+                entry.date_created.isoformat(),
+                entry.date_type,
+                entry.sha256,
+                entry.media_identifier,
+                now,
+                now if full else None,
+                now,
+                now,
+                now,
+            )
+        )
+
+    if rows:
+        with closing(sqlite3.connect(store_db_path(store.root_path))) as connection:
+            with connection:
+                if full:
+                    connection.executemany(
+                        """
+                        INSERT INTO media_catalog (
+                            store_id, store_path, relative_path, file_name, size_bytes,
+                            date_created, date_type, sha256, media_identifier,
+                            quick_cataloged_at, full_cataloged_at, created_at, updated_at, last_seen_at
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(store_path) DO UPDATE SET
+                            relative_path = excluded.relative_path,
+                            file_name = excluded.file_name,
+                            size_bytes = excluded.size_bytes,
+                            date_created = excluded.date_created,
+                            date_type = excluded.date_type,
+                            sha256 = excluded.sha256,
+                            media_identifier = excluded.media_identifier,
+                            quick_cataloged_at = excluded.quick_cataloged_at,
+                            full_cataloged_at = excluded.full_cataloged_at,
+                            updated_at = excluded.updated_at,
+                            last_seen_at = excluded.last_seen_at
+                        """,
+                        rows,
+                    )
+                else:
+                    connection.executemany(
+                        """
+                        INSERT INTO media_catalog (
+                            store_id, store_path, relative_path, file_name, size_bytes,
+                            date_created, date_type, sha256, media_identifier,
+                            quick_cataloged_at, full_cataloged_at, created_at, updated_at, last_seen_at
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(store_path) DO UPDATE SET
+                            relative_path = excluded.relative_path,
+                            file_name = excluded.file_name,
+                            size_bytes = excluded.size_bytes,
+                            date_created = excluded.date_created,
+                            date_type = excluded.date_type,
+                            quick_cataloged_at = excluded.quick_cataloged_at,
+                            updated_at = excluded.updated_at,
+                            last_seen_at = excluded.last_seen_at
+                        """,
+                        rows,
+                    )
+
+    return StoreMediaCatalogResult(
+        scanned_files=len(entries),
+        total_bytes=total_bytes,
+        quick_cataloged=len(entries),
+        full_cataloged=len(entries) if full else 0,
+        media_date_files=media_date_files,
+        filesystem_date_files=filesystem_date_files,
+    )
+
+
+def store_media_catalog_status(
+    store: Store,
+    items: list[InventoryItem],
+) -> StoreMediaCatalogStatus:
+    _initialize_store_db(store.root_path)
+    current_paths = {str(item.path.expanduser().resolve()) for item in items}
+    total_bytes = sum(item.size_bytes for item in items)
+    with closing(sqlite3.connect(store_db_path(store.root_path))) as connection:
+        connection.row_factory = sqlite3.Row
+        audit_rows = connection.execute(
+            "SELECT store_path, status FROM store_files WHERE status = ?",
+            (StoreFileStatus.PRESENT.value,),
+        ).fetchall()
+        catalog_rows = connection.execute(
+            "SELECT store_path, quick_cataloged_at, full_cataloged_at FROM media_catalog"
+        ).fetchall()
+
+    audited_files = sum(1 for row in audit_rows if row["store_path"] in current_paths)
+    quick_cataloged_files = sum(
+        1 for row in catalog_rows if row["store_path"] in current_paths and row["quick_cataloged_at"]
+    )
+    full_cataloged_files = sum(
+        1 for row in catalog_rows if row["store_path"] in current_paths and row["full_cataloged_at"]
+    )
+    return StoreMediaCatalogStatus(
+        scanned_files=len(items),
+        total_bytes=total_bytes,
+        audited_files=audited_files,
+        quick_cataloged_files=quick_cataloged_files,
+        full_cataloged_files=full_cataloged_files,
+        stale_audit_rows=sum(1 for row in audit_rows if row["store_path"] not in current_paths),
+        stale_catalog_rows=sum(1 for row in catalog_rows if row["store_path"] not in current_paths),
+    )
+
+
 def list_store_files_by_original_source(store: Store) -> dict[Path, StoreFile]:
     path = store_db_path(store.root_path)
     if not path.exists():
@@ -443,5 +607,32 @@ def _initialize_store_db(root_path: Path) -> None:
 
             CREATE INDEX IF NOT EXISTS store_files_original_source
             ON store_files(original_source_path);
+
+            CREATE TABLE IF NOT EXISTS media_catalog (
+                catalog_file_id INTEGER PRIMARY KEY,
+                store_id TEXT NOT NULL,
+                store_path TEXT NOT NULL UNIQUE,
+                relative_path TEXT NOT NULL,
+                file_name TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL,
+                date_created TEXT NOT NULL,
+                date_type TEXT NOT NULL,
+                sha256 TEXT,
+                media_identifier TEXT,
+                quick_cataloged_at TEXT,
+                full_cataloged_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS media_catalog_relative_path
+            ON media_catalog(relative_path);
+
+            CREATE INDEX IF NOT EXISTS media_catalog_quick
+            ON media_catalog(quick_cataloged_at);
+
+            CREATE INDEX IF NOT EXISTS media_catalog_full
+            ON media_catalog(full_cataloged_at);
             """
         )

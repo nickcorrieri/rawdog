@@ -105,8 +105,9 @@ Run `rawdog` with no arguments to open the colored workflow chooser. The menu is
 organized by job:
 
 - `D` - den operations: copy, move, or re-organize archive files.
-- `Y` - yard operations: copy/import, move, or re-organize working files.
-- `S` - sniff, audit, inspect, score, run slow full audit, or rebuild a folder, yard, or den.
+- `F` - fetch files into a yard first, then run catalogue/audit work after execution.
+- `Y` - yard maintenance: same-drive move or re-organize working files.
+- `S` - quick catalogue, full catalogue, status report, sniff, score, slow audit, or rebuild.
 - `P` - review, run, resume, or prune old plans.
 - `W` - work queue for longer safe jobs.
 - `M` - manage initial setup, defaults, dens, yards, and stores.

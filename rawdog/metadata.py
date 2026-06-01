@@ -70,6 +70,8 @@ EXIF_CAPTURE_TAGS = (
     "TrackCreateDate",
 )
 
+EXIF_UNIQUE_ID_TAGS = ("ImageUniqueID",)
+
 EXIF_DATETIME_RE = re.compile(
     r"^(?P<year>\d{4})[:-](?P<month>\d{2})[:-](?P<day>\d{2})[ T]"
     r"(?P<hour>\d{2}):(?P<minute>\d{2}):(?P<second>\d{2})"
@@ -122,6 +124,19 @@ def media_capture_times(paths: list[Path] | tuple[Path, ...]) -> dict[Path, date
     return captured
 
 
+def media_unique_ids(paths: list[Path] | tuple[Path, ...]) -> dict[Path, str]:
+    tags_by_path = _read_exiftool_tags_for_paths(paths, tags=EXIF_UNIQUE_ID_TAGS)
+    unique_ids: dict[Path, str] = {}
+    for path, tags in tags_by_path.items():
+        value = tags.get("ImageUniqueID")
+        if value is None:
+            continue
+        unique_id = str(value).strip().lower()
+        if re.fullmatch(r"[0-9a-f]{8,64}", unique_id):
+            unique_ids[path] = unique_id
+    return unique_ids
+
+
 def _capture_time_from_tags(tags: dict[str, object]) -> datetime | None:
     for tag in EXIF_CAPTURE_TAGS:
         captured_at = _parse_exif_datetime(tags.get(tag))
@@ -134,7 +149,11 @@ def _read_exiftool_tags(path: Path) -> dict[str, object]:
     return _read_exiftool_tags_for_paths((path,)).get(path, {})
 
 
-def _read_exiftool_tags_for_paths(paths: list[Path] | tuple[Path, ...]) -> dict[Path, dict[str, object]]:
+def _read_exiftool_tags_for_paths(
+    paths: list[Path] | tuple[Path, ...],
+    *,
+    tags: tuple[str, ...] = EXIF_CAPTURE_TAGS,
+) -> dict[Path, dict[str, object]]:
     if not paths or not has_media_metadata_reader():
         return {}
     requested = {_path_key(path): path for path in paths}
@@ -142,7 +161,7 @@ def _read_exiftool_tags_for_paths(paths: list[Path] | tuple[Path, ...]) -> dict[
     for chunk in _chunks(tuple(paths), 100):
         try:
             result = subprocess.run(
-                ["exiftool", "-json", *[f"-{tag}" for tag in EXIF_CAPTURE_TAGS], *[str(path) for path in chunk]],
+                ["exiftool", "-json", *[f"-{tag}" for tag in tags], *[str(path) for path in chunk]],
                 check=False,
                 capture_output=True,
                 text=True,
