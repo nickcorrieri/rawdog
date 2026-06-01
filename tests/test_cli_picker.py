@@ -562,6 +562,40 @@ def test_reflow_context_policy_can_choose_pure_date_buckets(tmp_path: Path, monk
     assert drop_context == set()
 
 
+def test_reflow_context_review_can_drop_all_after_scanning(tmp_path: Path, monkeypatch) -> None:
+    project = tmp_path / "Real Project" / "IMG_0001.CR3"
+    project.parent.mkdir(parents=True)
+    project.write_bytes(b"raw")
+    monkeypatch.setattr(cli.Prompt, "ask", _answers("y", "n"))
+    monkeypatch.setattr(
+        cli,
+        "console",
+        Console(file=StringIO(), force_terminal=False, color_system=None, width=100),
+    )
+
+    keep_context, drop_context = cli._choose_reflow_context_policy(tmp_path, default_keep=True)
+
+    assert keep_context is False
+    assert drop_context == set()
+
+
+def test_reflow_context_review_can_go_back_to_dates_only(tmp_path: Path, monkeypatch) -> None:
+    project = tmp_path / "Real Project" / "IMG_0001.CR3"
+    project.parent.mkdir(parents=True)
+    project.write_bytes(b"raw")
+    monkeypatch.setattr(cli.Prompt, "ask", _answers("y", "b", "n"))
+    monkeypatch.setattr(
+        cli,
+        "console",
+        Console(file=StringIO(), force_terminal=False, color_system=None, width=100),
+    )
+
+    keep_context, drop_context = cli._choose_reflow_context_policy(tmp_path, default_keep=True)
+
+    assert keep_context is False
+    assert drop_context == set()
+
+
 def test_den_organization_report_flags_bad_den_shapes(tmp_path: Path) -> None:
     valid = tmp_path / "2024" / "2024-07" / "IMG_0001.CR3"
     valid_context = tmp_path / "2024" / "Project" / "2024-07" / "IMG_0002.CR3"

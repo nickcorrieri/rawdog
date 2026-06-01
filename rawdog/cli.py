@@ -2714,58 +2714,63 @@ def _is_preserve_dates_container_part(part: str) -> bool:
 
 
 def _choose_reflow_context_policy(root: Path, *, default_keep: bool) -> tuple[bool, set[str]]:
-    keep_any = _yes_no(
-        "Review and keep any non-date project/context folder names?",
-        default=default_keep,
-        help_items=[
-            HelpItem(
-                "y",
-                "Review context names",
-                "RAWDOG scans the selected store, lists folder names that are not dates/camera wrappers, and lets you choose which names stay in destination paths.",
-                STYLE_SAFE,
-            ),
-            HelpItem(
-                "n",
-                "Pure date buckets",
-                "Ignore all non-date folder names during reflow. Files land under generated date folders such as YYYY/YYYYMMDD or YYYY/YYYY-MM.",
-                STYLE_WARN,
-            ),
-        ],
-    )
-    if not keep_any:
-        return False, set()
+    candidates: list[PreserveDatesFolderCandidate] | None = None
+    while True:
+        keep_any = _yes_no(
+            "Review and keep any non-date project/context folder names?",
+            default=default_keep,
+            help_items=[
+                HelpItem(
+                    "y",
+                    "Review context names",
+                    "RAWDOG scans the selected store, lists folder names that are not dates/camera wrappers, and lets you choose which names stay in destination paths.",
+                    STYLE_SAFE,
+                ),
+                HelpItem(
+                    "n",
+                    "Pure date buckets",
+                    "Ignore all non-date folder names during reflow. Files land under generated date folders such as YYYY/YYYYMMDD or YYYY/YYYY-MM.",
+                    STYLE_WARN,
+                ),
+            ],
+        )
+        if not keep_any:
+            return False, set()
 
-    candidates = _preserve_dates_folder_candidates(
-        root,
-        exclude_roots=[],
-        show_progress=True,
-        description="Finding project/context folders",
-    )
-    if not candidates:
-        _print_notice("No non-date project/context folder names found. Reflow will use generated date buckets only.")
-        return False, set()
+        if candidates is None:
+            candidates = _preserve_dates_folder_candidates(
+                root,
+                exclude_roots=[],
+                show_progress=True,
+                description="Finding project/context folders",
+            )
+        if not candidates:
+            _print_notice("No non-date project/context folder names found. Reflow will use generated date buckets only.")
+            return False, set()
 
-    selected_names = _choose_reflow_context_names(candidates, default_keep=default_keep)
-    drop_context = {candidate.name for candidate in candidates if candidate.name not in selected_names}
-    if selected_names:
-        _print_notice("Keeping context folder names: " + ", ".join(sorted(selected_names)), style=STYLE_SAFE)
-        if drop_context:
-            _print_notice("Dropping context folder names: " + ", ".join(sorted(drop_context)), style=STYLE_ROW_SELECTED)
-        return True, drop_context
-    _print_notice("No context folder names selected. Reflow will use generated date buckets only.", style=STYLE_ROW_SELECTED)
-    return False, set()
+        selected_names = _choose_reflow_context_names(candidates, default_keep=default_keep)
+        if selected_names is None:
+            continue
+        drop_context = {candidate.name for candidate in candidates if candidate.name not in selected_names}
+        if selected_names:
+            _print_notice("Keeping context folder names: " + ", ".join(sorted(selected_names)), style=STYLE_SAFE)
+            if drop_context:
+                _print_notice("Dropping context folder names: " + ", ".join(sorted(drop_context)), style=STYLE_ROW_SELECTED)
+            return True, drop_context
+        _print_notice("No context folder names selected. Reflow will use generated date buckets only.", style=STYLE_ROW_SELECTED)
+        return False, set()
 
 
 def _choose_reflow_context_names(
     candidates: list[PreserveDatesFolderCandidate],
     *,
     default_keep: bool,
-) -> set[str]:
+) -> set[str] | None:
     selected = {candidate.name for candidate in candidates} if default_keep else set()
     _print_reflow_context_review(candidates, selected)
     while True:
         raw = Prompt.ask(
-            "Folder names to KEEP [a all / n none / numbers toggle / c choose selected / ? help]",
+            "Folder names to KEEP [a all / n dates only / b back / numbers toggle / c choose / ? help]",
             default="c",
             console=console,
         ).strip()
@@ -2775,7 +2780,8 @@ def _choose_reflow_context_names(
                 "Project/Context Folder Review",
                 [
                     HelpItem("a", "Select all", "Keep every listed folder name as project/context.", STYLE_SAFE),
-                    HelpItem("n", "Select none", "Drop every listed folder name and use pure generated date buckets.", STYLE_WARN),
+                    HelpItem("n / d", "Dates only", "Drop every listed folder name now and continue with pure generated date buckets.", STYLE_WARN),
+                    HelpItem("b", "Back", "Return to the previous yes/no question before continuing.", STYLE_MUTED),
                     HelpItem("1,3,5", "Toggle numbers", "Toggle one or more listed folder names by number.", STYLE_ACTION),
                     HelpItem("2-6", "Toggle range", "Toggle every folder in an inclusive range.", STYLE_ACTION),
                     HelpItem("r", "Review list", "Print the folder review table again.", STYLE_PATH),
@@ -2789,10 +2795,11 @@ def _choose_reflow_context_names(
             selected = {candidate.name for candidate in candidates}
             _print_notice(f"Selected all {len(selected)} folder names.", style=STYLE_SAFE)
             continue
-        if choice in {"n", "none"}:
-            selected = set()
-            _print_notice("Selected no context folder names.", style=STYLE_ROW_SELECTED)
-            continue
+        if choice in {"n", "none", "d", "date", "dates", "drop", "drop-all"}:
+            _print_notice("Dropping all context folder names. Reflow will use generated date buckets only.", style=STYLE_ROW_SELECTED)
+            return set()
+        if choice in {"b", "back"}:
+            return None
         if choice in {"r", "review"}:
             _print_reflow_context_review(candidates, selected)
             continue
@@ -2807,7 +2814,7 @@ def _choose_reflow_context_names(
                 selected.remove(name)
             else:
                 selected.add(name)
-        _print_notice(f"Selected {len(selected)} of {len(candidates)} folder names. Type c to continue or r to review.")
+        _print_notice(f"Selected {len(selected)} of {len(candidates)} folder names. Type c to continue, n for dates only, or b to go back.")
 
 
 def _parse_number_selection(raw: str, *, max_index: int) -> set[int]:
@@ -2854,7 +2861,7 @@ def _print_reflow_context_review(candidates: list[PreserveDatesFolderCandidate],
         )
     console.print(table)
     _print_notice(
-        "Toggle numbers like 1,3,5 or 2-6. Use a for all, n for none, r to reprint, c to choose selected.",
+        "Toggle numbers like 1,3,5 or 2-6. Use a for all, n/d for dates only, b to go back, r to reprint, c to choose selected.",
         style=STYLE_ROW_SELECTED,
     )
 
