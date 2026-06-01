@@ -3,16 +3,17 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from pathlib import Path
 
 from rawdog.copier import append_only_copy, append_only_move
 from rawdog.datefolders import normalize_date_folder_parts
+from rawdog.filenames import destination_path_for_filename_policy
 from rawdog.inventory import InventoryItem, scan_raw_files
 from rawdog.layout import is_camera_dump_part
 from rawdog.metadata import capture_time_fallback
-from rawdog.models import DenLayoutMode, DenTransferAction
+from rawdog.models import DenLayoutMode, DenTransferAction, DestinationFilenamePolicy
 from rawdog.planner import (
     default_date_only_destination,
     default_project_destination,
@@ -29,6 +30,16 @@ class DenPlanRow:
 
 
 @dataclass(frozen=True)
+class ReflowTimeShiftPlanRow:
+    source_path: Path
+    destination_path: Path
+    original_capture_at: datetime
+    shifted_capture_at: datetime
+    time_shift_seconds: int
+    basis: str
+
+
+@dataclass(frozen=True)
 class DenPlan:
     source_root: Path
     destination_root: Path
@@ -37,6 +48,7 @@ class DenPlan:
     transfer_action: DenTransferAction = DenTransferAction.COPY
     excluded_roots: list[Path] | None = None
     limited_to: int | None = None
+    time_shift_rows: list[ReflowTimeShiftPlanRow] = field(default_factory=list)
 
     @property
     def files_to_copy(self) -> int:
@@ -78,6 +90,7 @@ def build_den_plan(
     end_date: date | None = None,
     limit: int | None = None,
     preserve_dates_drop_parts: set[str] | None = None,
+    filename_policy: DestinationFilenamePolicy = DestinationFilenamePolicy.ORIGINAL,
 ) -> DenPlan:
     source_root = source_root.expanduser().resolve()
     destination_root = destination_root.expanduser().resolve()
@@ -112,6 +125,8 @@ def build_den_plan(
             folder_template=folder_template,
             project_name=project_name or source_root.name,
             preserve_dates_drop_parts=preserve_dates_drop_parts or set(),
+            filename_policy=filename_policy,
+            reserved_destinations=planned_destinations,
         )
         if row.status == "plan_copy":
             if row.destination_path in planned_destinations:
@@ -236,6 +251,8 @@ def _plan_row(
     folder_template: str,
     project_name: str,
     preserve_dates_drop_parts: set[str],
+    filename_policy: DestinationFilenamePolicy,
+    reserved_destinations: set[Path],
 ) -> DenPlanRow:
     relative_path = (
         _drop_preserve_dates_parts(item.relative_path, preserve_dates_drop_parts)
@@ -253,32 +270,41 @@ def _plan_row(
             else _meaningful_prefix_before_camera_dump(source_root, relative_path)
         )
         year_scoped_prefix = _year_scoped_prefix(preserved_prefix, captured_at)
-        destination = (
+        destination_parent = (
             destination_root
             / Path(*year_scoped_prefix)
             / _date_destination_without_duplicate_prefix(
                 year_scoped_prefix,
                 default_date_only_destination(Path(), captured_at, folder_template),
             )
-            / item.path.name
         )
     elif layout_mode == DenLayoutMode.PROJECT_DATES:
         captured_at = capture_time_fallback(item.path)
-        destination = (
+        destination_parent = (
             destination_root
             / render_folder_template(folder_template, captured_at, project_name=project_name)
-            / item.path.name
         )
     elif layout_mode == DenLayoutMode.PRESERVE_DATES:
         captured_at = capture_time_fallback(item.path)
-        destination = destination_folder / _year_scoped_preserved_path(
+        preserved_path = _year_scoped_preserved_path(
             relative_path,
             captured_at,
         )
+        destination_parent = destination_folder / preserved_path.parent
     elif layout_mode == DenLayoutMode.PROJECT:
-        destination = destination_folder / item.path.name
+        captured_at = capture_time_fallback(item.path)
+        destination_parent = destination_folder
     else:
-        destination = destination_folder / relative_path
+        captured_at = capture_time_fallback(item.path)
+        destination_parent = destination_folder / relative_path.parent
+    destination = destination_path_for_filename_policy(
+        item.path,
+        destination_parent,
+        captured_at,
+        policy=filename_policy,
+        reserved_destinations=reserved_destinations,
+        size_bytes=item.size_bytes,
+    )
     status = "plan_copy"
     if destination.exists():
         if destination.name == item.path.name and destination.stat().st_size == item.size_bytes:

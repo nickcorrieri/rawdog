@@ -25,6 +25,16 @@ class NamingConvention(StrEnum):
     PROJECT_LABEL = "project-label"
 
 
+class DestinationFilenamePolicy(StrEnum):
+    ORIGINAL = "original"
+    DATE_SUFFIX = "date-suffix"
+    DATE_ORIGINAL = "date-og"
+    ORIGINAL_DATE = "og-date"
+    ORIGINAL_HASH = "og-hash"
+    ORIGINAL_UNIQUE_ID = "og-iuid"
+    UNIQUE_ID_ORIGINAL = "iuid-og"
+
+
 class CollisionPolicy(StrEnum):
     SKIP = "skip"
     ASK = "ask"
@@ -102,6 +112,8 @@ class RawdogConfig:
     database_path: Path
     date_folder_template: str = "YYYY/YYYY-MM"
     project_folder_template: str = "YYYY/YYYYMMDD_PROJECT"
+    yard_filename_policy: DestinationFilenamePolicy = DestinationFilenamePolicy.DATE_ORIGINAL
+    den_filename_policy: DestinationFilenamePolicy = DestinationFilenamePolicy.DATE_ORIGINAL
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> RawdogConfig:
@@ -112,6 +124,12 @@ class RawdogConfig:
             database_path=Path(data["database_path"]),
             date_folder_template=data.get("date_folder_template", "YYYY/YYYY-MM"),
             project_folder_template=data.get("project_folder_template", "YYYY/YYYYMMDD_PROJECT"),
+            yard_filename_policy=DestinationFilenamePolicy(
+                data.get("yard_filename_policy", DestinationFilenamePolicy.DATE_ORIGINAL.value)
+            ),
+            den_filename_policy=DestinationFilenamePolicy(
+                data.get("den_filename_policy", DestinationFilenamePolicy.DATE_ORIGINAL.value)
+            ),
         )
 
 
@@ -320,6 +338,37 @@ class ExecutionPlanRow:
     executed_at: datetime | None = None
     audited_at: datetime | None = None
     error: str | None = None
+
+
+@dataclass(slots=True, kw_only=True)
+class ExecutionPlanTimeShiftRowCreate:
+    execution_row_id: int
+    source_path: Path
+    destination_path: Path
+    original_capture_at: datetime
+    shifted_capture_at: datetime
+    time_shift_seconds: int
+    basis: str
+    status: str = "planned"
+
+
+@dataclass(slots=True, kw_only=True)
+class ExecutionPlanTimeShiftRow:
+    time_shift_row_id: int
+    plan_id: int
+    execution_row_id: int
+    source_path: Path
+    destination_path: Path
+    original_capture_at: datetime
+    shifted_capture_at: datetime
+    time_shift_seconds: int
+    basis: str
+    status: str
+    audit_status: str | None = None
+    executed_at: datetime | None = None
+    error: str | None = None
+    created_at: datetime
+    updated_at: datetime
 
 
 @dataclass(slots=True, kw_only=True)

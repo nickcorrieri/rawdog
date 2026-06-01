@@ -13,6 +13,8 @@ from rawdog.models import (
     ExecutionPlanRow,
     ExecutionPlanRowCreate,
     ExecutionPlanStatus,
+    ExecutionPlanTimeShiftRow,
+    ExecutionPlanTimeShiftRowCreate,
 )
 
 
@@ -74,6 +76,40 @@ def add_execution_plan_rows(
                 row.size_bytes,
                 row.transfer_action.value,
                 row.status,
+            )
+            for row in rows
+        ],
+    )
+
+
+def add_execution_plan_time_shift_rows(
+    connection: sqlite3.Connection,
+    plan_id: int,
+    rows: list[ExecutionPlanTimeShiftRowCreate],
+) -> None:
+    now = _now()
+    connection.executemany(
+        """
+        INSERT INTO execution_plan_time_shift_rows (
+            plan_id, execution_row_id, source_path, destination_path,
+            original_capture_at, shifted_capture_at, time_shift_seconds,
+            basis, status, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                plan_id,
+                row.execution_row_id,
+                str(row.source_path),
+                str(row.destination_path),
+                row.original_capture_at.isoformat(),
+                row.shifted_capture_at.isoformat(),
+                row.time_shift_seconds,
+                row.basis,
+                row.status,
+                now,
+                now,
             )
             for row in rows
         ],
@@ -145,6 +181,21 @@ def list_execution_plan_rows(
     return [row_to_plan_row(row) for row in rows]
 
 
+def list_execution_plan_time_shift_rows(
+    connection: sqlite3.Connection,
+    plan_id: int,
+) -> list[ExecutionPlanTimeShiftRow]:
+    rows = connection.execute(
+        """
+        SELECT * FROM execution_plan_time_shift_rows
+        WHERE plan_id = ?
+        ORDER BY time_shift_row_id ASC
+        """,
+        (plan_id,),
+    ).fetchall()
+    return [row_to_time_shift_row(row) for row in rows]
+
+
 def mark_execution_plan_started(connection: sqlite3.Connection, plan_id: int) -> None:
     now = _now()
     connection.execute(
@@ -196,6 +247,25 @@ def update_execution_plan_row(
     )
 
 
+def update_execution_plan_time_shift_row(
+    connection: sqlite3.Connection,
+    execution_row_id: int,
+    *,
+    status: str,
+    audit_status: str | None = None,
+    error: str | None = None,
+) -> None:
+    now = _now()
+    connection.execute(
+        """
+        UPDATE execution_plan_time_shift_rows
+        SET status = ?, audit_status = ?, error = ?, executed_at = ?, updated_at = ?
+        WHERE execution_row_id = ?
+        """,
+        (status, audit_status, error, now, now, execution_row_id),
+    )
+
+
 def row_to_plan(row: sqlite3.Row) -> ExecutionPlan:
     return ExecutionPlan(
         plan_id=row["plan_id"],
@@ -229,4 +299,24 @@ def row_to_plan_row(row: sqlite3.Row) -> ExecutionPlanRow:
         executed_at=datetime.fromisoformat(row["executed_at"]) if row["executed_at"] else None,
         audited_at=datetime.fromisoformat(row["audited_at"]) if row["audited_at"] else None,
         error=row["error"],
+    )
+
+
+def row_to_time_shift_row(row: sqlite3.Row) -> ExecutionPlanTimeShiftRow:
+    return ExecutionPlanTimeShiftRow(
+        time_shift_row_id=row["time_shift_row_id"],
+        plan_id=row["plan_id"],
+        execution_row_id=row["execution_row_id"],
+        source_path=Path(row["source_path"]),
+        destination_path=Path(row["destination_path"]),
+        original_capture_at=datetime.fromisoformat(row["original_capture_at"]),
+        shifted_capture_at=datetime.fromisoformat(row["shifted_capture_at"]),
+        time_shift_seconds=row["time_shift_seconds"],
+        basis=row["basis"],
+        status=row["status"],
+        audit_status=row["audit_status"],
+        executed_at=datetime.fromisoformat(row["executed_at"]) if row["executed_at"] else None,
+        error=row["error"],
+        created_at=datetime.fromisoformat(row["created_at"]),
+        updated_at=datetime.fromisoformat(row["updated_at"]),
     )

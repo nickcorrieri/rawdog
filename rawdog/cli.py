@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import shlex
 import shutil
 import sqlite3
@@ -10,7 +11,7 @@ import subprocess
 import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass, replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from time import monotonic
 
@@ -42,6 +43,7 @@ from rawdog.db import initialize, session
 from rawdog.den import (
     DenPlan,
     DenPlanRow,
+    ReflowTimeShiftPlanRow,
     build_den_plan,
     capture_date_counts,
     score_items,
@@ -50,17 +52,21 @@ from rawdog.den import (
 from rawdog.drives import parse_user_path, standard_path_choices
 from rawdog.execution import (
     add_execution_plan_rows,
+    add_execution_plan_time_shift_rows,
     create_execution_plan,
     delete_execution_plan,
     get_execution_plan,
     get_latest_execution_plan,
     list_execution_plan_rows,
+    list_execution_plan_time_shift_rows,
     list_execution_plans,
     list_execution_plans_for_prune,
     mark_execution_plan_finished,
     mark_execution_plan_started,
     update_execution_plan_row,
+    update_execution_plan_time_shift_row,
 )
+from rawdog.filenames import camera_identity_key, destination_path_for_filename_policy, filename_capture_time
 from rawdog.inventory import earliest_raw_capture_time, scan_raw_files
 from rawdog.layout import LayoutAnalysis, analyze_source_layout, is_camera_dump_part
 from rawdog.memory import (
@@ -74,11 +80,14 @@ from rawdog.models import (
     DateGroupMode,
     DenLayoutMode,
     DenTransferAction,
+    DestinationFilenamePolicy,
     ExecutionPlan,
     ExecutionPlanCreate,
     ExecutionPlanRow,
     ExecutionPlanRowCreate,
     ExecutionPlanStatus,
+    ExecutionPlanTimeShiftRow,
+    ExecutionPlanTimeShiftRowCreate,
     ImportProfileCreate,
     NamingConvention,
     OrganizationMode,
@@ -108,7 +117,7 @@ from rawdog.queue import (
     list_queue_steps,
     list_queues,
 )
-from rawdog.reports import write_operation_manifest
+from rawdog.reports import write_csv, write_operation_manifest
 from rawdog.runlock import (
     ActiveRunError,
     active_run_is_alive,
@@ -225,6 +234,32 @@ class PreserveDatesFolderCandidate:
     name: str
     files: int
     example_path: Path
+
+
+@dataclass(frozen=True)
+class DenOrganizationFinding:
+    path: Path
+    relative_path: Path
+    size_bytes: int
+    reason: str
+    detail: str
+    expected: str
+
+
+@dataclass(frozen=True)
+class DenOrganizationReport:
+    root: Path
+    file_count: int
+    total_bytes: int
+    valid_count: int
+    findings: list[DenOrganizationFinding]
+
+
+@dataclass(frozen=True)
+class ReflowCaptureTime:
+    original_capture_at: datetime
+    shifted_capture_at: datetime
+    basis: str
 
 
 @dataclass(frozen=True)
@@ -1393,6 +1428,59 @@ def _parse_cli_date(value: str) -> date:
     return date.fromisoformat(value.strip())
 
 
+def _parse_time_shift(value: str | None) -> timedelta:
+    if value is None or not value.strip():
+        return timedelta()
+    raw = value.strip().lower()
+    sign = -1 if raw.startswith("-") else 1
+    if raw[0] in {"+", "-"}:
+        raw = raw[1:]
+    if not raw:
+        raise typer.BadParameter("time shift must include a duration, such as +1h30m or -2d.")
+    matches = re.findall(r"(\d+)([dhms])", raw)
+    if not matches or "".join(number + unit for number, unit in matches) != raw:
+        raise typer.BadParameter("time shift must look like +1h30m, -2d, +45m, or +30s.")
+    delta = timedelta()
+    for number, unit in matches:
+        amount = int(number)
+        if unit == "d":
+            delta += timedelta(days=amount)
+        elif unit == "h":
+            delta += timedelta(hours=amount)
+        elif unit == "m":
+            delta += timedelta(minutes=amount)
+        elif unit == "s":
+            delta += timedelta(seconds=amount)
+    return sign * delta
+
+
+def _format_time_shift(delta: timedelta) -> str:
+    sign = "+" if delta >= timedelta() else "-"
+    seconds = int(abs(delta).total_seconds())
+    days, seconds = divmod(seconds, 86400)
+    hours, seconds = divmod(seconds, 3600)
+    minutes, seconds = divmod(seconds, 60)
+    parts = []
+    if days:
+        parts.append(f"{days}d")
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes:
+        parts.append(f"{minutes}m")
+    if seconds or not parts:
+        parts.append(f"{seconds}s")
+    return sign + "".join(parts)
+
+
+def _prompt_time_shift() -> timedelta:
+    while True:
+        raw = _optional_prompt("Camera clock correction, like +1h30m or -2d, or Enter for none")
+        try:
+            return _parse_time_shift(raw)
+        except typer.BadParameter as exc:
+            _print_error(str(exc))
+
+
 def _run_home_choice(choice: str) -> None:
     normalized = _normalize_home_choice(choice) or choice
     if normalized == "f":
@@ -1738,6 +1826,7 @@ def _choose_preserve_dates_drop_parts(source_root: Path, exclude_roots: list[Pat
                 [
                     "preserve-dates can keep source folder names as project/context.",
                     "Confirm each candidate before RAWDOG builds the plan.",
+                    "Pure date folders like YYYY, YYYY-MM, and YYYYMMDD are normalized automatically.",
                     "Enter or k = keep this folder name; n = do not keep it.",
                 ]
             ),
@@ -1782,7 +1871,12 @@ def _preserve_dates_folder_candidates(
     resolved_source = source_root.expanduser().resolve()
     for item in scan_raw_files(resolved_source, exclude_roots=exclude_roots or []):
         for part in item.relative_path.parent.parts:
-            if not part or part == "." or is_camera_dump_part(part):
+            if (
+                not part
+                or part == "."
+                or is_camera_dump_part(part)
+                or _is_preserve_dates_container_part(part)
+            ):
                 continue
             counts[part] += 1
             examples.setdefault(part, item.path.parent)
@@ -1790,6 +1884,109 @@ def _preserve_dates_folder_candidates(
         PreserveDatesFolderCandidate(name=name, files=count, example_path=examples[name])
         for name, count in sorted(counts.items(), key=lambda item: (-item[1], item[0].lower()))
     ]
+
+
+def _is_preserve_dates_container_part(part: str) -> bool:
+    value = part.strip()
+    if len(value) == 4 and value.isdigit():
+        return _valid_date_parts(value, "01", "01")
+    if len(value) == 6 and value.isdigit():
+        return _valid_date_parts(value[:4], value[4:6], "01")
+    if len(value) == 8 and value.isdigit():
+        return _valid_date_parts(value[:4], value[4:6], value[6:8]) or _valid_date_parts(
+            value[4:8],
+            value[:2],
+            value[2:4],
+        )
+    for separator in ("-", "_", "."):
+        pieces = value.split(separator)
+        if len(pieces) == 2:
+            year, month = pieces
+            if len(year) == 4 and len(month) == 2 and _valid_date_parts(year, month, "01"):
+                return True
+        if len(pieces) == 3:
+            first, second, third = pieces
+            if (
+                len(first) == 4
+                and len(second) == 2
+                and len(third) == 2
+                and _valid_date_parts(first, second, third)
+            ):
+                return True
+            if (
+                len(first) == 2
+                and len(second) == 2
+                and len(third) == 4
+                and _valid_date_parts(third, first, second)
+            ):
+                return True
+    return False
+
+
+def _valid_date_parts(year: str, month: str, day: str) -> bool:
+    if not (year.isdigit() and month.isdigit() and day.isdigit()):
+        return False
+    try:
+        date(int(year), int(month), int(day))
+    except ValueError:
+        return False
+    return True
+
+
+def _exact_year_part(part: str) -> int | None:
+    value = part.strip()
+    if len(value) == 4 and value.isdigit() and _valid_date_parts(value, "01", "01"):
+        return int(value)
+    return None
+
+
+def _den_date_bucket_year(part: str) -> int | None:
+    value = part.strip()
+    if len(value) == 6 and value.isdigit() and _valid_date_parts(value[:4], value[4:6], "01"):
+        return int(value[:4])
+    if len(value) == 8 and value.isdigit() and _valid_date_parts(value[:4], value[4:6], value[6:8]):
+        return int(value[:4])
+    if (
+        len(value) > 10
+        and value[4] in {"-", "_", "."}
+        and value[7] in {"-", "_", "."}
+        and _valid_date_parts(value[:4], value[5:7], value[8:10])
+    ):
+        return int(value[:4])
+    for separator in ("-", "_", "."):
+        pieces = value.split(separator)
+        if len(pieces) == 2:
+            year, month = pieces
+            if len(year) == 4 and len(month) == 2 and _valid_date_parts(year, month, "01"):
+                return int(year)
+        if len(pieces) == 3:
+            first, second, third = pieces
+            if (
+                len(first) == 4
+                and len(second) == 2
+                and len(third) == 2
+                and _valid_date_parts(first, second, third)
+            ):
+                return int(first)
+    if len(value) > 8 and value[:8].isdigit() and _valid_date_parts(value[:4], value[4:6], value[6:8]):
+        return int(value[:4])
+    for separator in ("-", "_"):
+        tail = value.rsplit(separator, 1)[-1]
+        if len(tail) == 6 and tail.isdigit() and _valid_date_parts(tail[:4], tail[4:6], "01"):
+            return int(tail[:4])
+        if len(tail) == 8 and tail.isdigit() and _valid_date_parts(tail[:4], tail[4:6], tail[6:8]):
+            return int(tail[:4])
+    if len(value) > 7 and _valid_date_parts(value[-7:-3], value[-2:], "01") and value[-3] in {"-", "_", "."}:
+        return int(value[-7:-3])
+    if (
+        len(value) > 10
+        and value[-10:-6].isdigit()
+        and value[-6] in {"-", "_", "."}
+        and value[-3] in {"-", "_", "."}
+        and _valid_date_parts(value[-10:-6], value[-5:-3], value[-2:])
+    ):
+        return int(value[-10:-6])
+    return None
 
 
 def _den_template_for_grouping(layout: DenLayoutMode, group_by: DateGroupMode | None) -> str | None:
@@ -1933,6 +2130,8 @@ def _home_inspect() -> None:
     _print_option("3.", "Rebuild a den catalog from files on disk")
     _print_option("4.", "Rebuild a yard catalog from files on disk")
     _print_option("5.", "Slow full audit: inventory, dates, duplicates, optional hashes")
+    _print_option("6.", "DEN organization report / date-bucket reflow plan")
+    _print_option("7.", "YARD date-bucket / filename reflow plan")
     _print_option("0.", "Back")
     action = Prompt.ask(
         _prompt("Choose audit action"),
@@ -1943,6 +2142,8 @@ def _home_inspect() -> None:
             "3",
             "4",
             "5",
+            "6",
+            "7",
             "sniff",
             "score",
             "rebuild",
@@ -1951,6 +2152,10 @@ def _home_inspect() -> None:
             "slow",
             "full",
             "hardcore",
+            "den-org",
+            "den-organization",
+            "reflow",
+            "yard-reflow",
         ],
         default="1",
         console=console,
@@ -1965,6 +2170,12 @@ def _home_inspect() -> None:
         return
     if action in {"5", "slow", "full", "hardcore"}:
         _home_hardcore_audit()
+        return
+    if action in {"6", "den-org", "den-organization", "reflow"}:
+        _home_den_organization()
+        return
+    if action in {"7", "yard-reflow"}:
+        _home_yard_reflow()
         return
     root = _choose_source_path("Folder to inspect")
     if action in {"2", "score"}:
@@ -1992,6 +2203,92 @@ def _home_hardcore_audit() -> None:
     root = _choose_audit_root("Slow full audit target")
     hash_check = _yes_no("Also run slow SHA-256 duplicate-content check?", default=False)
     _run_hardcore_audit(root, hash_check=hash_check)
+
+
+def _home_den_organization() -> None:
+    console.print(
+        Panel(
+            "\n".join(
+                [
+                    "DEN organization is read-only unless you explicitly build and commit a same-den reflow plan.",
+                    "It flags double year folders and files outside YYYY/date-bucket shapes.",
+                    "Same-den reflow renames/moves files inside the existing DEN; it does not copy to a new den.",
+                    "Existing destination paths are never overwritten; conflicts stay paused before commit.",
+                    "Use camera clock correction only when you know the exact offset.",
+                ]
+            ),
+            title="DEN Organization",
+            border_style="yellow",
+            style=STYLE_PANEL,
+            expand=True,
+        )
+    )
+    root = _choose_store_path("DEN to inspect", StoreKind.DEN)
+    _, config = _load_or_exit()
+    _run_den_organization_report(config, root)
+    if not _yes_no("Build an in-place same-DEN rename/move reflow plan?", default=False):
+        return
+    group_by = _choose_date_grouping(DenLayoutMode.DATE)
+    keep_context = _yes_no("Keep non-date project/context folders while reflowing?", default=True)
+    drop_raw = _optional_prompt("Folder names to drop from context, comma-separated, or Enter for none")
+    drop_context = [part.strip() for part in drop_raw.split(",") if part.strip()] if drop_raw else []
+    time_shift = _prompt_time_shift()
+    dry_run = not _yes_no("Commit same-DEN rename/move plan now? Dry-run is safer.", default=False)
+    _run_den_reflow_plan(
+        config,
+        root,
+        group_by=group_by,
+        keep_context=keep_context,
+        drop_context=set(drop_context),
+        filename_policy=config.den_filename_policy,
+        time_shift=time_shift,
+        dry_run=dry_run,
+    )
+
+
+def _home_yard_reflow() -> None:
+    console.print(
+        Panel(
+            "\n".join(
+                [
+                    "YARD reflow builds a preview-first rename/move plan inside one registered yard.",
+                    "Use it to turn flattened camera files into YYYY/date buckets with rollover-safe names.",
+                    "Existing destination paths are never overwritten; conflicts stay paused for review.",
+                    "Use camera clock correction only when you know the exact offset.",
+                ]
+            ),
+            title="YARD Reflow",
+            border_style="yellow",
+            style=STYLE_PANEL,
+            expand=True,
+        )
+    )
+    root = _choose_store_path("YARD to reflow", StoreKind.YARD)
+    _, config = _load_or_exit()
+    group_by = _choose_date_grouping(DenLayoutMode.DATE)
+    keep_context = _yes_no("Keep non-date project/context folders while reflowing?", default=False)
+    drop_raw = _optional_prompt("Folder names to drop from context, comma-separated, or Enter for none")
+    drop_context = [part.strip() for part in drop_raw.split(",") if part.strip()] if drop_raw else []
+    filename_policy = DestinationFilenamePolicy(
+        Prompt.ask(
+            "Destination file names",
+            choices=[policy.value for policy in DestinationFilenamePolicy],
+            default=config.yard_filename_policy.value,
+            console=console,
+        )
+    )
+    time_shift = _prompt_time_shift()
+    dry_run = not _yes_no("Commit same-YARD rename/move plan now? Dry-run is safer.", default=False)
+    _run_yard_reflow_plan(
+        config,
+        root,
+        group_by=group_by,
+        keep_context=keep_context,
+        drop_context=set(drop_context),
+        filename_policy=filename_policy,
+        time_shift=time_shift,
+        dry_run=dry_run,
+    )
 
 
 def _choose_audit_root(label: str) -> Path:
@@ -2032,6 +2329,7 @@ def _run_hardcore_audit(root: Path, *, hash_check: bool = False) -> None:
     extensions = Counter(item.path.suffix.lower() or "[none]" for item in items)
     years = Counter(str(capture_time_fallback(item.path).year) for item in items)
     duplicate_names = _duplicate_name_groups(items)
+    duplicate_camera_ids = _camera_identity_groups([item.path for item in items])
 
     table = _styled_table(title="Slow Full Audit Summary")
     table.add_column("Metric")
@@ -2042,16 +2340,459 @@ def _run_hardcore_audit(root: Path, *, hash_check: bool = False) -> None:
     table.add_row("Extensions", str(len(extensions)))
     table.add_row("Capture years", str(len(years)))
     table.add_row("Duplicate filenames", str(len(duplicate_names)))
+    table.add_row("Repeated camera IDs", str(len(duplicate_camera_ids)))
     table.add_row("SHA-256 content check", "yes" if hash_check else "no")
     console.print(table)
 
     _print_counter_table("Files By Extension", extensions)
     _print_counter_table("Files By Capture Year", years)
     _print_duplicate_name_table(duplicate_names)
+    _print_camera_numbering_warning([item.path for item in items])
     if hash_check:
         _print_hash_duplicate_audit(items)
     else:
         _print_notice("Hash check skipped. Re-run slow audit and answer yes for byte-level duplicate grouping.")
+
+
+def _run_den_organization_report(config: RawdogConfig, root: Path) -> DenOrganizationReport:
+    root = root.expanduser().resolve()
+    try:
+        ensure_existing_directory(root, "den")
+    except SafetyError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    report = _build_den_organization_report(root)
+    by_reason = Counter(finding.reason for finding in report.findings)
+
+    table = _styled_table(title="DEN Organization Summary")
+    table.add_column("Metric")
+    table.add_column("Value", justify="right")
+    table.add_row("Root", str(report.root))
+    table.add_row("Camera-original files", str(report.file_count))
+    table.add_row("Total size", _format_bytes(report.total_bytes))
+    table.add_row("Looks organized", str(report.valid_count))
+    table.add_row("Review findings", str(len(report.findings)))
+    console.print(table)
+    _print_counter_table("DEN Organization Findings", by_reason)
+    _print_den_organization_findings(report.findings)
+
+    report_path = _write_den_organization_report(config, report)
+    _print_notice(f"DEN organization report written: {report_path}", style=STYLE_ROW_SELECTED)
+    return report
+
+
+def _build_den_organization_report(root: Path) -> DenOrganizationReport:
+    items = scan_raw_files(root)
+    findings: list[DenOrganizationFinding] = []
+    for item in items:
+        findings.extend(_den_organization_findings_for_item(root, item.path, item.relative_path, item.size_bytes))
+    finding_paths = {finding.path for finding in findings}
+    return DenOrganizationReport(
+        root=root,
+        file_count=len(items),
+        total_bytes=sum(item.size_bytes for item in items),
+        valid_count=sum(1 for item in items if item.path not in finding_paths),
+        findings=findings,
+    )
+
+
+def _den_organization_findings_for_item(
+    root: Path,
+    path: Path,
+    relative_path: Path,
+    size_bytes: int,
+) -> list[DenOrganizationFinding]:
+    parent_parts = relative_path.parent.parts
+    if not parent_parts:
+        return [
+            _den_organization_finding(
+                root,
+                path,
+                relative_path,
+                size_bytes,
+                "outside_year_folder",
+                "File is directly under the den root.",
+            )
+        ]
+    findings: list[DenOrganizationFinding] = []
+    expected = "Expected YYYY/YYYY-MM/file, YYYY/YYYYMMDD/file, or YYYY/<project-context>/date-bucket/file."
+    first_year = _exact_year_part(parent_parts[0])
+    if first_year is None:
+        findings.append(
+            _den_organization_finding(
+                root,
+                path,
+                relative_path,
+                size_bytes,
+                "outside_year_folder",
+                f"First folder is {parent_parts[0]!r}, not a YYYY year folder.",
+                expected=expected,
+            )
+        )
+    for part in parent_parts[1:]:
+        if _exact_year_part(part) is not None:
+            findings.append(
+                _den_organization_finding(
+                    root,
+                    path,
+                    relative_path,
+                    size_bytes,
+                    "double_year_folder",
+                    f"Nested year folder {part!r} appears below another year folder.",
+                    expected=expected,
+                )
+            )
+            break
+    date_bucket_years = [
+        year for part in parent_parts[1:] if (year := _den_date_bucket_year(part)) is not None
+    ]
+    if not date_bucket_years:
+        findings.append(
+            _den_organization_finding(
+                root,
+                path,
+                relative_path,
+                size_bytes,
+                "missing_date_bucket",
+                "No YYYY-MM, YYYYMMDD, or project-date bucket appears below the year folder.",
+                expected=expected,
+            )
+        )
+    elif first_year is not None and date_bucket_years[0] != first_year:
+        findings.append(
+            _den_organization_finding(
+                root,
+                path,
+                relative_path,
+                size_bytes,
+                "year_mismatch",
+                f"Top year is {first_year}, but first date bucket belongs to {date_bucket_years[0]}.",
+                expected=expected,
+            )
+        )
+    if len(date_bucket_years) > 1:
+        findings.append(
+            _den_organization_finding(
+                root,
+                path,
+                relative_path,
+                size_bytes,
+                "multiple_date_buckets",
+                "More than one date bucket appears in the path.",
+                expected=expected,
+            )
+        )
+    return findings
+
+
+def _den_organization_finding(
+    root: Path,
+    path: Path,
+    relative_path: Path,
+    size_bytes: int,
+    reason: str,
+    detail: str,
+    *,
+    expected: str | None = None,
+) -> DenOrganizationFinding:
+    return DenOrganizationFinding(
+        path=path,
+        relative_path=relative_path,
+        size_bytes=size_bytes,
+        reason=reason,
+        detail=detail,
+        expected=expected
+        or f"Expected files under a year/date bucket inside {root}, with optional project context.",
+    )
+
+
+def _print_den_organization_findings(findings: list[DenOrganizationFinding], *, limit: int = 20) -> None:
+    if not findings:
+        _print_notice("No DEN organization findings. Paths match expected year/date-bucket shapes.")
+        return
+    table = _styled_table(title="DEN Organization Review Examples")
+    table.add_column("Reason")
+    table.add_column("Path")
+    table.add_column("Detail")
+    for finding in findings[:limit]:
+        table.add_row(finding.reason, str(finding.relative_path), finding.detail)
+    console.print(table)
+    if len(findings) > limit:
+        _print_notice(f"...and {len(findings) - limit} more findings. See the written TSV report.")
+
+
+def _write_den_organization_report(config: RawdogConfig, report: DenOrganizationReport) -> Path:
+    reports_dir = config.database_path.parent / "reports"
+    timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+    path = reports_dir / f"den-organization-{timestamp}.tsv"
+    write_csv(
+        path,
+        ["reason", "relative_path", "size_bytes", "detail", "expected", "absolute_path"],
+        [
+            {
+                "reason": finding.reason,
+                "relative_path": finding.relative_path,
+                "size_bytes": finding.size_bytes,
+                "detail": finding.detail,
+                "expected": finding.expected,
+                "absolute_path": finding.path,
+            }
+            for finding in report.findings
+        ],
+    )
+    return path
+
+
+def _run_den_reflow_plan(
+    config: RawdogConfig,
+    root: Path,
+    *,
+    group_by: DateGroupMode,
+    keep_context: bool,
+    drop_context: set[str] | None = None,
+    filename_policy: DestinationFilenamePolicy = DestinationFilenamePolicy.ORIGINAL,
+    time_shift: timedelta = timedelta(),
+    dry_run: bool = True,
+    limit: int | None = None,
+) -> ExecutionPlan:
+    return _run_store_reflow_plan(
+        config,
+        root,
+        store_kind=StoreKind.DEN,
+        group_by=group_by,
+        keep_context=keep_context,
+        drop_context=drop_context,
+        filename_policy=filename_policy,
+        time_shift=time_shift,
+        dry_run=dry_run,
+        limit=limit,
+    )
+
+
+def _run_yard_reflow_plan(
+    config: RawdogConfig,
+    root: Path,
+    *,
+    group_by: DateGroupMode,
+    keep_context: bool,
+    drop_context: set[str] | None = None,
+    filename_policy: DestinationFilenamePolicy = DestinationFilenamePolicy.DATE_ORIGINAL,
+    time_shift: timedelta = timedelta(),
+    dry_run: bool = True,
+    limit: int | None = None,
+) -> ExecutionPlan:
+    return _run_store_reflow_plan(
+        config,
+        root,
+        store_kind=StoreKind.YARD,
+        group_by=group_by,
+        keep_context=keep_context,
+        drop_context=drop_context,
+        filename_policy=filename_policy,
+        time_shift=time_shift,
+        dry_run=dry_run,
+        limit=limit,
+    )
+
+
+def _run_store_reflow_plan(
+    config: RawdogConfig,
+    root: Path,
+    *,
+    store_kind: StoreKind,
+    group_by: DateGroupMode,
+    keep_context: bool,
+    drop_context: set[str] | None = None,
+    filename_policy: DestinationFilenamePolicy = DestinationFilenamePolicy.ORIGINAL,
+    time_shift: timedelta = timedelta(),
+    dry_run: bool = True,
+    limit: int | None = None,
+) -> ExecutionPlan:
+    root = root.expanduser().resolve()
+    with session(config.database_path) as connection:
+        store = find_store_for_path(connection, root, store_kind)
+    store_label = store_kind.value.upper()
+    if store is None:
+        raise typer.BadParameter(f"{store_label} reflow is only allowed inside a registered {store_kind.value}.")
+    plan = _build_den_reflow_plan(
+        root,
+        group_by=group_by,
+        keep_context=keep_context,
+        drop_context=drop_context or set(),
+        filename_policy=filename_policy,
+        time_shift=time_shift,
+        limit=limit,
+    )
+    execution_plan = _persist_reflow_execution_plan(config, plan, store_kind=store_kind)
+    _print_execution_plan_start(execution_plan)
+    table = _styled_table(title=f"RAWDOG {store_label} Reflow Plan")
+    table.add_column("Destination")
+    table.add_column("Files", justify="right")
+    table.add_column("GB", justify="right")
+    table.add_column("Mode")
+    table.add_row(
+        str(plan.destination_folder),
+        str(plan.files_to_transfer),
+        f"{plan.bytes_to_transfer / 1_000_000_000:.2f}",
+        f"in-place same-{store_kind.value} rename/move / {group_by.value} / {filename_policy.value} / {'dry-run' if dry_run else 'commit'}",
+    )
+    console.print(table)
+    _print_notice(
+        f"This plan only renames/moves files inside the existing {store_kind.value.upper()} root: {root}.",
+        style=STYLE_ROW_SELECTED,
+    )
+    _print_notice(
+        "It does not copy to another store, does not overwrite existing destination files, and leaves conflicts paused.",
+        style=STYLE_ROW_SELECTED,
+    )
+    if time_shift:
+        _print_notice(f"Capture timestamp shift applied during planning: {_format_time_shift(time_shift)}")
+        _print_notice(
+            f"Time-shift database rows recorded: {len(plan.time_shift_rows)}. "
+            f"Review with `rawdog plans time-shift {execution_plan.plan_id}`.",
+            style=STYLE_ROW_SELECTED,
+        )
+    _print_duplicate_year_warning([row.destination_path for row in plan.rows], destination_root=plan.destination_root)
+    skipped = sum(1 for row in plan.rows if row.status.startswith("skip"))
+    collisions = sum(1 for row in plan.rows if row.status == "collision")
+    console.print(f"Skipped/no-op existing: {skipped}")
+    console.print(f"Conflicts needing review before commit: {collisions}")
+    _print_ai_review_prompt(
+        f"{store_kind.value} reflow conflicts",
+        [row.destination_path for row in plan.rows if row.status == "collision"],
+        "do not commit the reflow until these source and destination paths have been compared.",
+        plan_id=execution_plan.plan_id,
+    )
+    with session(config.database_path) as connection:
+        rows = list_execution_plan_rows(connection, execution_plan.plan_id)
+    manifest_path = _write_plan_operation_manifest(config, execution_plan.plan_id, rows)
+    console.print(f"Operation manifest written: {manifest_path}")
+    if dry_run:
+        console.print(
+            f"Plan #{execution_plan.plan_id} written to the database. "
+            "Review conflicts and operation paths before executing."
+        )
+        _prompt_dry_run_plan_next(config, execution_plan.plan_id)
+        return execution_plan
+    _confirm_and_execute_plan(config, execution_plan.plan_id, action="Execute")
+    with session(config.database_path) as connection:
+        return get_execution_plan(connection, execution_plan.plan_id) or execution_plan
+
+
+def _build_den_reflow_plan(
+    root: Path,
+    *,
+    group_by: DateGroupMode,
+    keep_context: bool,
+    drop_context: set[str],
+    filename_policy: DestinationFilenamePolicy = DestinationFilenamePolicy.ORIGINAL,
+    time_shift: timedelta = timedelta(),
+    limit: int | None = None,
+) -> DenPlan:
+    items = scan_raw_files(root, limit=limit)
+    rows: list[DenPlanRow] = []
+    time_shift_rows: list[ReflowTimeShiftPlanRow] = []
+    planned_destinations: set[Path] = set()
+    shift_seconds = int(time_shift.total_seconds())
+    for item in items:
+        capture = _reflow_capture_time_info(item.path, time_shift=time_shift)
+        captured_at = capture.shifted_capture_at
+        date_bucket = _den_reflow_date_bucket(captured_at, group_by)
+        context_parts = (
+            _den_reflow_context_parts(item.relative_path.parent.parts, drop_context=drop_context)
+            if keep_context
+            else ()
+        )
+        destination_parent = root / f"{captured_at.year:04d}" / Path(*context_parts) / date_bucket
+        destination = destination_path_for_filename_policy(
+            item.path,
+            destination_parent,
+            captured_at,
+            policy=filename_policy,
+            reserved_destinations=planned_destinations,
+            size_bytes=item.size_bytes,
+        )
+        status = "plan_copy"
+        if destination == item.path:
+            status = "skip_existing_same_name_size"
+        elif destination in planned_destinations:
+            status = "collision"
+        elif destination.exists():
+            status = (
+                "skip_existing_same_name_size"
+                if destination.name == item.path.name and destination.stat().st_size == item.size_bytes
+                else "collision"
+            )
+        if status == "plan_copy":
+            planned_destinations.add(destination)
+        rows.append(
+            DenPlanRow(
+                source_path=item.path,
+                destination_path=destination,
+                size_bytes=item.size_bytes,
+                status=status,
+            )
+        )
+        if shift_seconds:
+            time_shift_rows.append(
+                ReflowTimeShiftPlanRow(
+                    source_path=item.path,
+                    destination_path=destination,
+                    original_capture_at=capture.original_capture_at,
+                    shifted_capture_at=captured_at,
+                    time_shift_seconds=shift_seconds,
+                    basis=capture.basis,
+                )
+            )
+    return DenPlan(
+        source_root=root,
+        destination_root=root,
+        destination_folder=root,
+        rows=rows,
+        transfer_action=DenTransferAction.MOVE,
+        limited_to=limit,
+        time_shift_rows=time_shift_rows,
+    )
+
+
+def _reflow_capture_time(path: Path, *, time_shift: timedelta) -> datetime:
+    return _reflow_capture_time_info(path, time_shift=time_shift).shifted_capture_at
+
+
+def _reflow_capture_time_info(path: Path, *, time_shift: timedelta) -> ReflowCaptureTime:
+    if time_shift:
+        from_name = filename_capture_time(path)
+        if from_name is not None:
+            return ReflowCaptureTime(
+                original_capture_at=from_name,
+                shifted_capture_at=from_name + time_shift,
+                basis="filename",
+            )
+    original = capture_time_fallback(path)
+    return ReflowCaptureTime(
+        original_capture_at=original,
+        shifted_capture_at=original + time_shift,
+        basis="metadata_or_file_mtime",
+    )
+
+
+def _den_reflow_date_bucket(captured_at: datetime, group_by: DateGroupMode) -> str:
+    return captured_at.strftime("%Y%m%d" if group_by == DateGroupMode.DAY else "%Y-%m")
+
+
+def _den_reflow_context_parts(parent_parts: tuple[str, ...], *, drop_context: set[str]) -> tuple[str, ...]:
+    context: list[str] = []
+    for part in parent_parts:
+        if (
+            not part
+            or part == "."
+            or part in drop_context
+            or is_camera_dump_part(part)
+            or _exact_year_part(part) is not None
+            or _den_date_bucket_year(part) is not None
+        ):
+            continue
+        context.append(part)
+    return tuple(context)
 
 
 def _duplicate_name_groups(items) -> dict[str, list[Path]]:
@@ -2059,6 +2800,39 @@ def _duplicate_name_groups(items) -> dict[str, list[Path]]:
     for item in items:
         groups[item.path.name].append(item.path)
     return {name: paths for name, paths in groups.items() if len(paths) > 1}
+
+
+def _camera_identity_groups(paths: list[Path]) -> dict[str, list[Path]]:
+    groups: dict[str, list[Path]] = defaultdict(list)
+    for path in paths:
+        groups[camera_identity_key(path)].append(path)
+    return {name: grouped_paths for name, grouped_paths in groups.items() if len(grouped_paths) > 1}
+
+
+def _print_camera_numbering_warning(paths: list[Path], *, limit: int = 5) -> None:
+    groups = _camera_identity_groups(paths)
+    if not groups:
+        return
+    examples = []
+    for name, grouped_paths in sorted(groups.items(), key=lambda item: len(item[1]), reverse=True)[:limit]:
+        examples.append(f"- {name}: {len(grouped_paths)} files; example {grouped_paths[0]}")
+    console.print(
+        Panel(
+            "\n".join(
+                [
+                    "Camera folder numbers like 100, 101, 102, and 103 are not unique file numbering.",
+                    "A camera can reuse names such as LS7A0001.CR3 in later folders after rollover.",
+                    "Do not delete by filename alone. Use full path, size, and SHA-256 when deciding duplicates.",
+                    "",
+                    *examples,
+                ]
+            ),
+            title="Camera Numbering / Rollover Warning",
+            border_style="red",
+            style=STYLE_PANEL,
+            expand=True,
+        )
+    )
 
 
 def _print_counter_table(title: str, counts: Counter[str], *, limit: int = 12) -> None:
@@ -2214,10 +2988,11 @@ def _home_store_setup() -> None:
         _print_option("5.", "List working yards")
         _print_option("6.", "Forget a den registration")
         _print_option("7.", "Forget a yard registration")
+        _print_option("8.", "Configure default destination file names")
         _print_option("0.", "Back")
         choice = Prompt.ask(
             _prompt("Choose manage action"),
-            choices=["0", "1", "2", "3", "4", "5", "6", "7"],
+            choices=["0", "1", "2", "3", "4", "5", "6", "7", "8"],
             default="1",
             console=console,
         )
@@ -2247,6 +3022,40 @@ def _home_store_setup() -> None:
             identifier = Prompt.ask("Yard name or store ID to forget", console=console).strip()
             if identifier:
                 _remove_store(identifier, StoreKind.YARD)
+            continue
+        if choice == "8":
+            _home_filename_policy_settings()
+
+
+def _home_filename_policy_settings() -> None:
+    config_path, config = _load_or_exit()
+    choices = [policy.value for policy in DestinationFilenamePolicy]
+    _print_notice(
+        "date-og writes YYYYMMDD-HHMMSS-SS__original so rollover names sort by capture time and remain searchable.",
+        style=STYLE_ROW_SELECTED,
+    )
+    yard_policy = DestinationFilenamePolicy(
+        Prompt.ask(
+            "Default YARD import file names",
+            choices=choices,
+            default=config.yard_filename_policy.value,
+            console=console,
+        )
+    )
+    den_policy = DestinationFilenamePolicy(
+        Prompt.ask(
+            "Default DEN file names",
+            choices=choices,
+            default=config.den_filename_policy.value,
+            console=console,
+        )
+    )
+    updated = replace(config, yard_filename_policy=yard_policy, den_filename_policy=den_policy)
+    save_config(updated, config_path)
+    _print_notice(
+        f"Saved filename policies: yard={yard_policy.value}; den={den_policy.value}.",
+        style=STYLE_SAFE,
+    )
 
 
 def _home_register_store(store_kind: StoreKind) -> None:
@@ -2323,6 +3132,16 @@ def init(
         "YYYY/YYYYMMDD_PROJECT",
         help="Project-oriented folder template.",
     ),
+    yard_filename_policy: DestinationFilenamePolicy = typer.Option(
+        DestinationFilenamePolicy.DATE_ORIGINAL,
+        "--yard-filename-policy",
+        help="Default file naming for fetch/yard imports.",
+    ),
+    den_filename_policy: DestinationFilenamePolicy = typer.Option(
+        DestinationFilenamePolicy.DATE_ORIGINAL,
+        "--den-filename-policy",
+        help="Default file naming for den copy/move plans.",
+    ),
 ) -> None:
     """Initialize RAWDOG config and local SQLite database."""
     if working_root and archive_root:
@@ -2333,11 +3152,21 @@ def init(
         archive_root=archive_root,
         date_folder_template=date_template,
         project_folder_template=project_template,
+        yard_filename_policy=yard_filename_policy,
+        den_filename_policy=den_filename_policy,
     )
     config_path = save_config(config)
     initialize(config.database_path)
     console.print(f"RAWDOG config written: {config_path}")
     console.print(f"RAWDOG database initialized: {config.database_path}")
+    _print_notice(
+        f"Default YARD file names: {yard_filename_policy.value} - {_filename_policy_description(yard_filename_policy)}",
+        style=STYLE_SAFE,
+    )
+    _print_notice(
+        f"Default DEN file names: {den_filename_policy.value} - {_filename_policy_description(den_filename_policy)}",
+        style=STYLE_SAFE,
+    )
 
 
 @app.command()
@@ -2360,6 +3189,11 @@ def fetch(
             "under the yard; ddd puts camera dumps into the default dated Date_Only folder; project-label "
             "puts files into the named project folder."
         ),
+    ),
+    filename_policy: DestinationFilenamePolicy | None = typer.Option(
+        None,
+        "--filename-policy",
+        help="Destination file names: date-suffix keeps the camera basename and appends capture date/time on conflicts.",
     ),
     collision_policy: CollisionPolicy | None = typer.Option(
         None,
@@ -2421,6 +3255,9 @@ def fetch(
             effective_naming = NamingConvention.DDD
     if project_name:
         effective_naming = NamingConvention.PROJECT_LABEL
+    effective_filename_policy = (
+        filename_policy if isinstance(filename_policy, DestinationFilenamePolicy) else config.yard_filename_policy
+    )
     effective_collision_policy = collision_policy or (
         loaded_profile.collision_policy if loaded_profile else CollisionPolicy.SKIP
     )
@@ -2497,6 +3334,7 @@ def fetch(
     console.print(f"Destination: {destination_root}")
     console.print(f"Mode: {(loaded_profile.organization_mode if loaded_profile else config.organization_mode).value}")
     console.print(f"Naming: {effective_naming.value} - {_naming_description(effective_naming)}")
+    console.print(f"File names: {effective_filename_policy.value} - {_filename_policy_description(effective_filename_policy)}")
     console.print(f"Collision policy: {effective_collision_policy.value}")
     console.print(f"Verify after copy: {'yes' if effective_verify else 'no'}")
     effective_mode = loaded_profile.organization_mode if loaded_profile else config.organization_mode
@@ -2552,7 +3390,9 @@ def fetch(
             destination_root,
             destination_folder,
             effective_naming,
+            effective_filename_policy,
         )
+        _print_camera_numbering_warning([row.source_path for row in plan.rows])
         execution_plan = _persist_fetch_execution_plan(config, plan)
         _print_execution_plan_start(execution_plan)
         table = _styled_table(title="RAWDOG Fetch Plan")
@@ -2708,6 +3548,144 @@ def score(root: Path = typer.Argument(..., help="Folder or volume to score.")) -
         console.print(f"- {note}")
 
 
+@app.command("filename-audit")
+def filename_audit(
+    root: Path = typer.Argument(..., help="Folder, yard, or den to search."),
+    prefix: str = typer.Argument(..., help="Camera filename prefix such as LS7A0001."),
+    hash_check: bool = typer.Option(False, "--hash-check", help="Hash same-size matches for exact byte grouping."),
+) -> None:
+    """Search camera files by partial filename/camera ID without moving files."""
+    try:
+        ensure_existing_directory(root, "root")
+    except SafetyError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    items = scan_raw_files(root)
+    lowered = prefix.lower()
+    matches = [
+        item
+        for item in items
+        if item.path.name.lower().startswith(lowered) or camera_identity_key(item.path).lower().startswith(lowered)
+    ]
+    table = _styled_table(title="Filename Audit")
+    table.add_column("Camera ID")
+    table.add_column("Bytes", justify="right")
+    table.add_column("Path")
+    for item in matches[:100]:
+        table.add_row(camera_identity_key(item.path), str(item.size_bytes), str(item.path))
+    console.print(table)
+    _print_notice(f"Matched {len(matches)} files under {root}. RAWDOG did not move or delete anything.")
+    _print_camera_numbering_warning([item.path for item in matches])
+    if hash_check:
+        _print_hash_duplicate_audit(matches)
+    elif matches:
+        _print_notice("Re-run with --hash-check to group exact same-size byte matches by SHA-256.")
+
+
+@app.command("den-organization")
+def den_organization(
+    root: Path = typer.Argument(..., help="Registered den root to inspect."),
+) -> None:
+    """Report DEN folder-shape issues without moving files."""
+    _, config = _load_or_exit()
+    _run_den_organization_report(config, root)
+
+
+@app.command("den-reflow")
+def den_reflow(
+    root: Path = typer.Argument(..., help="Registered den root to reflow inside itself."),
+    group_by: DateGroupMode = typer.Option(
+        DateGroupMode.DAY,
+        "--group-by",
+        help="Target date bucket shape: month uses YYYY/YYYY-MM; day uses YYYY/YYYYMMDD.",
+    ),
+    keep_context: bool = typer.Option(
+        True,
+        "--keep-context/--date-only",
+        help="Keep non-date project/context folders between YYYY and the date bucket.",
+    ),
+    drop_context: list[str] | None = typer.Option(
+        None,
+        "--drop-context",
+        help="Do not preserve this folder name as project/context during reflow.",
+    ),
+    filename_policy: DestinationFilenamePolicy | None = typer.Option(
+        None,
+        "--filename-policy",
+        help="Destination file names during reflow.",
+    ),
+    time_shift: str | None = typer.Option(
+        None,
+        "--time-shift",
+        help="Apply a capture-time correction while planning names/folders, e.g. +1h30m or -2d.",
+    ),
+    limit: int | None = typer.Option(None, "--limit", min=1, help="Limit the planning scan for review."),
+    dry_run: bool = typer.Option(True, "--dry-run/--commit", help="Preview before execution."),
+) -> None:
+    """Build an in-place same-den rename/move plan for date buckets and filenames."""
+    _, config = _load_or_exit()
+    _run_den_reflow_plan(
+        config,
+        root,
+        group_by=group_by,
+        keep_context=keep_context,
+        drop_context=set(drop_context or []),
+        filename_policy=(
+            filename_policy if isinstance(filename_policy, DestinationFilenamePolicy) else config.den_filename_policy
+        ),
+        time_shift=_parse_time_shift(time_shift),
+        dry_run=dry_run,
+        limit=limit,
+    )
+
+
+@app.command("yard-reflow")
+def yard_reflow(
+    root: Path = typer.Argument(..., help="Registered yard root to reflow inside itself."),
+    group_by: DateGroupMode = typer.Option(
+        DateGroupMode.MONTH,
+        "--group-by",
+        help="Target date bucket shape: month uses YYYY/YYYY-MM; day uses YYYY/YYYYMMDD.",
+    ),
+    keep_context: bool = typer.Option(
+        False,
+        "--keep-context/--date-only",
+        help="Keep non-date project/context folders between YYYY and the date bucket.",
+    ),
+    drop_context: list[str] | None = typer.Option(
+        None,
+        "--drop-context",
+        help="Do not preserve this folder name as project/context during reflow.",
+    ),
+    filename_policy: DestinationFilenamePolicy | None = typer.Option(
+        None,
+        "--filename-policy",
+        help="Destination file names during reflow.",
+    ),
+    time_shift: str | None = typer.Option(
+        None,
+        "--time-shift",
+        help="Apply a capture-time correction while planning names/folders, e.g. +1h30m or -2d.",
+    ),
+    limit: int | None = typer.Option(None, "--limit", min=1, help="Limit the planning scan for review."),
+    dry_run: bool = typer.Option(True, "--dry-run/--commit", help="Preview before execution."),
+) -> None:
+    """Build an in-place same-yard rename/move plan for date buckets and filenames."""
+    _, config = _load_or_exit()
+    _run_yard_reflow_plan(
+        config,
+        root,
+        group_by=group_by,
+        keep_context=keep_context,
+        drop_context=set(drop_context or []),
+        filename_policy=(
+            filename_policy if isinstance(filename_policy, DestinationFilenamePolicy) else config.yard_filename_policy
+        ),
+        time_shift=_parse_time_shift(time_shift),
+        dry_run=dry_run,
+        limit=limit,
+    )
+
+
 def _persist_den_execution_plan(
     config: RawdogConfig,
     plan: DenPlan,
@@ -2756,6 +3734,84 @@ def _persist_den_execution_plan(
                 for row in plan.rows
             ],
         )
+        if plan.time_shift_rows:
+            persisted_rows = list_execution_plan_rows(connection, execution_plan.plan_id)
+            add_execution_plan_time_shift_rows(
+                connection,
+                execution_plan.plan_id,
+                [
+                    ExecutionPlanTimeShiftRowCreate(
+                        execution_row_id=persisted_row.row_id,
+                        source_path=shift_row.source_path,
+                        destination_path=shift_row.destination_path,
+                        original_capture_at=shift_row.original_capture_at,
+                        shifted_capture_at=shift_row.shifted_capture_at,
+                        time_shift_seconds=shift_row.time_shift_seconds,
+                        basis=shift_row.basis,
+                        status=persisted_row.status,
+                    )
+                    for persisted_row, shift_row in zip(persisted_rows, plan.time_shift_rows)
+                ],
+            )
+    return execution_plan
+
+
+def _persist_reflow_execution_plan(config: RawdogConfig, plan: DenPlan, *, store_kind: StoreKind) -> ExecutionPlan:
+    skipped = sum(1 for row in plan.rows if row.status.startswith("skip"))
+    collisions = sum(1 for row in plan.rows if row.status == "collision")
+    label = store_kind.value
+    expected = (
+        f"{plan.files_to_transfer} files should be moved into the normalized {label} layout under "
+        f"{plan.destination_folder}; {skipped} no-op/already-present rows skipped; "
+        f"{collisions} conflicts held for review."
+    )
+    with session(config.database_path) as connection:
+        execution_plan = create_execution_plan(
+            connection,
+            ExecutionPlanCreate(
+                plan_kind=f"{label}-reflow",
+                what=f"reflow {label} files into normalized date/filename layout",
+                subject=f"{plan.source_root} -> {plan.destination_root}",
+                expected_result=expected,
+                execution_summary="Not started.",
+                post_audit_summary="Not audited.",
+                source_root=plan.source_root,
+                destination_root=plan.destination_root,
+            ),
+        )
+        add_execution_plan_rows(
+            connection,
+            execution_plan.plan_id,
+            [
+                ExecutionPlanRowCreate(
+                    source_path=row.source_path,
+                    destination_path=row.destination_path,
+                    size_bytes=row.size_bytes,
+                    transfer_action=DenTransferAction.MOVE,
+                    status=row.status,
+                )
+                for row in plan.rows
+            ],
+        )
+        if plan.time_shift_rows:
+            persisted_rows = list_execution_plan_rows(connection, execution_plan.plan_id)
+            add_execution_plan_time_shift_rows(
+                connection,
+                execution_plan.plan_id,
+                [
+                    ExecutionPlanTimeShiftRowCreate(
+                        execution_row_id=persisted_row.row_id,
+                        source_path=shift_row.source_path,
+                        destination_path=shift_row.destination_path,
+                        original_capture_at=shift_row.original_capture_at,
+                        shifted_capture_at=shift_row.shifted_capture_at,
+                        time_shift_seconds=shift_row.time_shift_seconds,
+                        basis=shift_row.basis,
+                        status=persisted_row.status,
+                    )
+                    for persisted_row, shift_row in zip(persisted_rows, plan.time_shift_rows)
+                ],
+            )
     return execution_plan
 
 
@@ -2769,20 +3825,80 @@ def _naming_description(naming: NamingConvention) -> str:
     return descriptions[naming]
 
 
+def _filename_policy_description(policy: DestinationFilenamePolicy) -> str:
+    descriptions = {
+        DestinationFilenamePolicy.ORIGINAL: "keep original camera filenames",
+        DestinationFilenamePolicy.DATE_ORIGINAL: "write YYYYMMDD-HHMMSS-SS__original for chronological collision prevention",
+        DestinationFilenamePolicy.DATE_SUFFIX: (
+            "legacy alias for og-date; write original__YYYYMMDD-HHMMSS-SS"
+        ),
+        DestinationFilenamePolicy.ORIGINAL_DATE: "write original__YYYYMMDD-HHMMSS-SS",
+        DestinationFilenamePolicy.ORIGINAL_HASH: "write original__Hshortsha using a truncated SHA-256",
+        DestinationFilenamePolicy.ORIGINAL_UNIQUE_ID: "write original__Uimageid when metadata exists, else original__Hshortsha",
+        DestinationFilenamePolicy.UNIQUE_ID_ORIGINAL: "write Uimageid__original when metadata exists, else Hshortsha__original",
+    }
+    return descriptions[policy]
+
+
+def _store_filename_policy(config: RawdogConfig, store_kind: StoreKind) -> DestinationFilenamePolicy:
+    return config.yard_filename_policy if store_kind == StoreKind.YARD else config.den_filename_policy
+
+
+def _store_filename_policy_lines(config: RawdogConfig, store_kind: StoreKind) -> list[str]:
+    policy = _store_filename_policy(config, store_kind)
+    if store_kind == StoreKind.YARD:
+        applies = "Fetch imports and same-yard reflow plans use this by default."
+        sample_root = "YARD"
+    else:
+        applies = "Den copy/move and same-den reflow plans use this by default."
+        sample_root = "DEN"
+    sample = _filename_policy_sample(policy)
+    return [
+        f"[bold yellow]Default file naming:[/] [bold green]{policy.value}[/]",
+        f"[bold yellow]Example:[/] [bold cyan]{sample_root}/2026/2026-09/{sample}[/]",
+        f"[bold green]{applies}[/]",
+        "[bold green]Use Manage -> Configure default destination file names to change it.[/]",
+    ]
+
+
+def _filename_policy_sample(policy: DestinationFilenamePolicy) -> str:
+    samples = {
+        DestinationFilenamePolicy.ORIGINAL: "LS7A0001.CR3",
+        DestinationFilenamePolicy.DATE_ORIGINAL: "20260912-132932-99__LS7A0001.CR3",
+        DestinationFilenamePolicy.DATE_SUFFIX: "LS7A0001__20260912-132932-99.CR3",
+        DestinationFilenamePolicy.ORIGINAL_DATE: "LS7A0001__20260912-132932-99.CR3",
+        DestinationFilenamePolicy.ORIGINAL_HASH: "LS7A0001__H8f3a21c9b07d.CR3",
+        DestinationFilenamePolicy.ORIGINAL_UNIQUE_ID: "LS7A0001__Ub5a106f2d3f3.CR3",
+        DestinationFilenamePolicy.UNIQUE_ID_ORIGINAL: "Ub5a106f2d3f3__LS7A0001.CR3",
+    }
+    return samples[policy]
+
+
 def _build_fetch_plan(
     source_root: Path,
     destination_root: Path,
     destination_folder: Path,
     naming: NamingConvention,
+    filename_policy: DestinationFilenamePolicy = DestinationFilenamePolicy.ORIGINAL,
 ) -> DenPlan:
     items = scan_raw_files(source_root)
-    planned_destinations: dict[Path, Path] = {}
+    planned_destinations: set[Path] = set()
     rows: list[DenPlanRow] = []
     for item in items:
-        destination_path = (
+        destination_parent = (
             destination_folder / item.relative_path
             if naming == NamingConvention.KEEP_EXISTING
-            else destination_folder / item.path.name
+            else destination_folder
+        )
+        if naming == NamingConvention.KEEP_EXISTING:
+            destination_parent = destination_parent.parent
+        destination_path = destination_path_for_filename_policy(
+            item.path,
+            destination_parent,
+            capture_time_fallback(item.path),
+            policy=filename_policy,
+            reserved_destinations=planned_destinations,
+            size_bytes=item.size_bytes,
         )
         planned_copy = plan_append_only_copy(item.path, destination_path)
         if planned_copy is None:
@@ -2793,7 +3909,8 @@ def _build_fetch_plan(
             status = "collision"
         else:
             status = "plan_copy"
-        planned_destinations.setdefault(destination_path, item.path)
+        if status == "plan_copy":
+            planned_destinations.add(destination_path)
         rows.append(
             DenPlanRow(
                 source_path=item.path,
@@ -3092,6 +4209,9 @@ def _print_plan_operation_review(
         [row.destination_path for row in rows],
         destination_root=destination_root,
     )
+    with session(config.database_path) as connection:
+        time_shift_rows = list_execution_plan_time_shift_rows(connection, plan_id)
+    _print_plan_time_shift_rows(plan_id, time_shift_rows, limit=min(limit, 20))
     table = _styled_table(
         title=f"Plan #{plan_id} {'Verbose ' if verbose else ''}Operations Preview",
         style=STYLE_PANEL,
@@ -3425,7 +4545,7 @@ def _execute_persisted_plan_unlocked(
                     skipped += 1
                 with session(config.database_path) as connection:
                     if audit_status == "destination_verified":
-                        store = find_store_for_path(connection, row.destination_path, StoreKind.DEN)
+                        store = _find_store_for_destination(connection, row.destination_path)
                         if store:
                             record_store_file(
                                 store,
@@ -3435,7 +4555,14 @@ def _execute_persisted_plan_unlocked(
                                 execution_plan_id=plan_id,
                                 execution_row_id=row.row_id,
                             )
+                        _mark_moved_source_deleted(connection, row, status=row.status)
                     update_execution_plan_row(
+                        connection,
+                        row.row_id,
+                        status=row.status,
+                        audit_status=audit_status,
+                    )
+                    update_execution_plan_time_shift_row(
                         connection,
                         row.row_id,
                         status=row.status,
@@ -3474,7 +4601,7 @@ def _execute_persisted_plan_unlocked(
                     review_rows.append(row)
                 with session(config.database_path) as connection:
                     if audit_status == "destination_verified":
-                        store = find_store_for_path(connection, row.destination_path, StoreKind.DEN)
+                        store = _find_store_for_destination(connection, row.destination_path)
                         if store:
                             record_store_file(
                                 store,
@@ -3484,7 +4611,14 @@ def _execute_persisted_plan_unlocked(
                                 execution_plan_id=plan_id,
                                 execution_row_id=row.row_id,
                             )
+                        _mark_moved_source_deleted(connection, row, status=status)
                     update_execution_plan_row(
+                        connection,
+                        row.row_id,
+                        status=status,
+                        audit_status=audit_status,
+                    )
+                    update_execution_plan_time_shift_row(
                         connection,
                         row.row_id,
                         status=status,
@@ -3495,6 +4629,13 @@ def _execute_persisted_plan_unlocked(
                 failed_rows.append(replace(row, status="failed", audit_status="not_audited", error=str(exc)))
                 with session(config.database_path) as connection:
                     update_execution_plan_row(
+                        connection,
+                        row.row_id,
+                        status="failed",
+                        audit_status="not_audited",
+                        error=str(exc),
+                    )
+                    update_execution_plan_time_shift_row(
                         connection,
                         row.row_id,
                         status="failed",
@@ -3552,6 +4693,22 @@ def _execute_persisted_plan_unlocked(
     return finished
 
 
+def _find_store_for_destination(connection: sqlite3.Connection, path: Path) -> Store | None:
+    return find_store_for_path(connection, path, StoreKind.DEN) or find_store_for_path(connection, path, StoreKind.YARD)
+
+
+def _mark_moved_source_deleted(connection: sqlite3.Connection, row: ExecutionPlanRow, *, status: str) -> None:
+    if status != "moved" or row.source_path == row.destination_path:
+        return
+    source_store = find_store_for_path(connection, row.source_path, StoreKind.YARD) or find_store_for_path(
+        connection,
+        row.source_path,
+        StoreKind.DEN,
+    )
+    if source_store:
+        mark_store_file_deleted(source_store, row.source_path)
+
+
 @app.command()
 def den(
     source: Path | None = typer.Argument(None, help="Messy source folder or volume to consolidate."),
@@ -3570,6 +4727,11 @@ def den(
         None,
         "--group-by",
         help="Generated date grouping for date/project-dates layouts: month or day.",
+    ),
+    filename_policy: DestinationFilenamePolicy | None = typer.Option(
+        None,
+        "--filename-policy",
+        help="Destination file names: date-suffix keeps the camera basename and appends capture date/time on conflicts.",
     ),
     start_date: str | None = typer.Option(
         None,
@@ -3616,6 +4778,9 @@ def den(
     destination_root = parse_user_path(str(destination_value))
     effective_layout = loaded_workflow.layout_mode if loaded_workflow and not source else layout
     effective_action = loaded_workflow.transfer_action if loaded_workflow and not source else action
+    effective_filename_policy = (
+        filename_policy if isinstance(filename_policy, DestinationFilenamePolicy) else config.den_filename_policy
+    )
     same_root_reflow = source_root.expanduser().resolve() == destination_root.expanduser().resolve()
     if same_root_reflow:
         if not reflow_den:
@@ -3703,7 +4868,10 @@ def den(
         end_date=end_date_value,
         limit=limit,
         preserve_dates_drop_parts=set(drop_preserved_folder or []),
+        filename_policy=effective_filename_policy,
     )
+    console.print(f"File names: {effective_filename_policy.value} - {_filename_policy_description(effective_filename_policy)}")
+    _print_camera_numbering_warning([row.source_path for row in plan.rows])
     if workflow_name:
         with session(config.database_path) as connection:
             workflow = create_or_update_workflow(
@@ -4101,11 +5269,13 @@ def _run_junkyard(
     unmatched = 0
     ambiguous = 0
     source_roots = [source.root_path.expanduser().resolve() for source in sources]
+    scanned_source_paths: list[Path] = []
     for source in sources:
         for item in scan_raw_files(source.root_path):
             if before_dt and datetime.fromtimestamp(item.path.stat().st_mtime, tz=UTC) >= before_dt:
                 continue
             source_path = item.path.expanduser().resolve()
+            scanned_source_paths.append(source_path)
             candidate = _match_junkyard_candidate(
                 source_path=source_path,
                 size_bytes=item.size_bytes,
@@ -4122,6 +5292,7 @@ def _run_junkyard(
                     unmatched += 1
                 continue
             matches.append(candidate)
+    _print_camera_numbering_warning(scanned_source_paths)
     candidates = 0
     missing_or_changed = 0
     hash_mismatches = 0
@@ -4602,6 +5773,7 @@ def _setup_store(name: str, root: Path, store_kind: StoreKind, notes: str | None
                     f"[bold yellow]Root:[/] [bold cyan]{store.root_path}[/]",
                     f"[bold yellow]Store ID:[/] [bold green]{store.store_id}[/]",
                     f"[bold yellow]Portable metadata:[/] [bold cyan]{store.root_path / '.rawdog'}[/]",
+                    *_store_filename_policy_lines(config, store_kind),
                     "[bold green]App Support remembers this store path, and the store carries its own catalog.[/]",
                 ]
             ),
@@ -4980,6 +6152,7 @@ def plans_show(
         if plan is None:
             raise typer.BadParameter(f"Unknown plan: {plan_id}")
         rows = list_execution_plan_rows(connection, plan_id)
+        time_shift_rows = list_execution_plan_time_shift_rows(connection, plan_id)
     _print_execution_plan_start(plan)
     table = _styled_table(title=f"Plan #{plan.plan_id} Rows")
     table.add_column("Status")
@@ -5007,6 +6180,7 @@ def plans_show(
         rows=review_rows,
     )
     _print_force_move_duplicate_guidance(plan_id, rows)
+    _print_plan_time_shift_rows(plan_id, time_shift_rows, limit=10)
     if ops:
         _print_plan_operation_review(config, plan_id, rows)
 
@@ -5056,6 +6230,37 @@ def _print_force_move_duplicate_guidance(plan_id: int, rows: list[ExecutionPlanR
             expand=True,
         )
     )
+
+
+def _print_plan_time_shift_rows(
+    plan_id: int,
+    rows: list[ExecutionPlanTimeShiftRow],
+    *,
+    limit: int = 20,
+) -> None:
+    if not rows:
+        return
+    table = _styled_table(title=f"Plan #{plan_id} Time-Shift Rows", row_styles=STYLE_ROWS, expand=True)
+    table.add_column("Exec Row", justify="right", no_wrap=True)
+    table.add_column("Basis", no_wrap=True)
+    table.add_column("Shift", no_wrap=True)
+    table.add_column("Original Capture", overflow="fold")
+    table.add_column("Shifted Capture", overflow="fold")
+    table.add_column("Status", no_wrap=True)
+    table.add_column("Destination", overflow="fold")
+    for row in rows[:limit]:
+        table.add_row(
+            str(row.execution_row_id),
+            row.basis,
+            _format_time_shift(timedelta(seconds=row.time_shift_seconds)),
+            row.original_capture_at.isoformat(),
+            row.shifted_capture_at.isoformat(),
+            row.status,
+            str(row.destination_path),
+        )
+    console.print(table)
+    if len(rows) > limit:
+        _print_notice(f"Showing first {limit} of {len(rows)} time-shift rows.", style=STYLE_ROW_SELECTED)
 
 
 def _print_active_run_notice(config: RawdogConfig) -> None:
@@ -5164,6 +6369,60 @@ def plans_skipped(
     if not skipped_rows:
         _print_notice("No skipped rows found for this plan.", style=STYLE_SAFE)
     _print_force_move_duplicate_guidance(plan_id, skipped_rows)
+
+
+@plans_app.command("time-shift")
+def plans_time_shift(
+    plan_id: int = typer.Argument(...),
+    limit: int = typer.Option(100, "--limit", min=1, max=1000, help="Time-shift rows to show."),
+    export: Path | None = typer.Option(None, "--export", "-o", help="Optional CSV export path."),
+) -> None:
+    """Show timestamp-shift rows recorded for a reflow plan."""
+    _, config = _load_or_exit()
+    with session(config.database_path) as connection:
+        plan = get_execution_plan(connection, plan_id)
+        if plan is None:
+            raise typer.BadParameter(f"Unknown plan: {plan_id}")
+        rows = list_execution_plan_time_shift_rows(connection, plan_id)
+    _print_execution_plan_start(plan)
+    if export:
+        export_path = write_csv(
+            export,
+            [
+                "plan_id",
+                "execution_row_id",
+                "basis",
+                "time_shift_seconds",
+                "original_capture_at",
+                "shifted_capture_at",
+                "status",
+                "audit_status",
+                "error",
+                "source_path",
+                "destination_path",
+            ],
+            [
+                {
+                    "plan_id": row.plan_id,
+                    "execution_row_id": row.execution_row_id,
+                    "basis": row.basis,
+                    "time_shift_seconds": row.time_shift_seconds,
+                    "original_capture_at": row.original_capture_at.isoformat(),
+                    "shifted_capture_at": row.shifted_capture_at.isoformat(),
+                    "status": row.status,
+                    "audit_status": row.audit_status or "",
+                    "error": row.error or "",
+                    "source_path": row.source_path,
+                    "destination_path": row.destination_path,
+                }
+                for row in rows
+            ],
+        )
+        console.print(f"Time-shift row export written: {export_path}")
+    if not rows:
+        _print_notice("No time-shift rows found for this plan.", style=STYLE_SAFE)
+        return
+    _print_plan_time_shift_rows(plan_id, rows, limit=limit)
 
 
 def _skipped_row_lines(row: ExecutionPlanRow) -> list[str]:
@@ -5416,6 +6675,12 @@ def _remove_verified_move_duplicates(
                         execution_row_id=candidate.row.row_id,
                     )
                 update_execution_plan_row(
+                    connection,
+                    candidate.row.row_id,
+                    status="source_removed_verified_duplicate",
+                    audit_status="source_removed_after_sha256_match",
+                )
+                update_execution_plan_time_shift_row(
                     connection,
                     candidate.row.row_id,
                     status="source_removed_verified_duplicate",

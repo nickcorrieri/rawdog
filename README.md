@@ -138,6 +138,8 @@ rawdog yard list
 rawdog yard remove
 rawdog junkyard
 rawdog junkyard-scrap
+rawdog yard-reflow
+rawdog filename-audit
 rawdog sniff
 rawdog score
 rawdog status
@@ -159,6 +161,7 @@ rawdog plans list
 rawdog plans show
 rawdog plans ops
 rawdog plans review
+rawdog plans time-shift
 rawdog plans resume
 rawdog plans active
 rawdog plans active-clear --force
@@ -185,6 +188,12 @@ rawdog sniff /Volumes/OldDrive
 rawdog score /Volumes/OldDrive
 rawdog
 # choose S, then 5 for slow full audit; pick yard, den, common path, or manual path
+# choose S, then 6 to report DEN organization or build a same-den date reflow plan
+rawdog den-organization /Volumes/Archive
+rawdog den-reflow /Volumes/Archive --group-by day
+rawdog den-reflow /Volumes/Archive --group-by month --date-only
+rawdog den-reflow /Volumes/Archive --group-by month --filename-policy date-og
+rawdog yard-reflow ~/Pictures/RAW_YARD --group-by month
 rawdog den /Volumes/OldDrive --dest /Volumes/Archive
 rawdog den /Volumes/OldDrive --dest /Volumes/Archive --commit
 ```
@@ -203,12 +212,55 @@ matches an existing catalog row. It does not move, delete, or rename media files
 After JPEG support upgrades, run this once for established dens if they were
 cataloged before JPEG files were included.
 
+Use `rawdog den-organization DEN_ROOT` to scan a den for path-shape problems
+without moving files. It reports double year folders, files outside a top-level
+`YYYY` folder, missing date buckets, year mismatches, and multiple date buckets.
+Use `rawdog den-reflow DEN_ROOT --group-by day` or `--group-by month` to create
+an in-place same-DEN rename/move plan. It reprocesses the existing den into the
+selected date bucket and filename policy without copying to another den.
+Existing destination files are never overwritten, and conflicts are marked before
+any commit prompt.
+
+Use `rawdog yard-reflow YARD_ROOT --group-by month` to repair a flattened yard
+in place. The default filename policy is `date-og`, for example
+`20260912-132932-99__LS7A0001.CR3`. This makes Canon rollover names sort by
+capture time while keeping the original camera basename searchable. Other
+policies include `original`, `og-date`, `og-hash`, `og-iuid`, and `iuid-og`.
+This makes Canon rollover names searchable without treating `101EOSR7`,
+`102EOSR7`, or `103EOSR7` as proof that files are duplicates.
+
+Use `rawdog filename-audit YARD_OR_DEN LS7A0001 --hash-check` to search by a
+partial camera filename/camera ID. RAWdog strips its own date suffixes for this
+audit, so `LS7A0001.CR3`, `LS7A0001__20260912-132932-99.CR3`, and
+`20260912-132932-99__LS7A0001.CR3` group under the same camera ID.
+
+If a camera clock was wrong by a known offset, use `--time-shift` on reflow to
+plan corrected folders and names without rewriting RAW metadata:
+
+```bash
+rawdog den-reflow /Volumes/WD_BLACK/RAW_DEN --group-by month --time-shift +1h30m
+rawdog yard-reflow ~/Pictures/RAW_YARD --group-by month --time-shift -2d
+```
+
+Time-shift reflow plans also create database rows grouped under the execution
+plan. Review what RAWdog planned and what happened afterward with:
+
+```bash
+rawdog plans time-shift PLAN_ID
+rawdog plans time-shift PLAN_ID --export ~/Desktop/time-shift-review.csv
+```
+
 Running `dens setup` or `yard setup` on a folder that already has `.rawdog`
 metadata relinks that portable store into App Support memory. If the requested
 store name is already used by another store of the same type, RAWdog assigns the
 next available name instead of crashing. `dens remove` and `yard remove` only
 forget the App Support pointer; they do not delete media files or the portable
 `.rawdog` catalog.
+
+New `rawdog init` configs default both yard imports and den copy/move plans to
+`date-og` filenames. Change this in `M -> 8` or with `rawdog init
+--yard-filename-policy original --den-filename-policy original` if you need
+literal camera filenames.
 
 Two consolidation workflows are supported:
 
@@ -329,6 +381,11 @@ Camera-generated folders such as `DCIM`, `100CANON`, `102EOSR7`, `100NIKON`,
 folders. This applies even when the selected source itself is the camera folder,
 such as `/Volumes/WD_BLACK/102EOSR7`.
 
+Camera folder numbers are not global file numbering. A camera can roll from a
+high filename such as `LS7A9999.CR3` back to `LS7A0001.CR3` in a later camera
+folder. Do not delete or dedupe by basename alone. Use full path, exact size,
+and SHA-256 when deciding whether two files are the same original.
+
 If a camera dump represents a shoot, client, period, or session that you want
 preserved, make that a project/session label instead of relying on the camera
 folder name:
@@ -420,6 +477,7 @@ destination.
 rawdog plans prune --dry-run --keep 20
 rawdog plans prune --commit --keep 20
 rawdog plans skipped 33
+rawdog plans time-shift 33
 rawdog plans force-move-duplicates 33
 rawdog plans force-move-duplicates 33 --commit
 ```

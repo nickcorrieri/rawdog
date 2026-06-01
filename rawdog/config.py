@@ -7,7 +7,7 @@ from pathlib import Path
 
 from platformdirs import user_config_dir, user_data_dir
 
-from rawdog.models import OrganizationMode, RawdogConfig, model_to_json_data
+from rawdog.models import DestinationFilenamePolicy, OrganizationMode, RawdogConfig, model_to_json_data
 
 APP_NAME = "rawdog"
 
@@ -44,6 +44,8 @@ def build_config(
     database_path: Path | None = None,
     date_folder_template: str = "YYYY/YYYY-MM",
     project_folder_template: str = "YYYY/YYYYMMDD_PROJECT",
+    yard_filename_policy: DestinationFilenamePolicy = DestinationFilenamePolicy.DATE_ORIGINAL,
+    den_filename_policy: DestinationFilenamePolicy = DestinationFilenamePolicy.DATE_ORIGINAL,
 ) -> RawdogConfig:
     return RawdogConfig(
         organization_mode=organization_mode,
@@ -52,4 +54,6 @@ def build_config(
         database_path=(database_path or default_database_path()).expanduser(),
         date_folder_template=date_folder_template,
         project_folder_template=project_folder_template,
+        yard_filename_policy=yard_filename_policy,
+        den_filename_policy=den_filename_policy,
     )

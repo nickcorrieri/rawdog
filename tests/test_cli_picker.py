@@ -8,7 +8,7 @@ from rawdog import cli
 from rawdog.config import build_config
 from rawdog.db import initialize, session
 from rawdog.inventory import InventoryItem
-from rawdog.models import NamingConvention, OrganizationMode, StoreCreate, StoreKind
+from rawdog.models import DestinationFilenamePolicy, NamingConvention, OrganizationMode, StoreCreate, StoreKind
 from rawdog.stores import create_or_update_store
 
 
@@ -221,6 +221,84 @@ def test_preserve_dates_folder_review_defaults_keep_and_rejects_n(tmp_path: Path
     assert defaults == ["k", "k"]
 
 
+def test_preserve_dates_folder_candidates_skip_pure_date_containers(tmp_path: Path) -> None:
+    dated = tmp_path / "2026" / "2026-01" / "IMG_0001.CR3"
+    camera = tmp_path / "Probably Delete" / "100CANON" / "IMG_0002.CR3"
+    labeled = tmp_path / "2019-06-16 lacrosse" / "IMG_0003.CR3"
+    dated.parent.mkdir(parents=True)
+    camera.parent.mkdir(parents=True)
+    labeled.parent.mkdir(parents=True)
+    dated.write_bytes(b"raw")
+    camera.write_bytes(b"raw")
+    labeled.write_bytes(b"raw")
+
+    candidates = cli._preserve_dates_folder_candidates(tmp_path, exclude_roots=[])
+
+    assert [candidate.name for candidate in candidates] == [
+        "2019-06-16 lacrosse",
+        "Probably Delete",
+    ]
+
+
+def test_den_organization_report_flags_bad_den_shapes(tmp_path: Path) -> None:
+    valid = tmp_path / "2024" / "2024-07" / "IMG_0001.CR3"
+    valid_context = tmp_path / "2024" / "Project" / "2024-07" / "IMG_0002.CR3"
+    double_year = tmp_path / "2024" / "2024" / "2024-07" / "IMG_0003.CR3"
+    missing_bucket = tmp_path / "2024" / "IMG_0004.CR3"
+    outside_year = tmp_path / "Loose Project" / "IMG_0005.CR3"
+    for path in (valid, valid_context, double_year, missing_bucket, outside_year):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"raw")
+
+    report = cli._build_den_organization_report(tmp_path)
+
+    reasons = {(finding.relative_path.name, finding.reason) for finding in report.findings}
+    assert ("IMG_0003.CR3", "double_year_folder") in reasons
+    assert ("IMG_0004.CR3", "missing_date_bucket") in reasons
+    assert ("IMG_0005.CR3", "outside_year_folder") in reasons
+    assert report.valid_count == 2
+
+
+def test_den_reflow_plan_can_convert_month_to_day_and_keep_context(tmp_path: Path) -> None:
+    source = tmp_path / "2024" / "Project" / "2024-07" / "IMG_0001.CR3"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"raw")
+    captured_ts = datetime(2024, 7, 15, tzinfo=UTC).timestamp()
+    os.utime(source, (captured_ts, captured_ts))
+
+    plan = cli._build_den_reflow_plan(
+        tmp_path,
+        group_by=cli.DateGroupMode.DAY,
+        keep_context=True,
+        drop_context=set(),
+    )
+
+    assert plan.rows[0].destination_path == tmp_path / "2024" / "Project" / "20240715" / "IMG_0001.CR3"
+    assert plan.rows[0].status == "plan_copy"
+
+
+def test_den_reflow_plan_checks_conflicts_before_moves(tmp_path: Path) -> None:
+    source = tmp_path / "2024" / "2024-07" / "IMG_0001.CR3"
+    destination = tmp_path / "2024" / "20240715" / "IMG_0001.CR3"
+    source.parent.mkdir(parents=True)
+    destination.parent.mkdir(parents=True)
+    source.write_bytes(b"raw")
+    destination.write_bytes(b"different")
+    captured_ts = datetime(2024, 7, 15, tzinfo=UTC).timestamp()
+    os.utime(source, (captured_ts, captured_ts))
+
+    plan = cli._build_den_reflow_plan(
+        tmp_path,
+        group_by=cli.DateGroupMode.DAY,
+        keep_context=False,
+        drop_context=set(),
+    )
+
+    row = next(row for row in plan.rows if row.source_path == source)
+    assert row.destination_path == destination
+    assert row.status == "collision"
+
+
 def test_den_command_allows_registered_same_root_reflow_plan(tmp_path: Path, monkeypatch) -> None:
     database = tmp_path / "rawdog.sqlite"
     den_root = tmp_path / "RAW_DEN"
@@ -256,7 +334,7 @@ def test_den_command_allows_registered_same_root_reflow_plan(tmp_path: Path, mon
         plan = cli.get_latest_execution_plan(connection)
         assert plan is not None
         rows = cli.list_execution_plan_rows(connection, plan.plan_id)
-    assert rows[0].destination_path == den_root / "2025" / "2025-03" / "IMG_0001.CR3"
+    assert rows[0].destination_path == den_root / "2025" / "2025-03" / "20250315-000000-00__IMG_0001.CR3"
 
 
 def test_fetch_plan_ddd_flattens_camera_dump_into_destination_folder(tmp_path: Path) -> None:
@@ -275,6 +353,37 @@ def test_fetch_plan_ddd_flattens_camera_dump_into_destination_folder(tmp_path: P
     assert plan.rows[0].status == "plan_copy"
 
 
+def test_fetch_plan_date_suffixes_flattened_camera_names(tmp_path: Path) -> None:
+    source = tmp_path / "DCIM"
+    destination = tmp_path / "RAW_YARD"
+    destination_folder = destination / "2026" / "2026-05"
+    first = source / "101EOSR7" / "LS7A0001.CR3"
+    second = source / "102EOSR7" / "LS7A0001.CR3"
+    first.parent.mkdir(parents=True)
+    second.parent.mkdir(parents=True)
+    destination_folder.mkdir(parents=True)
+    first.write_bytes(b"raw-one")
+    second.write_bytes(b"raw-two")
+    first_ts = datetime(2026, 5, 29, 12, 1, tzinfo=UTC).timestamp()
+    second_ts = datetime(2026, 5, 29, 12, 2, tzinfo=UTC).timestamp()
+    os.utime(first, (first_ts, first_ts))
+    os.utime(second, (second_ts, second_ts))
+
+    plan = cli._build_fetch_plan(
+        source,
+        destination,
+        destination_folder,
+        NamingConvention.DDD,
+        DestinationFilenamePolicy.DATE_ORIGINAL,
+    )
+
+    assert [row.destination_path.name for row in plan.rows] == [
+        "20260529-120100-00__LS7A0001.CR3",
+        "20260529-120200-00__LS7A0001.CR3",
+    ]
+    assert [row.status for row in plan.rows] == ["plan_copy", "plan_copy"]
+
+
 def test_fetch_plan_keep_existing_preserves_source_relative_path(tmp_path: Path) -> None:
     source = tmp_path / "DCIM"
     destination = tmp_path / "RAW_YARD"
@@ -286,6 +395,113 @@ def test_fetch_plan_keep_existing_preserves_source_relative_path(tmp_path: Path)
     plan = cli._build_fetch_plan(source, destination, destination, NamingConvention.KEEP_EXISTING)
 
     assert plan.rows[0].destination_path == destination / "100EOSR7" / "IMG_0001.CR3"
+
+
+def test_yard_reflow_plan_can_date_suffix_flattened_files(tmp_path: Path) -> None:
+    first = tmp_path / "LS7A0001.CR3"
+    second = tmp_path / "101EOSR7" / "LS7A0001.CR3"
+    second.parent.mkdir()
+    first.write_bytes(b"raw-one")
+    second.write_bytes(b"raw-two")
+    first_ts = datetime(2026, 5, 29, 12, 1, tzinfo=UTC).timestamp()
+    second_ts = datetime(2026, 5, 29, 12, 2, tzinfo=UTC).timestamp()
+    os.utime(first, (first_ts, first_ts))
+    os.utime(second, (second_ts, second_ts))
+
+    plan = cli._build_den_reflow_plan(
+        tmp_path,
+        group_by=cli.DateGroupMode.MONTH,
+        keep_context=False,
+        drop_context=set(),
+        filename_policy=DestinationFilenamePolicy.DATE_ORIGINAL,
+    )
+
+    assert [row.destination_path for row in plan.rows] == [
+        tmp_path / "2026" / "2026-05" / "20260529-120100-00__LS7A0001.CR3",
+        tmp_path / "2026" / "2026-05" / "20260529-120200-00__LS7A0001.CR3",
+    ]
+
+
+def test_yard_reflow_plan_can_apply_time_shift(tmp_path: Path) -> None:
+    source = tmp_path / "LS7A0001.CR3"
+    source.write_bytes(b"raw")
+    captured_ts = datetime(2026, 5, 29, 23, 30, tzinfo=UTC).timestamp()
+    os.utime(source, (captured_ts, captured_ts))
+
+    plan = cli._build_den_reflow_plan(
+        tmp_path,
+        group_by=cli.DateGroupMode.DAY,
+        keep_context=False,
+        drop_context=set(),
+        filename_policy=DestinationFilenamePolicy.DATE_ORIGINAL,
+        time_shift=cli.timedelta(hours=1),
+    )
+
+    assert plan.rows[0].destination_path == tmp_path / "2026" / "20260530" / "20260530-003000-00__LS7A0001.CR3"
+
+
+def test_reflow_time_shift_uses_existing_rawdog_filename_time(tmp_path: Path) -> None:
+    source = tmp_path / "2026" / "2026-05" / "20260529-233000-00__LS7A0001.CR3"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"raw")
+    wrong_file_ts = datetime(2021, 1, 1, 1, 1, tzinfo=UTC).timestamp()
+    os.utime(source, (wrong_file_ts, wrong_file_ts))
+
+    plan = cli._build_den_reflow_plan(
+        tmp_path,
+        group_by=cli.DateGroupMode.DAY,
+        keep_context=False,
+        drop_context=set(),
+        filename_policy=DestinationFilenamePolicy.DATE_ORIGINAL,
+        time_shift=cli.timedelta(hours=1),
+    )
+
+    assert plan.rows[0].destination_path == tmp_path / "2026" / "20260530" / "20260530-003000-00__LS7A0001.CR3"
+
+
+def test_persisted_reflow_records_time_shift_rows_by_plan(tmp_path: Path) -> None:
+    database = tmp_path / "rawdog.sqlite"
+    source = tmp_path / "LS7A0001.CR3"
+    source.write_bytes(b"raw")
+    captured_ts = datetime(2026, 5, 29, 23, 30, tzinfo=UTC).timestamp()
+    os.utime(source, (captured_ts, captured_ts))
+    initialize(database)
+    config = build_config(OrganizationMode.PROJECT, database_path=database)
+
+    plan = cli._build_den_reflow_plan(
+        tmp_path,
+        group_by=cli.DateGroupMode.DAY,
+        keep_context=False,
+        drop_context=set(),
+        filename_policy=DestinationFilenamePolicy.DATE_ORIGINAL,
+        time_shift=cli.timedelta(hours=1),
+    )
+    execution_plan = cli._persist_reflow_execution_plan(config, plan, store_kind=StoreKind.YARD)
+
+    with session(database) as connection:
+        operation_rows = cli.list_execution_plan_rows(connection, execution_plan.plan_id)
+        time_shift_rows = cli.list_execution_plan_time_shift_rows(connection, execution_plan.plan_id)
+
+    assert len(time_shift_rows) == 1
+    assert time_shift_rows[0].plan_id == execution_plan.plan_id
+    assert time_shift_rows[0].execution_row_id == operation_rows[0].row_id
+    assert time_shift_rows[0].basis == "metadata_or_file_mtime"
+    assert time_shift_rows[0].time_shift_seconds == 3600
+    assert time_shift_rows[0].original_capture_at == datetime(2026, 5, 29, 23, 30, tzinfo=UTC)
+    assert time_shift_rows[0].shifted_capture_at == datetime(2026, 5, 30, 0, 30, tzinfo=UTC)
+    assert time_shift_rows[0].status == operation_rows[0].status
+
+    cli._execute_persisted_plan(config, execution_plan.plan_id)
+
+    with session(database) as connection:
+        completed_time_shift_rows = cli.list_execution_plan_time_shift_rows(connection, execution_plan.plan_id)
+    assert completed_time_shift_rows[0].status == "moved"
+    assert completed_time_shift_rows[0].audit_status == "destination_verified"
+
+
+def test_parse_time_shift_accepts_compound_offsets() -> None:
+    assert cli._parse_time_shift("+1h30m") == cli.timedelta(hours=1, minutes=30)
+    assert cli._parse_time_shift("-2d") == -cli.timedelta(days=2)
 
 
 def test_fetch_commit_executes_persisted_copy_plan(tmp_path: Path) -> None:
@@ -463,6 +679,17 @@ def test_duplicate_name_groups_reports_repeated_filenames(tmp_path: Path) -> Non
     groups = cli._duplicate_name_groups(items)
 
     assert groups == {"IMG_0001.CR3": [first, second]}
+
+
+def test_camera_identity_groups_ignore_date_suffixes(tmp_path: Path) -> None:
+    original = tmp_path / "LS7A0001.CR3"
+    dated = tmp_path / "LS7A0001_20260529.CR3"
+    timed = tmp_path / "LS7A0001_20260529_1202.CR3"
+    date_first = tmp_path / "20260529-120200-00__LS7A0001.CR3"
+
+    groups = cli._camera_identity_groups([original, dated, timed, date_first])
+
+    assert groups == {"LS7A0001.CR3": [original, dated, timed, date_first]}
 
 
 def _answers(*values: str):

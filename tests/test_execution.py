@@ -8,15 +8,19 @@ from rawdog.config import build_config
 from rawdog.db import initialize, session
 from rawdog.execution import (
     add_execution_plan_rows,
+    add_execution_plan_time_shift_rows,
     create_execution_plan,
     delete_execution_plan,
     list_execution_plan_rows,
+    list_execution_plan_time_shift_rows,
     list_execution_plans_for_prune,
+    update_execution_plan_time_shift_row,
 )
 from rawdog.models import (
     DenTransferAction,
     ExecutionPlanCreate,
     ExecutionPlanRowCreate,
+    ExecutionPlanTimeShiftRowCreate,
     ExecutionPlanStatus,
     OrganizationMode,
 )
@@ -142,6 +146,70 @@ def test_delete_execution_plan_cascades_rows(tmp_path: Path) -> None:
         rows = list_execution_plan_rows(connection, plan.plan_id)
 
     assert rows == []
+
+
+def test_time_shift_rows_are_grouped_by_plan_and_track_status(tmp_path: Path) -> None:
+    database = tmp_path / "rawdog.sqlite"
+    source = tmp_path / "source" / "LS7A0001.CR3"
+    destination = tmp_path / "yard" / "20260529-130000-00__LS7A0001.CR3"
+    initialize(database)
+
+    with session(database) as connection:
+        plan = create_execution_plan(
+            connection,
+            ExecutionPlanCreate(
+                plan_kind="yard-reflow",
+                what="reflow yard files into normalized date/filename layout",
+                subject=f"{tmp_path / 'source'} -> {tmp_path / 'yard'}",
+                expected_result="one shifted file should be renamed",
+            ),
+        )
+        add_execution_plan_rows(
+            connection,
+            plan.plan_id,
+            [
+                ExecutionPlanRowCreate(
+                    source_path=source,
+                    destination_path=destination,
+                    size_bytes=3,
+                    transfer_action=DenTransferAction.MOVE,
+                    status="plan_copy",
+                )
+            ],
+        )
+        execution_row = list_execution_plan_rows(connection, plan.plan_id)[0]
+        add_execution_plan_time_shift_rows(
+            connection,
+            plan.plan_id,
+            [
+                ExecutionPlanTimeShiftRowCreate(
+                    execution_row_id=execution_row.row_id,
+                    source_path=source,
+                    destination_path=destination,
+                    original_capture_at=datetime(2026, 5, 29, 12, 0, tzinfo=UTC),
+                    shifted_capture_at=datetime(2026, 5, 29, 13, 0, tzinfo=UTC),
+                    time_shift_seconds=3600,
+                    basis="metadata_or_file_mtime",
+                    status="plan_copy",
+                )
+            ],
+        )
+        update_execution_plan_time_shift_row(
+            connection,
+            execution_row.row_id,
+            status="moved",
+            audit_status="destination_verified",
+        )
+
+    with session(database) as connection:
+        rows = list_execution_plan_time_shift_rows(connection, plan.plan_id)
+
+    assert len(rows) == 1
+    assert rows[0].plan_id == plan.plan_id
+    assert rows[0].execution_row_id == execution_row.row_id
+    assert rows[0].time_shift_seconds == 3600
+    assert rows[0].status == "moved"
+    assert rows[0].audit_status == "destination_verified"
 
 
 def test_plan_review_filter_includes_failed_skipped_and_review_rows(tmp_path: Path) -> None:
