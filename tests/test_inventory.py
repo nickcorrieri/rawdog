@@ -101,6 +101,20 @@ def test_scan_raw_files_reports_each_found_item(tmp_path: Path) -> None:
     assert seen == [Path("IMG_0001.CR3"), Path("IMG_0002.JPG")]
 
 
+def test_scan_raw_files_reports_walk_progress_before_camera_matches(tmp_path: Path) -> None:
+    (tmp_path / "notes.txt").write_text("not media")
+    raw = tmp_path / "Later" / "IMG_0001.CR3"
+    raw.parent.mkdir()
+    raw.write_bytes(b"raw")
+    progress: list[tuple[Path, int, int]] = []
+
+    scan_raw_files(tmp_path, on_progress=lambda path, scanned, found: progress.append((path, scanned, found)))
+
+    assert any(path == tmp_path for path, scanned, found in progress)
+    assert any(path.name == "IMG_0001.CR3" and found == 1 for path, scanned, found in progress)
+    assert max(scanned for path, scanned, found in progress) >= 2
+
+
 def test_earliest_raw_capture_time_prefers_media_capture_date_for_recovered_cr3(
     tmp_path: Path,
     monkeypatch,

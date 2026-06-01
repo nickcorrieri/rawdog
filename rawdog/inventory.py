@@ -35,12 +35,16 @@ def scan_raw_files(
     exclude_roots: list[Path] | None = None,
     limit: int | None = None,
     on_item: Callable[[InventoryItem], None] | None = None,
+    on_progress: Callable[[Path, int, int], None] | None = None,
 ) -> list[InventoryItem]:
     root = root.expanduser().resolve()
     resolved_excludes = tuple(path.expanduser().resolve() for path in (exclude_roots or []))
     items: list[InventoryItem] = []
+    scanned_entries = 0
     for current_root, dirnames, filenames in os.walk(root):
         current_path = Path(current_root)
+        if on_progress is not None:
+            on_progress(current_path, scanned_entries, len(items))
         dirnames[:] = sorted(
             dirname
             for dirname in dirnames
@@ -51,6 +55,9 @@ def scan_raw_files(
             if filename.startswith("._"):
                 continue
             path = current_path / filename
+            scanned_entries += 1
+            if on_progress is not None and scanned_entries % 100 == 0:
+                on_progress(path, scanned_entries, len(items))
             if _is_excluded(path, resolved_excludes) or not path.is_file() or not is_camera_capture_file(path):
                 continue
             stat = path.stat()
@@ -63,6 +70,8 @@ def scan_raw_files(
             items.append(item)
             if on_item is not None:
                 on_item(item)
+            if on_progress is not None:
+                on_progress(path, scanned_entries, len(items))
             if limit is not None and len(items) >= limit:
                 return items
     return items

@@ -1893,6 +1893,7 @@ def _scan_items_with_progress(
     limit: int | None = None,
 ) -> list[InventoryItem]:
     count = 0
+    scanned_entries = 0
     with Progress(
         SpinnerColumn(),
         TextColumn("[bold bright_green on black]{task.description}"),
@@ -1914,12 +1915,29 @@ def _scan_items_with_progress(
                 update_args["completed"] = count
             progress.update(task, **update_args)
 
-        items = scan_raw_files(root, exclude_roots=exclude_roots or [], limit=limit, on_item=on_item)
+        def on_scan(path: Path, scanned: int, found: int) -> None:
+            nonlocal scanned_entries
+            scanned_entries = scanned
+            progress.update(
+                task,
+                status=(
+                    f"walking folders - checked {scanned_entries} files, "
+                    f"found {found} camera files - {_short_progress_path(path)}"
+                ),
+            )
+
+        items = scan_raw_files(
+            root,
+            exclude_roots=exclude_roots or [],
+            limit=limit,
+            on_item=on_item,
+            on_progress=on_scan,
+        )
         progress.update(
             task,
             total=len(items),
             completed=len(items),
-            status=f"{len(items)} camera files found",
+            status=f"checked {scanned_entries} files; {len(items)} camera files found",
         )
     return items
 
