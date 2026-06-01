@@ -18,7 +18,7 @@ from rawdog.models import (
     StoreCreate,
     StoreKind,
 )
-from rawdog.stores import create_or_update_store
+from rawdog.stores import StoreMediaCatalogResult, create_or_update_store
 
 
 def test_choose_path_accepts_direct_path_without_exiting(tmp_path: Path, monkeypatch) -> None:
@@ -594,6 +594,63 @@ def test_reflow_context_review_can_go_back_to_dates_only(tmp_path: Path, monkeyp
 
     assert keep_context is False
     assert drop_context == set()
+
+
+def test_quick_catalogue_result_says_sha_is_not_populated(tmp_path: Path, monkeypatch) -> None:
+    output = StringIO()
+    monkeypatch.setattr(
+        cli,
+        "console",
+        Console(file=output, force_terminal=False, color_system=None, width=120),
+    )
+    now = datetime.now(UTC)
+    store = cli.Store(
+        store_id="yard_1",
+        name="RAW_YARD",
+        store_kind=StoreKind.YARD,
+        root_path=tmp_path,
+        created_at=now,
+        updated_at=now,
+        last_seen_at=now,
+    )
+
+    cli._print_media_catalogue_result(
+        store,
+        tmp_path,
+        StoreMediaCatalogResult(
+            scanned_files=1,
+            total_bytes=3,
+            quick_cataloged=1,
+            full_cataloged=0,
+            media_date_files=1,
+            filesystem_date_files=0,
+        ),
+        title="Quick Catalogue",
+    )
+
+    text = output.getvalue()
+    assert "SHA-256 rows updated" in text
+    assert "quick catalogue does not hash files" in text
+
+
+def test_reflow_review_notes_explain_filename_policy(tmp_path: Path, monkeypatch) -> None:
+    output = StringIO()
+    monkeypatch.setattr(
+        cli,
+        "console",
+        Console(file=output, force_terminal=False, color_system=None, width=120),
+    )
+
+    cli._print_reflow_review_notes(
+        StoreKind.YARD,
+        keep_context=False,
+        filename_policy=DestinationFilenamePolicy.DATE_ORIGINAL,
+    )
+
+    text = output.getvalue()
+    assert "will rename writable rows" in text
+    assert "date-only" in text
+    assert "wrapper folders" in text
 
 
 def test_den_organization_report_flags_bad_den_shapes(tmp_path: Path) -> None:

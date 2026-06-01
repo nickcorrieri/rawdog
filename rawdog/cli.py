@@ -2499,7 +2499,22 @@ def _home_den(action: DenTransferAction = DenTransferAction.COPY, *, show_guidan
         if layout in {DenLayoutMode.PROJECT, DenLayoutMode.PROJECT_DATES}
         else (None, None)
     )
-    dry_run = not _yes_no(f"Commit {action.value.upper()} plan now? Dry-run is safer.", default=False)
+    if same_root_reflow:
+        dry_run = not _yes_no(
+            "Build the same-DEN reflow plan and continue to the final COMMIT PLAN prompt? Dry-run only is safer.",
+            default=False,
+            help_items=[
+                HelpItem(
+                    "y",
+                    "Build and review",
+                    "Persist the same-DEN plan, show operation review, then require the exact COMMIT PLAN phrase before files move.",
+                    STYLE_WARN,
+                ),
+                HelpItem("n", "Dry-run only", "Persist a paused review plan without moving files now.", STYLE_SAFE),
+            ],
+        )
+    else:
+        dry_run = not _yes_no(f"Commit {action.value.upper()} plan now? Dry-run is safer.", default=False)
     den(
         source=source,
         destination=destination,
@@ -3460,13 +3475,19 @@ def _print_media_catalogue_result(
     table.add_column("Value", justify="right")
     table.add_row("Store", f"{store.name} ({store.store_kind.value})")
     table.add_row("Root", str(root))
-    table.add_row("Files catalogued", str(result.quick_cataloged))
-    table.add_row("Full rows updated", str(result.full_cataloged))
+    table.add_row("Quick catalogue rows updated", str(result.quick_cataloged))
+    table.add_row("SHA-256 rows updated", str(result.full_cataloged))
     table.add_row("Catalogued size", _format_bytes(result.total_bytes))
     table.add_row("Media dates", str(result.media_date_files))
     table.add_row("Filesystem dates", str(result.filesystem_date_files))
     table.add_row("Portable DB", str(store_db_path(store.root_path)))
     console.print(table)
+    if title.lower().startswith("quick"):
+        _print_notice(
+            "SHA-256 rows updated: 0 (quick catalogue does not hash files). "
+            "Run Full catalogue to populate sha256 and media_identifier.",
+            style=STYLE_ROW_SELECTED,
+        )
 
 
 def _run_post_fetch_quick_catalogue(destination_root: Path, scan_root: Path) -> None:
@@ -3530,7 +3551,19 @@ def _home_den_organization() -> None:
     group_by = _choose_date_grouping(DenLayoutMode.DATE)
     keep_context, drop_context = _choose_reflow_context_policy(root, default_keep=True)
     time_shift = _prompt_time_shift()
-    dry_run = not _yes_no("Commit same-DEN rename/move plan now? Dry-run is safer.", default=False)
+    dry_run = not _yes_no(
+        "Build the same-DEN reflow plan and continue to the final COMMIT PLAN prompt? Dry-run only is safer.",
+        default=False,
+        help_items=[
+            HelpItem(
+                "y",
+                "Build and review",
+                "Persist the plan, show operation review, then require the exact COMMIT PLAN phrase before files move.",
+                STYLE_WARN,
+            ),
+            HelpItem("n", "Dry-run only", "Persist a paused review plan without moving files now.", STYLE_SAFE),
+        ],
+    )
     _run_den_reflow_plan(
         config,
         root,
@@ -3550,6 +3583,7 @@ def _home_yard_reflow() -> None:
                 [
                     "YARD reflow builds a preview-first rename/move plan inside one registered yard.",
                     "Use it to turn flattened camera files into YYYY/date buckets with rollover-safe names.",
+                    "For temp/import dump yards, date-only is usually safest because wrapper folders often are not projects.",
                     "Existing destination paths are never overwritten; conflicts stay paused for review.",
                     "Use camera clock correction only when you know the exact offset.",
                 ]
@@ -3569,7 +3603,19 @@ def _home_yard_reflow() -> None:
         default=config.yard_filename_policy,
     )
     time_shift = _prompt_time_shift()
-    dry_run = not _yes_no("Commit same-YARD rename/move plan now? Dry-run is safer.", default=False)
+    dry_run = not _yes_no(
+        "Build the same-YARD reflow plan and continue to the final COMMIT PLAN prompt? Dry-run only is safer.",
+        default=False,
+        help_items=[
+            HelpItem(
+                "y",
+                "Build and review",
+                "Persist the plan, show operation review, then require the exact COMMIT PLAN phrase before files move.",
+                STYLE_WARN,
+            ),
+            HelpItem("n", "Dry-run only", "Persist a paused review plan without moving files now.", STYLE_SAFE),
+        ],
+    )
     _run_yard_reflow_plan(
         config,
         root,
@@ -3995,6 +4041,7 @@ def _run_store_reflow_plan(
         "It does not copy to another store, does not overwrite existing destination files, and leaves conflicts paused.",
         style=STYLE_ROW_SELECTED,
     )
+    _print_reflow_review_notes(store_kind, keep_context=keep_context, filename_policy=filename_policy)
     if time_shift:
         _print_notice(f"Capture timestamp shift applied during planning: {_format_time_shift(time_shift)}")
         _print_notice(
@@ -4027,6 +4074,34 @@ def _run_store_reflow_plan(
     _confirm_and_execute_plan(config, execution_plan.plan_id, action="Execute")
     with session(config.database_path) as connection:
         return get_execution_plan(connection, execution_plan.plan_id) or execution_plan
+
+
+def _print_reflow_review_notes(
+    store_kind: StoreKind,
+    *,
+    keep_context: bool,
+    filename_policy: DestinationFilenamePolicy,
+) -> None:
+    if filename_policy == DestinationFilenamePolicy.ORIGINAL:
+        _print_notice(
+            "File names: original - this reflow only changes folder placement unless a conflict blocks the row.",
+            style=STYLE_SAFE,
+        )
+    else:
+        _print_notice(
+            f"File names: {filename_policy.value} - this reflow will rename writable rows using the configured policy.",
+            style=STYLE_WARN,
+        )
+    if store_kind == StoreKind.YARD and not keep_context:
+        _print_notice(
+            "Context folders: date-only - wrapper folders like Date_Only, Pictures export, or card export are ignored.",
+            style=STYLE_ROW_SELECTED,
+        )
+    elif keep_context:
+        _print_notice(
+            "Context folders: selected non-date folder names remain in destination paths.",
+            style=STYLE_ROW_SELECTED,
+        )
 
 
 def _build_den_reflow_plan(
@@ -5981,7 +6056,17 @@ def _execute_persisted_plan(config: RawdogConfig, plan_id: int) -> ExecutionPlan
             raise typer.BadParameter(f"Unknown plan: {plan_id}")
         rows = list_execution_plan_rows(connection, plan_id)
     try:
-        begin_active_run(config.database_path, plan_id=plan_id, what=plan.what)
+        begin_active_run(
+            config.database_path,
+            plan_id=plan_id,
+            what=plan.what,
+            plan_kind=plan.plan_kind,
+            subject=plan.subject,
+            source_root=plan.source_root,
+            destination_root=plan.destination_root,
+            store_kind=_store_kind_label_for_plan(plan),
+            write_lock=True,
+        )
     except ActiveRunError as exc:
         raise typer.BadParameter(str(exc)) from exc
 
@@ -6531,7 +6616,8 @@ def status() -> None:
         state = "running" if active_run_is_alive(active_run) else "stale"
         table.add_row(
             "Active run",
-            f"plan #{active_run.plan_id} ({state}, pid {active_run.pid})",
+            f"plan #{active_run.plan_id} {active_run.plan_kind or 'unknown'} "
+            f"({state}, pid {active_run.pid}, write lock: {'yes' if active_run.write_lock else 'no'})",
         )
     console.print(table)
     if active_run:
@@ -7836,17 +7922,33 @@ def _print_active_run_notice(config: RawdogConfig) -> None:
     state = "running" if active_run_is_alive(run) else "stale"
     lines = [
         f"Plan: #{run.plan_id}",
+        f"Kind: {run.plan_kind or 'unknown'}",
         f"PID: {run.pid}",
         f"State: {state}",
         f"Started: {run.started_at.isoformat()}",
         f"What: {run.what}",
+        f"Subject: {run.subject or 'unknown'}",
+        f"Source: {run.source_root or 'unknown'}",
+        f"Destination: {run.destination_root or 'unknown'}",
+        f"Store kind: {run.store_kind or 'unknown'}",
+        f"Write lock: {'yes' if run.write_lock else 'no'}",
         f"Marker: {active_run_path(config.database_path)}",
     ]
     if state == "running":
+        lines.append("Current command is blocked if it needs to start another write plan against RAWDOG storage.")
         lines.append("Avoid brew upgrades, drive disconnects, or starting another plan until this finishes.")
     else:
         lines.append("If no RAWDOG copy/move is running, clear this with: rawdog plans active-clear --force")
     console.print(Panel("\n".join(lines), title="Active RAWDOG Run", border_style="yellow", style=STYLE_PANEL))
+
+
+def _store_kind_label_for_plan(plan: ExecutionPlan) -> str:
+    plan_kind = plan.plan_kind.lower()
+    if "yard" in plan_kind or plan_kind == "fetch":
+        return "yard"
+    if "den" in plan_kind:
+        return "den"
+    return "unknown"
 
 
 def _read_active_run_or_none(config: RawdogConfig):

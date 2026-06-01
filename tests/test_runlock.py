@@ -20,13 +20,27 @@ from rawdog.runlock import (
 def test_active_run_marker_blocks_while_process_is_alive(tmp_path: Path) -> None:
     database = tmp_path / "rawdog.sqlite"
 
-    run = begin_active_run(database, plan_id=42, what="copy RAW/camera video files")
+    run = begin_active_run(
+        database,
+        plan_id=42,
+        what="copy RAW/camera video files",
+        plan_kind="fetch",
+        subject=f"{tmp_path / 'card'} -> {tmp_path / 'RAW_YARD'}",
+        source_root=tmp_path / "card",
+        destination_root=tmp_path / "RAW_YARD",
+        store_kind="yard",
+        write_lock=True,
+    )
 
     assert run.plan_id == 42
     assert run.pid == os.getpid()
     assert read_active_run(database) == run
+    assert run.plan_kind == "fetch"
+    assert run.source_root == tmp_path / "card"
+    assert run.destination_root == tmp_path / "RAW_YARD"
+    assert run.store_kind == "yard"
     assert active_run_is_alive(run)
-    with pytest.raises(ActiveRunError, match="already marked active"):
+    with pytest.raises(ActiveRunError, match="This command is blocked"):
         begin_active_run(database, plan_id=43, what="another plan")
 
     finish_active_run(database, plan_id=42)
