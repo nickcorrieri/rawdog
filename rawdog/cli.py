@@ -73,7 +73,7 @@ from rawdog.memory import (
     build_destination_memory,
     write_destination_memory,
 )
-from rawdog.metadata import capture_time_fallback
+from rawdog.metadata import capture_time_fallback, capture_times, has_media_metadata_reader
 from rawdog.models import (
     CollisionPolicy,
     ConsolidationWorkflowCreate,
@@ -361,6 +361,65 @@ def _print_notice(text: str, *, style: str = STYLE_MUTED) -> None:
 
 def _print_error(text: str) -> None:
     _print_full_row([(text, STYLE_WARN)], style=STYLE_WARN)
+
+
+def _print_media_metadata_reader_warning(context: str) -> None:
+    if has_media_metadata_reader():
+        return
+    _print_notice(
+        f"exiftool not found; RAWDOG cannot read embedded RAW/CR3 capture dates for {context}. "
+        "It will use filesystem timestamps only.",
+        style=STYLE_WARN,
+    )
+
+
+def _print_setup_metadata_reader_status() -> None:
+    if has_media_metadata_reader():
+        _print_notice(
+            "ExifTool detected: RAWDOG can read embedded RAW/CR3 capture dates during date-organizing plans.",
+            style=STYLE_SAFE,
+        )
+        return
+    console.print(
+        Panel(
+            "\n".join(
+                [
+                    "ExifTool was not found on PATH.",
+                    "",
+                    "RAWDOG can still run, but date-organizing imports, den moves, and reflow plans cannot read embedded RAW/CR3 capture dates.",
+                    "Without embedded media dates, RAWDOG falls back to filesystem timestamps. Recovered files may have misleading filesystem dates.",
+                    "",
+                    "Recommended on macOS: install ExifTool separately before importing recovered RAW/CR3 files.",
+                    "RAWDOG will not install it for you.",
+                ]
+            ),
+            title="RAW/CR3 Metadata Warning",
+            border_style="red",
+            style=STYLE_PANEL,
+            expand=True,
+        )
+    )
+    if not sys.stdin.isatty():
+        _print_notice("Run `brew install exiftool` when ready.", style=STYLE_ROW_SELECTED)
+        return
+    if _yes_no("We recommend ExifTool for RAW/CR3 dates. Install now with `brew install exiftool`?", default=True):
+        _install_exiftool_with_homebrew()
+
+
+def _install_exiftool_with_homebrew() -> None:
+    brew = shutil.which("brew")
+    if brew is None:
+        _print_error("Homebrew was not found on PATH. Install ExifTool manually with `brew install exiftool`.")
+        return
+    console.print("Running: brew install exiftool")
+    result = subprocess.run([brew, "install", "exiftool"], check=False)
+    if result.returncode != 0:
+        _print_error("Homebrew could not install ExifTool. RAWDOG setup continues without embedded RAW metadata reads.")
+        return
+    if has_media_metadata_reader():
+        _print_notice("ExifTool installed: embedded RAW/CR3 capture dates are available.", style=STYLE_SAFE)
+    else:
+        _print_error("ExifTool install finished, but `exiftool` is still not on PATH for this terminal.")
 
 
 def _print_folder_option(index: str, name: str, size_bytes: int | None = None) -> None:
@@ -1297,11 +1356,9 @@ def _show_home_menu() -> None:
         table.add_column("Key", style=STYLE_ACTION, justify="right")
         table.add_column("Workflow", style=STYLE_SAFE)
         table.add_column("Action", style=STYLE_PATH)
-        table.add_row("F", "Fetch -> Yard", "Copy card/folder files to a working yard")
-        table.add_row("DC", "Den COPY", "Copy/archive files to a den; source stays")
-        table.add_row("J", "Junkyard report only", "No deletes; reports den-recorded working files")
-        table.add_row("DM", "Den MOVE", "Same-drive consolidate into a den")
-        table.add_row("S", "Sniff / audit", "Audit folders; score/rebuild catalogs")
+        table.add_row("D", "Den", "Copy, move, or re-organize archive files")
+        table.add_row("Y", "Yard", "Copy, move, or re-organize working files")
+        table.add_row("S", "Sniff / audit", "Inspect, score, rebuild catalogs, or run deeper audits")
         table.add_row("P", "Plans", "View, inspect, run, resume, or prune plans")
         table.add_row("W", "Work queue", "Build or preview longer safe queued jobs")
         table.add_row("M", "Manage", "Setup/defaults; manage dens and yards")
@@ -1312,7 +1369,7 @@ def _show_home_menu() -> None:
             [
                 ("Preview-first: ", STYLE_WARN),
                 (
-                    "fetch and den do not write destination/archive files unless you explicitly choose commit.",
+                    "yard and den operations do not write destination files unless you explicitly choose commit.",
                     STYLE_WARN,
                 ),
             ],
@@ -1321,7 +1378,7 @@ def _show_home_menu() -> None:
         if not _is_initialized():
             _print_init_guidance()
         _print_latest_plan_hint()
-        choice = _ask_home_choice(default="m" if not _is_initialized() else "f")
+        choice = _ask_home_choice(default="m" if not _is_initialized() else "y")
         if choice == "q":
             _print_notice("Goodbye.", style=STYLE_SAFE)
             return
@@ -1345,23 +1402,18 @@ def _ask_home_choice(default: str) -> str:
         normalized = _normalize_home_choice(choice)
         if normalized:
             return normalized
-        _print_error("Choose one of: F, DC, DM, J, S, P, W, M, H, Q.")
+        _print_error("Choose one of: D, Y, S, P, W, M, H, Q.")
 
 
 def _normalize_home_choice(choice: str) -> str | None:
     normalized = choice.strip().lower().replace(" ", "").replace("-", "")
     aliases = {
-        "f": "f",
-        "fetch": "f",
-        "dc": "dc",
-        "copy": "dc",
-        "dencopy": "dc",
-        "j": "j",
-        "junkyard": "j",
-        "dm": "dm",
-        "move": "dm",
-        "denmove": "dm",
-        "consolidate": "dm",
+        "d": "d",
+        "den": "d",
+        "archive": "d",
+        "y": "y",
+        "yard": "y",
+        "working": "y",
         "s": "s",
         "sniff": "s",
         "audit": "s",
@@ -1483,14 +1535,10 @@ def _prompt_time_shift() -> timedelta:
 
 def _run_home_choice(choice: str) -> None:
     normalized = _normalize_home_choice(choice) or choice
-    if normalized == "f":
-        _home_fetch()
-    elif normalized == "dc":
-        _home_backup()
-    elif normalized == "j":
-        _home_cleanup_review()
-    elif normalized == "dm":
-        _home_fast_move()
+    if normalized == "d":
+        _home_den_workflow()
+    elif normalized == "y":
+        _home_yard_workflow()
     elif normalized == "s":
         _home_inspect()
     elif normalized == "p":
@@ -1501,6 +1549,52 @@ def _run_home_choice(choice: str) -> None:
         _home_store_setup()
     elif normalized == "h":
         _show_command_examples()
+
+
+def _home_den_workflow() -> None:
+    _print_section_row("Den")
+    _print_option("1.", "Copy into den")
+    _print_option("2.", "Move into den")
+    _print_option("3.", "Re-organize existing den")
+    _print_option("0.", "Back")
+    choice = Prompt.ask(
+        _prompt("Choose den action"),
+        choices=["0", "1", "2", "3", "copy", "move", "reorganize", "re-organize"],
+        default="1",
+        console=console,
+    )
+    if choice == "0":
+        return
+    if choice in {"1", "copy"}:
+        _home_den_copy()
+        return
+    if choice in {"2", "move"}:
+        _home_den_move()
+        return
+    _home_den_organization()
+
+
+def _home_yard_workflow() -> None:
+    _print_section_row("Yard")
+    _print_option("1.", "Copy/import into yard")
+    _print_option("2.", "Move into yard")
+    _print_option("3.", "Re-organize existing yard")
+    _print_option("0.", "Back")
+    choice = Prompt.ask(
+        _prompt("Choose yard action"),
+        choices=["0", "1", "2", "3", "copy", "move", "reorganize", "re-organize"],
+        default="1",
+        console=console,
+    )
+    if choice == "0":
+        return
+    if choice in {"1", "copy"}:
+        _home_yard_import(DenTransferAction.COPY)
+        return
+    if choice in {"2", "move"}:
+        _home_yard_import(DenTransferAction.MOVE)
+        return
+    _home_yard_reflow()
 
 
 def _home_init() -> None:
@@ -1548,10 +1642,24 @@ def _confirm_store_registration(root: Path, store_kind: StoreKind) -> bool:
     )
 
 
-def _home_fetch() -> None:
+def _home_yard_import(action: DenTransferAction = DenTransferAction.COPY) -> None:
+    if action == DenTransferAction.MOVE:
+        _print_yard_move_guidance()
     source = _choose_source_path("Import source")
     destination = _choose_store_path("Import destination", StoreKind.YARD)
+    if action == DenTransferAction.MOVE:
+        try:
+            ensure_same_filesystem(source, destination)
+        except SafetyError as exc:
+            raise typer.BadParameter(f"Yard move is same-drive only: {exc}. Use yard copy instead.") from exc
     project_name = _optional_prompt("Project name, or Enter for date/layout detection")
+    detect_dates = _yes_no("Detect date layout from source folders/media?", default=True)
+    group_by_date = (
+        _yes_no("Group camera-dump files by capture date?", default=True)
+        if detect_dates
+        else False
+    )
+    naming = None if detect_dates and group_by_date else NamingConvention.KEEP_EXISTING
     detect_sessions = _yes_no("Detect sessions by time gaps?")
     fetch(
         source=source,
@@ -1559,25 +1667,53 @@ def _home_fetch() -> None:
         profile=None,
         project_name=project_name,
         profile_name=None,
-        naming=None,
+        naming=naming,
         collision_policy=None,
         verify_after_copy=None,
         detect_sessions=detect_sessions,
+        action=action,
         dry_run=True,
     )
-    if _yes_no("Commit this fetch now?"):
+    if _yes_no(f"Commit this {action.value.upper()} import now?"):
         fetch(
             source=source,
             destination=destination,
             profile=None,
             project_name=project_name,
             profile_name=None,
-            naming=None,
+            naming=naming,
             collision_policy=None,
             verify_after_copy=None,
             detect_sessions=detect_sessions,
+            action=action,
             dry_run=False,
         )
+
+
+def _print_yard_move_guidance() -> None:
+    console.print(
+        Panel(
+            "\n".join(
+                [
+                    "You selected YARD transfer mode: MOVE.",
+                    "Move is only for same-drive cleanup into a working yard.",
+                    "",
+                    "What happens:",
+                    "1. RAWDOG scans the source and writes a reviewable dry-run plan.",
+                    "2. It refuses if source and destination are not on the same filesystem.",
+                    "3. On commit, successful rows use os.rename into the yard.",
+                    "4. Existing destination files are never overwritten.",
+                    "5. Skipped/existing rows stay in the source folder for review.",
+                    "",
+                    "Use yard copy for SD cards, cross-drive imports, or anything you want duplicated first.",
+                ]
+            ),
+            title="Same-Drive MOVE -> Yard",
+            border_style="yellow",
+            style=STYLE_PANEL,
+            expand=True,
+        )
+    )
 
 
 def _print_copy_to_den_guidance() -> None:
@@ -1620,7 +1756,7 @@ def _print_fast_move_guidance() -> None:
                     "5. Skipped/existing rows stay in the source folder for review; RAWDOG does not delete them.",
                     "",
                     "Use this to clean up same-drive folder mess without duplicating storage.",
-                    "For copy/archive, use top-level workflow DC instead.",
+                    "For copy/archive, use Den -> Copy instead.",
                 ]
             ),
             title="Fast Same-Drive MOVE -> Den",
@@ -1631,7 +1767,7 @@ def _print_fast_move_guidance() -> None:
     )
 
 
-def _home_backup() -> None:
+def _home_den_copy() -> None:
     _print_copy_to_den_guidance()
     _home_den(action=DenTransferAction.COPY, show_guidance=False)
 
@@ -1672,7 +1808,7 @@ def _home_cleanup_review() -> None:
     )
 
 
-def _home_fast_move() -> None:
+def _home_den_move() -> None:
     _print_fast_move_guidance()
     _home_den(action=DenTransferAction.MOVE)
 
@@ -2327,7 +2463,8 @@ def _run_hardcore_audit(root: Path, *, hash_check: bool = False) -> None:
     items = scan_raw_files(root)
     total_bytes = sum(item.size_bytes for item in items)
     extensions = Counter(item.path.suffix.lower() or "[none]" for item in items)
-    years = Counter(str(capture_time_fallback(item.path).year) for item in items)
+    item_capture_times = capture_times([item.path for item in items])
+    years = Counter(str(item_capture_times[item.path].year) for item in items)
     duplicate_names = _duplicate_name_groups(items)
     duplicate_camera_ids = _camera_identity_groups([item.path for item in items])
 
@@ -2613,6 +2750,7 @@ def _run_store_reflow_plan(
     store_label = store_kind.value.upper()
     if store is None:
         raise typer.BadParameter(f"{store_label} reflow is only allowed inside a registered {store_kind.value}.")
+    _print_media_metadata_reader_warning(f"this {store_kind.value} reflow")
     plan = _build_den_reflow_plan(
         root,
         group_by=group_by,
@@ -2693,8 +2831,13 @@ def _build_den_reflow_plan(
     time_shift_rows: list[ReflowTimeShiftPlanRow] = []
     planned_destinations: set[Path] = set()
     shift_seconds = int(time_shift.total_seconds())
+    item_capture_times = capture_times([item.path for item in items])
     for item in items:
-        capture = _reflow_capture_time_info(item.path, time_shift=time_shift)
+        capture = _reflow_capture_time_info(
+            item.path,
+            time_shift=time_shift,
+            fallback_capture_at=item_capture_times[item.path],
+        )
         captured_at = capture.shifted_capture_at
         date_bucket = _den_reflow_date_bucket(captured_at, group_by)
         context_parts = (
@@ -2758,7 +2901,12 @@ def _reflow_capture_time(path: Path, *, time_shift: timedelta) -> datetime:
     return _reflow_capture_time_info(path, time_shift=time_shift).shifted_capture_at
 
 
-def _reflow_capture_time_info(path: Path, *, time_shift: timedelta) -> ReflowCaptureTime:
+def _reflow_capture_time_info(
+    path: Path,
+    *,
+    time_shift: timedelta,
+    fallback_capture_at: datetime | None = None,
+) -> ReflowCaptureTime:
     if time_shift:
         from_name = filename_capture_time(path)
         if from_name is not None:
@@ -2767,7 +2915,7 @@ def _reflow_capture_time_info(path: Path, *, time_shift: timedelta) -> ReflowCap
                 shifted_capture_at=from_name + time_shift,
                 basis="filename",
             )
-    original = capture_time_fallback(path)
+    original = fallback_capture_at or capture_time_fallback(path)
     return ReflowCaptureTime(
         original_capture_at=original,
         shifted_capture_at=original + time_shift,
@@ -3029,26 +3177,17 @@ def _home_store_setup() -> None:
 
 def _home_filename_policy_settings() -> None:
     config_path, config = _load_or_exit()
-    choices = [policy.value for policy in DestinationFilenamePolicy]
     _print_notice(
         "date-og writes YYYYMMDD-HHMMSS-SS__original so rollover names sort by capture time and remain searchable.",
         style=STYLE_ROW_SELECTED,
     )
-    yard_policy = DestinationFilenamePolicy(
-        Prompt.ask(
-            "Default YARD import file names",
-            choices=choices,
-            default=config.yard_filename_policy.value,
-            console=console,
-        )
+    yard_policy = _prompt_filename_policy(
+        "Default YARD Import File Names",
+        default=config.yard_filename_policy,
     )
-    den_policy = DestinationFilenamePolicy(
-        Prompt.ask(
-            "Default DEN file names",
-            choices=choices,
-            default=config.den_filename_policy.value,
-            console=console,
-        )
+    den_policy = _prompt_filename_policy(
+        "Default DEN File Names",
+        default=config.den_filename_policy,
     )
     updated = replace(config, yard_filename_policy=yard_policy, den_filename_policy=den_policy)
     save_config(updated, config_path)
@@ -3056,6 +3195,45 @@ def _home_filename_policy_settings() -> None:
         f"Saved filename policies: yard={yard_policy.value}; den={den_policy.value}.",
         style=STYLE_SAFE,
     )
+
+
+def _prompt_filename_policy(title: str, *, default: DestinationFilenamePolicy) -> DestinationFilenamePolicy:
+    options = _filename_policy_menu_options()
+    table = _styled_table(title=title, row_styles=STYLE_ROWS)
+    table.add_column("Key", justify="right", style=STYLE_ACTION, no_wrap=True)
+    table.add_column("Policy", style=STYLE_ACTION, no_wrap=True)
+    table.add_column("Example", overflow="fold")
+    table.add_column("What it means", overflow="fold")
+    for key, policy in options:
+        table.add_row(
+            key,
+            policy.value,
+            _filename_policy_sample(policy),
+            _filename_policy_description(policy),
+        )
+    console.print(table)
+    key_by_policy = {policy: key for key, policy in options}
+    policy_by_choice = {key: policy for key, policy in options}
+    policy_by_choice.update({policy.value: policy for _, policy in options})
+    choice = Prompt.ask(
+        _prompt("Choose filename policy"),
+        choices=list(policy_by_choice),
+        default=key_by_policy.get(default, "1"),
+        console=console,
+    )
+    return policy_by_choice[choice]
+
+
+def _filename_policy_menu_options() -> list[tuple[str, DestinationFilenamePolicy]]:
+    return [
+        ("1", DestinationFilenamePolicy.DATE_ORIGINAL),
+        ("2", DestinationFilenamePolicy.ORIGINAL_DATE),
+        ("3", DestinationFilenamePolicy.ORIGINAL),
+        ("4", DestinationFilenamePolicy.ORIGINAL_HASH),
+        ("5", DestinationFilenamePolicy.ORIGINAL_UNIQUE_ID),
+        ("6", DestinationFilenamePolicy.UNIQUE_ID_ORIGINAL),
+        ("7", DestinationFilenamePolicy.DATE_SUFFIX),
+    ]
 
 
 def _home_register_store(store_kind: StoreKind) -> None:
@@ -3159,6 +3337,7 @@ def init(
     initialize(config.database_path)
     console.print(f"RAWDOG config written: {config_path}")
     console.print(f"RAWDOG database initialized: {config.database_path}")
+    _print_setup_metadata_reader_status()
     _print_notice(
         f"Default YARD file names: {yard_filename_policy.value} - {_filename_policy_description(yard_filename_policy)}",
         style=STYLE_SAFE,
@@ -3206,13 +3385,19 @@ def fetch(
         help="Remember verify preference.",
     ),
     detect_sessions: bool = typer.Option(False, "--detect-sessions", help="Suggest time-gap splits."),
+    action: DenTransferAction = typer.Option(
+        DenTransferAction.COPY,
+        "--action",
+        "--transfer-action",
+        help="copy or same-filesystem move into the yard.",
+    ),
     dry_run: bool | None = typer.Option(
         None,
         "--dry-run/--commit",
-        help="Preview before copying.",
+        help="Preview before copying or moving.",
     ),
 ) -> None:
-    """Fetch RAW and camera video files from an SD card or import source into the working library."""
+    """Import RAW and camera video files from a card or folder into a working yard."""
     _, config = _load_or_exit()
     loaded_profile = None
     with session(config.database_path) as connection:
@@ -3239,6 +3424,8 @@ def fetch(
         ensure_existing_directory(source_root, "source")
         ensure_existing_directory(destination_root, "destination")
         ensure_import_roots(source_root, destination_root)
+        if action == DenTransferAction.MOVE:
+            ensure_same_filesystem(source_root, destination_root)
     except SafetyError as exc:
         raise typer.BadParameter(str(exc)) from exc
 
@@ -3253,7 +3440,7 @@ def fetch(
             effective_naming = NamingConvention.KEEP_EXISTING
         elif layout_analysis.recommendation == "ddd":
             effective_naming = NamingConvention.DDD
-    if project_name:
+    if project_name and effective_naming != NamingConvention.KEEP_EXISTING:
         effective_naming = NamingConvention.PROJECT_LABEL
     effective_filename_policy = (
         filename_policy if isinstance(filename_policy, DestinationFilenamePolicy) else config.yard_filename_policy
@@ -3329,14 +3516,17 @@ def fetch(
     elif profile_name:
         console.print(f"Profile would be saved on commit: {profile_name}")
 
-    console.print("Fetch is append-only and never assigns projects silently.")
+    console.print("Yard import is preview-first and never assigns projects silently.")
     console.print(f"Source: {source_root}")
     console.print(f"Destination: {destination_root}")
+    console.print(f"Transfer action: {action.value}")
     console.print(f"Mode: {(loaded_profile.organization_mode if loaded_profile else config.organization_mode).value}")
     console.print(f"Naming: {effective_naming.value} - {_naming_description(effective_naming)}")
     console.print(f"File names: {effective_filename_policy.value} - {_filename_policy_description(effective_filename_policy)}")
     console.print(f"Collision policy: {effective_collision_policy.value}")
     console.print(f"Verify after copy: {'yes' if effective_verify else 'no'}")
+    if _fetch_plan_uses_capture_dates(effective_naming, effective_filename_policy):
+        _print_media_metadata_reader_warning("this import")
     effective_mode = loaded_profile.organization_mode if loaded_profile else config.organization_mode
     effective_template = (
         loaded_profile.folder_template
@@ -3350,7 +3540,7 @@ def fetch(
     earliest_capture_at = earliest_raw_capture_time(source_root)
     destination_folder = None
     plan_ran = False
-    if project_name:
+    if project_name and effective_naming != NamingConvention.KEEP_EXISTING:
         preview_project_name = project.name if project else project_name
         destination_folder = default_project_destination(
             destination_root,
@@ -3391,6 +3581,7 @@ def fetch(
             destination_folder,
             effective_naming,
             effective_filename_policy,
+            transfer_action=action,
         )
         _print_camera_numbering_warning([row.source_path for row in plan.rows])
         execution_plan = _persist_fetch_execution_plan(config, plan)
@@ -3404,7 +3595,7 @@ def fetch(
             str(destination_folder),
             str(plan.files_to_transfer),
             f"{plan.bytes_to_transfer / 1_000_000_000:.2f}",
-            "dry-run" if effective_dry_run else "commit",
+            f"{action.value} / {'dry-run' if effective_dry_run else 'commit'}",
         )
         console.print(table)
         skipped = sum(1 for row in plan.rows if row.status.startswith("skip"))
@@ -3433,7 +3624,8 @@ def fetch(
     console.print(f"Session detection: {'on' if detect_sessions else 'off'}")
     console.print(f"Dry run: {'yes' if effective_dry_run else 'no'}")
     if effective_dry_run and not plan_ran:
-        console.print("No files copied. Re-run with --commit after reviewing the plan.")
+        transfer_verb = "moved" if action == DenTransferAction.MOVE else "copied"
+        console.print(f"No files {transfer_verb}. Re-run with --commit after reviewing the plan.")
 
 
 @app.command()
@@ -3825,6 +4017,20 @@ def _naming_description(naming: NamingConvention) -> str:
     return descriptions[naming]
 
 
+def _fetch_plan_uses_capture_dates(
+    naming: NamingConvention,
+    filename_policy: DestinationFilenamePolicy,
+) -> bool:
+    return naming != NamingConvention.KEEP_EXISTING or filename_policy != DestinationFilenamePolicy.ORIGINAL
+
+
+def _den_plan_uses_capture_dates(
+    layout: DenLayoutMode,
+    filename_policy: DestinationFilenamePolicy,
+) -> bool:
+    return layout != DenLayoutMode.PRESERVE or filename_policy != DestinationFilenamePolicy.ORIGINAL
+
+
 def _filename_policy_description(policy: DestinationFilenamePolicy) -> str:
     descriptions = {
         DestinationFilenamePolicy.ORIGINAL: "keep original camera filenames",
@@ -3880,8 +4086,10 @@ def _build_fetch_plan(
     destination_folder: Path,
     naming: NamingConvention,
     filename_policy: DestinationFilenamePolicy = DestinationFilenamePolicy.ORIGINAL,
+    transfer_action: DenTransferAction = DenTransferAction.COPY,
 ) -> DenPlan:
     items = scan_raw_files(source_root)
+    item_capture_times = capture_times([item.path for item in items])
     planned_destinations: set[Path] = set()
     rows: list[DenPlanRow] = []
     for item in items:
@@ -3895,7 +4103,7 @@ def _build_fetch_plan(
         destination_path = destination_path_for_filename_policy(
             item.path,
             destination_parent,
-            capture_time_fallback(item.path),
+            item_capture_times[item.path],
             policy=filename_policy,
             reserved_destinations=planned_destinations,
             size_bytes=item.size_bytes,
@@ -3924,15 +4132,17 @@ def _build_fetch_plan(
         destination_root=destination_root,
         destination_folder=destination_folder,
         rows=rows,
-        transfer_action=DenTransferAction.COPY,
+        transfer_action=transfer_action,
     )
 
 
 def _persist_fetch_execution_plan(config: RawdogConfig, plan: DenPlan) -> ExecutionPlan:
     skipped = sum(1 for row in plan.rows if row.status.startswith("skip"))
     collisions = sum(1 for row in plan.rows if row.status == "collision")
+    action_label = "move" if plan.transfer_action == DenTransferAction.MOVE else "copy"
+    result_label = "moved" if plan.transfer_action == DenTransferAction.MOVE else "copied"
     expected = (
-        f"{plan.files_to_transfer} files should be at {plan.destination_folder}; "
+        f"{plan.files_to_transfer} files should be {result_label} into {plan.destination_folder}; "
         f"{skipped} already-present files skipped; {collisions} collisions held for review."
     )
     with session(config.database_path) as connection:
@@ -3940,7 +4150,7 @@ def _persist_fetch_execution_plan(config: RawdogConfig, plan: DenPlan) -> Execut
             connection,
             ExecutionPlanCreate(
                 plan_kind="fetch",
-                what="copy RAW/camera video files into a RAWDOG yard",
+                what=f"{action_label} RAW/camera video files into a RAWDOG yard",
                 subject=f"{plan.source_root} -> {plan.destination_root}",
                 expected_result=expected,
                 execution_summary="Not started.",
@@ -3957,7 +4167,7 @@ def _persist_fetch_execution_plan(config: RawdogConfig, plan: DenPlan) -> Execut
                     source_path=row.source_path,
                     destination_path=row.destination_path,
                     size_bytes=row.size_bytes,
-                    transfer_action=DenTransferAction.COPY,
+                    transfer_action=plan.transfer_action,
                     status=row.status,
                 )
                 for row in plan.rows
@@ -4826,6 +5036,8 @@ def den(
             "[bold yellow]Unregistered den destination:[/] "
             "run `rawdog dens setup --root DESTINATION` to give this archive a portable store catalog."
         )
+    if _den_plan_uses_capture_dates(effective_layout, effective_filename_policy):
+        _print_media_metadata_reader_warning("this den plan")
     effective_template = (
         template
         or _den_template_for_grouping(effective_layout, group_by)

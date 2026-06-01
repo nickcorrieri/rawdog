@@ -4,6 +4,7 @@ import os
 from datetime import UTC, datetime
 from pathlib import Path
 
+from rawdog import metadata
 from rawdog.den import build_den_plan, score_items, summarize_by_year
 from rawdog.inventory import scan_raw_files
 from rawdog.metadata import capture_time_fallback
@@ -108,6 +109,35 @@ def test_den_date_layout_drops_dcim_camera_folder_wrappers(tmp_path: Path) -> No
     assert plan.rows[0].destination_path.name == "IMG_0001.CR3"
     assert "DCIM" not in plan.rows[0].destination_path.parts
     assert "100CANON" not in plan.rows[0].destination_path.parts
+
+
+def test_den_date_layout_uses_media_capture_date_before_recovered_file_mtime(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "archive"
+    raw = source / "LS7A0001.CR3"
+    source.mkdir()
+    destination.mkdir()
+    raw.write_bytes(b"recovered cr3")
+    project_ts = datetime(2025, 4, 5, tzinfo=UTC).timestamp()
+    os.utime(raw, (project_ts, project_ts))
+    monkeypatch.setattr(
+        metadata,
+        "_read_exiftool_tags_for_paths",
+        lambda paths: {raw: {"DateTimeOriginal": "2026:05:28 13:40:00"}},
+    )
+
+    plan = build_den_plan(
+        source,
+        destination,
+        layout_mode=DenLayoutMode.DATE,
+        folder_template="YYYY/YYYYMMDD",
+    )
+
+    assert plan.rows[0].destination_path == destination / "2026" / "20260528" / "LS7A0001.CR3"
+    assert "2025" not in plan.rows[0].destination_path.parts
 
 
 def test_den_preserve_dates_keeps_project_prefix_but_drops_camera_wrappers(tmp_path: Path) -> None:

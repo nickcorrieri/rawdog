@@ -12,7 +12,7 @@ from rawdog.datefolders import normalize_date_folder_parts
 from rawdog.filenames import destination_path_for_filename_policy
 from rawdog.inventory import InventoryItem, scan_raw_files
 from rawdog.layout import is_camera_dump_part
-from rawdog.metadata import capture_time_fallback
+from rawdog.metadata import capture_times
 from rawdog.models import DenLayoutMode, DenTransferAction, DestinationFilenamePolicy
 from rawdog.planner import (
     default_date_only_destination,
@@ -96,8 +96,14 @@ def build_den_plan(
     destination_root = destination_root.expanduser().resolve()
     excluded_roots = [path.expanduser().resolve() for path in (exclude_roots or [])]
     items = scan_raw_files(source_root, exclude_roots=excluded_roots, limit=limit)
-    items = _filter_items_by_capture_date(items, start_date=start_date, end_date=end_date)
-    earliest = min((capture_time_fallback(item.path) for item in items), default=datetime.now(UTC))
+    item_capture_times = capture_times([item.path for item in items])
+    items = _filter_items_by_capture_date(
+        items,
+        start_date=start_date,
+        end_date=end_date,
+        item_capture_times=item_capture_times,
+    )
+    earliest = min((item_capture_times[item.path] for item in items), default=datetime.now(UTC))
     if layout_mode in {
         DenLayoutMode.PRESERVE,
         DenLayoutMode.PRESERVE_DATES,
@@ -127,6 +133,7 @@ def build_den_plan(
             preserve_dates_drop_parts=preserve_dates_drop_parts or set(),
             filename_policy=filename_policy,
             reserved_destinations=planned_destinations,
+            captured_at=item_capture_times[item.path],
         )
         if row.status == "plan_copy":
             if row.destination_path in planned_destinations:
@@ -189,17 +196,16 @@ def summarize_by_year(rows: list[DenPlanRow]) -> list[dict[str, object]]:
 
 
 def capture_date_counts(items: list[InventoryItem]) -> Counter[date]:
-    return Counter(capture_time_fallback(item.path).date() for item in items)
+    item_capture_times = capture_times([item.path for item in items])
+    return Counter(item_capture_times[item.path].date() for item in items)
 
 
 def score_items(items: list[InventoryItem]) -> LibraryScore:
     total_bytes = sum(item.size_bytes for item in items)
     name_counts = Counter(item.path.name for item in items)
     duplicate_names = sum(1 for count in name_counts.values() if count > 1)
-    years = {
-        datetime.fromtimestamp(item.path.stat().st_mtime).year
-        for item in items
-    }
+    item_capture_times = capture_times([item.path for item in items])
+    years = {item_capture_times[item.path].year for item in items}
     score = 100
     notes: list[str] = []
     if not items:
@@ -227,12 +233,13 @@ def _filter_items_by_capture_date(
     *,
     start_date: date | None,
     end_date: date | None,
+    item_capture_times: dict[Path, datetime],
 ) -> list[InventoryItem]:
     if start_date is None and end_date is None:
         return items
     filtered = []
     for item in items:
-        captured_on = capture_time_fallback(item.path).date()
+        captured_on = item_capture_times[item.path].date()
         if start_date is not None and captured_on < start_date:
             continue
         if end_date is not None and captured_on > end_date:
@@ -253,6 +260,7 @@ def _plan_row(
     preserve_dates_drop_parts: set[str],
     filename_policy: DestinationFilenamePolicy,
     reserved_destinations: set[Path],
+    captured_at: datetime,
 ) -> DenPlanRow:
     relative_path = (
         _drop_preserve_dates_parts(item.relative_path, preserve_dates_drop_parts)
@@ -263,7 +271,6 @@ def _plan_row(
         layout_mode == DenLayoutMode.PRESERVE_DATES
         and _has_camera_dump_relative_path(source_root, relative_path)
     ):
-        captured_at = capture_time_fallback(item.path)
         preserved_prefix = (
             ()
             if layout_mode == DenLayoutMode.DATE
@@ -279,23 +286,19 @@ def _plan_row(
             )
         )
     elif layout_mode == DenLayoutMode.PROJECT_DATES:
-        captured_at = capture_time_fallback(item.path)
         destination_parent = (
             destination_root
             / render_folder_template(folder_template, captured_at, project_name=project_name)
         )
     elif layout_mode == DenLayoutMode.PRESERVE_DATES:
-        captured_at = capture_time_fallback(item.path)
         preserved_path = _year_scoped_preserved_path(
             relative_path,
             captured_at,
         )
         destination_parent = destination_folder / preserved_path.parent
     elif layout_mode == DenLayoutMode.PROJECT:
-        captured_at = capture_time_fallback(item.path)
         destination_parent = destination_folder
     else:
-        captured_at = capture_time_fallback(item.path)
         destination_parent = destination_folder / relative_path.parent
     destination = destination_path_for_filename_policy(
         item.path,

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from rawdog.metadata import capture_time_fallback, is_camera_capture_file
+from rawdog.metadata import capture_times, is_camera_capture_file
 
 DEFAULT_SKIPPED_DIRS = {
     ".DocumentRevisions-V100",
@@ -74,7 +74,8 @@ def earliest_raw_capture_time(
     items = scan_raw_files(root, exclude_roots=exclude_roots)
     if not items:
         return None
-    return min(capture_time_fallback(item.path) for item in items)
+    times = capture_times([item.path for item in items])
+    return min(times[item.path] for item in items)
 
 
 def _is_excluded(path: Path, exclude_roots: tuple[Path, ...]) -> bool:

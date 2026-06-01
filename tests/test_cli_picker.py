@@ -4,7 +4,7 @@ import os
 from datetime import UTC, date, datetime
 from pathlib import Path
 
-from rawdog import cli
+from rawdog import cli, metadata
 from rawdog.config import build_config
 from rawdog.db import initialize, session
 from rawdog.inventory import InventoryItem
@@ -22,17 +22,40 @@ def test_choose_path_accepts_direct_path_without_exiting(tmp_path: Path, monkeyp
 
 
 def test_home_choice_uses_letter_workflows_and_hides_init_under_manage() -> None:
-    assert cli._normalize_home_choice("F") == "f"
-    assert cli._normalize_home_choice("DC") == "dc"
-    assert cli._normalize_home_choice("DM") == "dm"
-    assert cli._normalize_home_choice("J") == "j"
+    assert cli._normalize_home_choice("D") == "d"
+    assert cli._normalize_home_choice("den") == "d"
+    assert cli._normalize_home_choice("Y") == "y"
+    assert cli._normalize_home_choice("yard") == "y"
     assert cli._normalize_home_choice("S") == "s"
     assert cli._normalize_home_choice("P") == "p"
     assert cli._normalize_home_choice("W") == "w"
     assert cli._normalize_home_choice("M") == "m"
     assert cli._normalize_home_choice("init") == "m"
     assert cli._normalize_home_choice("Q") == "q"
+    assert cli._normalize_home_choice("DM") is None
     assert cli._normalize_home_choice("2") is None
+
+
+def test_filename_policy_menu_accepts_numbered_choice(monkeypatch) -> None:
+    monkeypatch.setattr(cli.Prompt, "ask", _answers("4"))
+
+    policy = cli._prompt_filename_policy(
+        "Default DEN File Names",
+        default=DestinationFilenamePolicy.DATE_ORIGINAL,
+    )
+
+    assert policy == DestinationFilenamePolicy.ORIGINAL_HASH
+
+
+def test_filename_policy_menu_accepts_policy_value(monkeypatch) -> None:
+    monkeypatch.setattr(cli.Prompt, "ask", _answers("iuid-og"))
+
+    policy = cli._prompt_filename_policy(
+        "Default YARD Import File Names",
+        default=DestinationFilenamePolicy.DATE_ORIGINAL,
+    )
+
+    assert policy == DestinationFilenamePolicy.UNIQUE_ID_ORIGINAL
 
 
 def test_choose_path_can_browse_numbered_location(tmp_path: Path, monkeypatch) -> None:
@@ -181,7 +204,7 @@ def test_confirm_store_registration_includes_selected_path(tmp_path: Path, monke
     assert f"Selected archive den: {tmp_path.resolve()}" in rows[0]
 
 
-def test_home_backup_uses_copy_den_planner(monkeypatch) -> None:
+def test_home_den_copy_uses_copy_den_planner(monkeypatch) -> None:
     calls: list[tuple[cli.DenTransferAction, bool]] = []
 
     monkeypatch.setattr(cli, "_print_copy_to_den_guidance", lambda: None)
@@ -191,7 +214,7 @@ def test_home_backup_uses_copy_den_planner(monkeypatch) -> None:
         lambda action, show_guidance=True: calls.append((action, show_guidance)),
     )
 
-    cli._home_backup()
+    cli._home_den_copy()
 
     assert calls == [(cli.DenTransferAction.COPY, False)]
 
@@ -384,6 +407,27 @@ def test_fetch_plan_date_suffixes_flattened_camera_names(tmp_path: Path) -> None
     assert [row.status for row in plan.rows] == ["plan_copy", "plan_copy"]
 
 
+def test_fetch_plan_can_be_yard_move_plan(tmp_path: Path) -> None:
+    source = tmp_path / "DCIM"
+    destination = tmp_path / "RAW_YARD"
+    destination_folder = destination / "2026" / "2026-05"
+    raw_file = source / "101EOSR7" / "LS7A0001.CR3"
+    raw_file.parent.mkdir(parents=True)
+    destination_folder.mkdir(parents=True)
+    raw_file.write_bytes(b"raw")
+
+    plan = cli._build_fetch_plan(
+        source,
+        destination,
+        destination_folder,
+        NamingConvention.DDD,
+        transfer_action=cli.DenTransferAction.MOVE,
+    )
+
+    assert plan.transfer_action == cli.DenTransferAction.MOVE
+    assert plan.rows[0].status == "plan_copy"
+
+
 def test_fetch_plan_keep_existing_preserves_source_relative_path(tmp_path: Path) -> None:
     source = tmp_path / "DCIM"
     destination = tmp_path / "RAW_YARD"
@@ -395,6 +439,106 @@ def test_fetch_plan_keep_existing_preserves_source_relative_path(tmp_path: Path)
     plan = cli._build_fetch_plan(source, destination, destination, NamingConvention.KEEP_EXISTING)
 
     assert plan.rows[0].destination_path == destination / "100EOSR7" / "IMG_0001.CR3"
+
+
+def test_fetch_keep_existing_never_uses_project_date_only_folder_for_recovered_cr3(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "TestDisk_Recovered"
+    destination = tmp_path / "RAW_YARD"
+    raw_file = source / "101EOSR7" / "LS7A0001.CR3"
+    raw_file.parent.mkdir(parents=True)
+    destination.mkdir()
+    raw_file.write_bytes(b"recovered cr3")
+    project_ts = datetime(2025, 4, 5, tzinfo=UTC).timestamp()
+    os.utime(raw_file, (project_ts, project_ts))
+    monkeypatch.setattr(
+        metadata,
+        "_read_exiftool_tags_for_paths",
+        lambda paths: {raw_file: {"DateTimeOriginal": "2026:05:28 13:40:00"}},
+    )
+
+    plan = cli._build_fetch_plan(source, destination, destination, NamingConvention.KEEP_EXISTING)
+
+    assert plan.rows[0].destination_path == destination / "101EOSR7" / "LS7A0001.CR3"
+    assert "Date_Only" not in plan.rows[0].destination_path.parts
+    assert "20250405_Date_Only" not in plan.rows[0].destination_path.parts
+
+
+def test_fetch_explicit_date_grouping_uses_media_date_not_project_date(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "TestDisk_Recovered"
+    destination = tmp_path / "RAW_YARD"
+    raw_file = source / "LS7A0001.CR3"
+    source.mkdir()
+    destination.mkdir()
+    raw_file.write_bytes(b"recovered cr3")
+    project_ts = datetime(2025, 4, 5, tzinfo=UTC).timestamp()
+    os.utime(raw_file, (project_ts, project_ts))
+    monkeypatch.setattr(
+        metadata,
+        "_read_exiftool_tags_for_paths",
+        lambda paths: {raw_file: {"DateTimeOriginal": "2026:05:28 13:40:00"}},
+    )
+    destination_folder = cli.default_date_only_destination(
+        destination,
+        cli.earliest_raw_capture_time(source),
+        "YYYY/YYYYMMDD_Date_Only",
+    )
+
+    plan = cli._build_fetch_plan(source, destination, destination_folder, NamingConvention.DDD)
+
+    assert plan.rows[0].destination_path == destination / "2026" / "20260528_Date_Only" / "LS7A0001.CR3"
+    assert "2025" not in plan.rows[0].destination_path.parts
+
+
+def test_fetch_keep_existing_project_name_does_not_override_no_date_grouping(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database = tmp_path / "rawdog.sqlite"
+    source = tmp_path / "TestDisk_Recovered"
+    destination = tmp_path / "RAW_YARD"
+    raw_file = source / "101EOSR7" / "LS7A0001.CR3"
+    raw_file.parent.mkdir(parents=True)
+    destination.mkdir()
+    raw_file.write_bytes(b"recovered cr3")
+    project_ts = datetime(2025, 4, 5, tzinfo=UTC).timestamp()
+    os.utime(raw_file, (project_ts, project_ts))
+    initialize(database)
+    config = build_config(OrganizationMode.PROJECT, database_path=database)
+    monkeypatch.setattr(cli, "_load_or_exit", lambda: (tmp_path / "config.json", config))
+    monkeypatch.setattr(cli, "_prompt_dry_run_plan_next", lambda config, plan_id: None)
+    monkeypatch.setattr(
+        metadata,
+        "_read_exiftool_tags_for_paths",
+        lambda paths: {raw_file: {"DateTimeOriginal": "2026:05:28 13:40:00"}},
+    )
+
+    cli.fetch(
+        source=source,
+        destination=destination,
+        profile=None,
+        project_name="Date Only",
+        profile_name=None,
+        naming=NamingConvention.KEEP_EXISTING,
+        filename_policy=DestinationFilenamePolicy.ORIGINAL,
+        collision_policy=None,
+        verify_after_copy=None,
+        detect_sessions=False,
+        action=cli.DenTransferAction.COPY,
+        dry_run=True,
+    )
+
+    with session(database) as connection:
+        plan = cli.get_latest_execution_plan(connection)
+        assert plan is not None
+        rows = cli.list_execution_plan_rows(connection, plan.plan_id)
+    assert rows[0].destination_path == destination / "101EOSR7" / "LS7A0001.CR3"
+    assert "20250405_Date_Only" not in rows[0].destination_path.parts
 
 
 def test_yard_reflow_plan_can_date_suffix_flattened_files(tmp_path: Path) -> None:
@@ -504,6 +648,38 @@ def test_parse_time_shift_accepts_compound_offsets() -> None:
     assert cli._parse_time_shift("-2d") == -cli.timedelta(days=2)
 
 
+def test_setup_metadata_warning_can_install_exiftool_with_homebrew(monkeypatch) -> None:
+    calls = []
+    states = iter([False, True])
+    monkeypatch.setattr(cli, "has_media_metadata_reader", lambda: next(states))
+    monkeypatch.setattr(cli.sys, "stdin", type("FakeStdin", (), {"isatty": lambda self: True})())
+    monkeypatch.setattr(cli, "_yes_no", lambda label, default=False: True)
+    monkeypatch.setattr(cli.shutil, "which", lambda name: "/opt/homebrew/bin/brew" if name == "brew" else None)
+
+    def fake_run(command, check=False):
+        calls.append((command, check))
+        return type("Result", (), {"returncode": 0})()
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
+    cli._print_setup_metadata_reader_status()
+
+    assert calls == [(["/opt/homebrew/bin/brew", "install", "exiftool"], False)]
+
+
+def test_setup_metadata_warning_respects_declined_exiftool_install(monkeypatch) -> None:
+    monkeypatch.setattr(cli, "has_media_metadata_reader", lambda: False)
+    monkeypatch.setattr(cli.sys, "stdin", type("FakeStdin", (), {"isatty": lambda self: True})())
+    monkeypatch.setattr(cli, "_yes_no", lambda label, default=False: False)
+
+    def fail_run(command, check=False):
+        raise AssertionError("brew should not run when install prompt is declined")
+
+    monkeypatch.setattr(cli.subprocess, "run", fail_run)
+
+    cli._print_setup_metadata_reader_status()
+
+
 def test_fetch_commit_executes_persisted_copy_plan(tmp_path: Path) -> None:
     database = tmp_path / "rawdog.sqlite"
     source = tmp_path / "DCIM"
@@ -521,6 +697,33 @@ def test_fetch_commit_executes_persisted_copy_plan(tmp_path: Path) -> None:
     finished = cli._execute_persisted_plan(config, execution_plan.plan_id)
 
     assert finished.status == cli.ExecutionPlanStatus.DONE
+    assert (destination_folder / "IMG_0001.CR3").read_bytes() == b"raw"
+
+
+def test_fetch_commit_can_execute_persisted_yard_move_plan(tmp_path: Path) -> None:
+    database = tmp_path / "rawdog.sqlite"
+    source = tmp_path / "DCIM"
+    destination = tmp_path / "RAW_YARD"
+    destination_folder = destination / "2026" / "20260521_Date_Only"
+    (source / "100EOSR7").mkdir(parents=True)
+    destination.mkdir()
+    raw_file = source / "100EOSR7" / "IMG_0001.CR3"
+    raw_file.write_bytes(b"raw")
+    initialize(database)
+    config = build_config(OrganizationMode.PROJECT, database_path=database)
+    plan = cli._build_fetch_plan(
+        source,
+        destination,
+        destination_folder,
+        NamingConvention.DDD,
+        transfer_action=cli.DenTransferAction.MOVE,
+    )
+    execution_plan = cli._persist_fetch_execution_plan(config, plan)
+
+    finished = cli._execute_persisted_plan(config, execution_plan.plan_id)
+
+    assert finished.status == cli.ExecutionPlanStatus.DONE
+    assert not raw_file.exists()
     assert (destination_folder / "IMG_0001.CR3").read_bytes() == b"raw"
 
 

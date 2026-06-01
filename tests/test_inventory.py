@@ -1,8 +1,11 @@
 # Author: Nicholas Corrieri
 
+import os
+from datetime import UTC, datetime
 from pathlib import Path
 
-from rawdog.inventory import scan_raw_files
+from rawdog import metadata
+from rawdog.inventory import earliest_raw_capture_time, scan_raw_files
 from rawdog.metadata import is_camera_capture_file, is_raw_file
 
 
@@ -82,3 +85,22 @@ def test_scan_raw_files_can_limit_preview(tmp_path: Path) -> None:
     items = scan_raw_files(tmp_path, limit=1)
 
     assert len(items) == 1
+
+
+def test_earliest_raw_capture_time_prefers_media_capture_date_for_recovered_cr3(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    raw = tmp_path / "LS7A0001.CR3"
+    raw.write_bytes(b"recovered cr3")
+    project_ts = datetime(2025, 4, 5, tzinfo=UTC).timestamp()
+    os.utime(raw, (project_ts, project_ts))
+    monkeypatch.setattr(
+        metadata,
+        "_read_exiftool_tags_for_paths",
+        lambda paths: {raw: {"DateTimeOriginal": "2026:05:28 13:40:00"}},
+    )
+
+    captured_at = earliest_raw_capture_time(tmp_path)
+
+    assert captured_at == datetime(2026, 5, 28, 13, 40, tzinfo=UTC)

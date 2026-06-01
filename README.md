@@ -63,8 +63,10 @@ source/destination pair. By default project imports land under:
 {destination}/YYYY/YYYYMMDD_PROJECT
 ```
 
-`YYYYMMDD` is based on the earliest RAW file in the import source. That creates
-one project folder. For project plus date buckets, use the den `project-dates`
+`YYYYMMDD` is based on the earliest embedded media capture timestamp in the
+import source. If RAWdog cannot read embedded media timestamps, it falls back to
+filesystem timestamps before using any project/import date. That creates one
+project folder. For project plus date buckets, use the den `project-dates`
 layout. Its default month buckets look like `Soccer-202601`; day buckets look
 like `Soccer-20260115`.
 
@@ -102,10 +104,8 @@ archive destinations.
 Run `rawdog` with no arguments to open the colored workflow chooser. The menu is
 organized by job:
 
-- `F` - fetch card or folder files into a working yard.
-- `DC` - den copy/archive working files into a den; sources stay in place.
-- `J` - junkyard cleanup review; report den-recorded files for manual removal.
-- `DM` - den move/consolidate same-drive files into a den.
+- `D` - den operations: copy, move, or re-organize archive files.
+- `Y` - yard operations: copy/import, move, or re-organize working files.
 - `S` - sniff, audit, inspect, score, run slow full audit, or rebuild a folder, yard, or den.
 - `P` - review, run, resume, or prune old plans.
 - `W` - work queue for longer safe jobs.
@@ -525,6 +525,13 @@ raising the error.
 ## Development
 
 RAWdog targets Python 3.12+.
+
+ExifTool is optional but strongly recommended for RAW/CR3 capture-date accuracy,
+especially for recovered files. When `exiftool` is available, RAWdog reads
+embedded capture timestamps such as `DateTimeOriginal` and `CreateDate`. When it
+is not available, RAWdog warns during setup and before date-organizing plans, then
+uses filesystem timestamps as the fallback. Interactive setup offers to run
+`brew install exiftool`; RAWdog does not install it unless the operator confirms.
 
 ```bash
 python -m pytest
