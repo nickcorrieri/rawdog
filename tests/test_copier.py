@@ -160,6 +160,41 @@ def test_append_only_copy_removes_current_partial_on_exception(
     assert not destination.exists()
 
 
+def test_append_only_copy_promotes_verified_existing_partial(tmp_path: Path) -> None:
+    source = tmp_path / "source.MP4"
+    destination = tmp_path / "archive" / "source.MP4"
+    source.write_bytes(b"video")
+    destination.parent.mkdir()
+    destination.with_name(destination.name + ".partial").write_bytes(b"video")
+
+    status = append_only_copy(source, destination, tmp_path / "archive")
+
+    assert status == "copied_from_verified_partial"
+    assert destination.read_bytes() == b"video"
+    assert not destination.with_name(destination.name + ".partial").exists()
+
+
+def test_append_only_copy_verifies_bytes_before_final_rename(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.MP4"
+    destination = tmp_path / "archive" / "source.MP4"
+    source.write_bytes(b"video")
+    destination.parent.mkdir()
+
+    def corrupt_copy(source_path: Path, partial_path: Path, **kwargs) -> None:
+        partial_path.write_bytes(b"corrupt")
+
+    monkeypatch.setattr(copier, "_copy2_with_progress", corrupt_copy)
+
+    with pytest.raises(SafetyError, match="did not verify"):
+        append_only_copy(source, destination, tmp_path / "archive")
+
+    assert not destination.with_name(destination.name + ".partial").exists()
+    assert not destination.exists()
+
+
 def test_append_only_copy_refuses_outside_archive_root(tmp_path: Path) -> None:
     source = tmp_path / "source.CR3"
     destination = tmp_path / "outside" / "source.CR3"

@@ -8,7 +8,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 
 def connect(database_path: Path) -> sqlite3.Connection:
@@ -185,6 +185,48 @@ def migrate(connection: sqlite3.Connection) -> None:
         CREATE UNIQUE INDEX IF NOT EXISTS execution_plan_time_shift_rows_execution_row_id
         ON execution_plan_time_shift_rows(execution_row_id);
 
+        CREATE TABLE IF NOT EXISTS planning_jobs (
+            planning_job_id INTEGER PRIMARY KEY,
+            job_kind TEXT NOT NULL,
+            status TEXT NOT NULL,
+            phase TEXT NOT NULL,
+            subject TEXT NOT NULL,
+            root_path TEXT NOT NULL,
+            store_kind TEXT NOT NULL,
+            options_json TEXT NOT NULL DEFAULT '{}',
+            total_files INTEGER,
+            total_bytes INTEGER,
+            completed_files INTEGER NOT NULL DEFAULT 0,
+            total_batches INTEGER,
+            completed_batches INTEGER NOT NULL DEFAULT 0,
+            current_path TEXT,
+            execution_plan_id INTEGER REFERENCES execution_plans(plan_id),
+            message TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            started_at TEXT,
+            completed_at TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS planning_jobs_updated_at
+        ON planning_jobs(updated_at);
+
+        CREATE TABLE IF NOT EXISTS planning_job_items (
+            planning_job_item_id INTEGER PRIMARY KEY,
+            planning_job_id INTEGER NOT NULL REFERENCES planning_jobs(planning_job_id) ON DELETE CASCADE,
+            source_path TEXT NOT NULL,
+            relative_path TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL,
+            mtime_ns INTEGER NOT NULL,
+            captured_at TEXT,
+            capture_basis TEXT,
+            updated_at TEXT NOT NULL,
+            UNIQUE(planning_job_id, source_path)
+        );
+
+        CREATE INDEX IF NOT EXISTS planning_job_items_job_id
+        ON planning_job_items(planning_job_id);
+
         CREATE TABLE IF NOT EXISTS stores (
             store_id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
@@ -242,7 +284,7 @@ def migrate(connection: sqlite3.Connection) -> None:
         );
 
         INSERT INTO schema_meta(key, value)
-        VALUES ('schema_version', '10')
+        VALUES ('schema_version', '11')
         ON CONFLICT(key) DO UPDATE SET value = excluded.value;
         """
     )

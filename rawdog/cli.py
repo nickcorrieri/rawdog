@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import shlex
 import shutil
@@ -103,6 +104,10 @@ from rawdog.models import (
     ImportProfileCreate,
     NamingConvention,
     OrganizationMode,
+    PlanningJob,
+    PlanningJobCreate,
+    PlanningJobItemCreate,
+    PlanningJobStatus,
     PlanQueueCreate,
     PlanQueueStepCreate,
     PlanStepKind,
@@ -117,6 +122,16 @@ from rawdog.planner import (
     default_date_only_destination,
     default_project_destination,
     plan_append_only_copy,
+)
+from rawdog.planning_jobs import (
+    create_planning_job,
+    get_latest_planning_job,
+    get_planning_job,
+    list_planning_job_items,
+    replace_planning_job_items,
+    restart_planning_job,
+    update_planning_job,
+    update_planning_job_item_capture,
 )
 from rawdog.profiles import (
     create_or_update_profile,
@@ -199,6 +214,7 @@ STYLE_ROW_HEADER = "bold bright_white on grey15"
 STYLE_ROW_SELECTED = "bold black on bright_yellow"
 STYLE_ROWS = [STYLE_ROW, STYLE_ROW_ALT]
 STYLE_PANEL = STYLE_TEXT
+MIN_DATABASE_WRITE_FREE_BYTES = 250_000_000
 console = Console(force_terminal=True, color_system="256", style=STYLE_TEXT)
 
 RAWDOG_ASCII = r"""
@@ -1164,6 +1180,51 @@ def _format_bytes(size_bytes: int) -> str:
     return f"{value:.1f} TB"
 
 
+def _database_free_space(config: RawdogConfig) -> int:
+    database_dir = config.database_path.parent
+    try:
+        return shutil.disk_usage(database_dir).free
+    except OSError as exc:
+        raise typer.BadParameter(f"Could not check RAWDOG database free space at {database_dir}: {exc}") from exc
+
+
+def _ensure_database_write_space(
+    config: RawdogConfig,
+    *,
+    minimum_free_bytes: int = MIN_DATABASE_WRITE_FREE_BYTES,
+) -> None:
+    free_bytes = _database_free_space(config)
+    if free_bytes >= minimum_free_bytes:
+        return
+    raise typer.BadParameter(
+        "RAWDOG database volume is too low on free space for planning or commit writes. "
+        f"Available {_format_bytes(free_bytes)} at {config.database_path.parent}; "
+        f"need at least {_format_bytes(minimum_free_bytes)} for SQLite WAL, plan rows, and reports. "
+        "Free space, then inspect or resume the plan from Plans."
+    )
+
+
+def _database_error_message(config: RawdogConfig, exc: sqlite3.Error) -> str:
+    try:
+        free_label = _format_bytes(_database_free_space(config))
+    except typer.BadParameter:
+        free_label = "unknown"
+    return (
+        f"RAWDOG database write failed at {config.database_path}: {exc}. "
+        f"Database-volume free space: {free_label}. "
+        "Free disk space, then use Plans to inspect the last plan before resuming."
+    )
+
+
+def _print_database_error(exc: sqlite3.Error) -> None:
+    try:
+        _, config = _load_or_exit()
+        message = _database_error_message(config, exc)
+    except Exception:
+        message = f"RAWDOG database write failed: {exc}. Free disk space, then inspect the last plan."
+    _print_error(message)
+
+
 def _format_duration(seconds: float) -> str:
     minutes = max(1, round(seconds / 60))
     if minutes < 60:
@@ -1585,6 +1646,8 @@ def _show_home_menu() -> None:
             _print_error(f"Error: {exc}")
         except SafetyError as exc:
             _print_error(f"Safety stop: {exc}")
+        except sqlite3.Error as exc:
+            _print_database_error(exc)
         except KeyboardInterrupt:
             _print_notice("Cancelled.", style=STYLE_ROW_SELECTED)
         _ask_with_help(
@@ -1672,11 +1735,29 @@ def _print_latest_plan_hint() -> None:
         _, config = _load_or_exit()
         with session(config.database_path) as connection:
             latest_plan = get_latest_execution_plan(connection)
+            latest_planning_job = get_latest_planning_job(connection)
         if latest_plan:
             _print_full_row(
                 [
                     ("Last plan: ", STYLE_ROW_SELECTED),
                     (f"#{latest_plan.plan_id} {latest_plan.status.value} - {latest_plan.what}", STYLE_ROW_SELECTED),
+                ],
+                style=STYLE_ROW_SELECTED,
+            )
+        if latest_planning_job and latest_planning_job.status in {
+            PlanningJobStatus.RUNNING,
+            PlanningJobStatus.INTERRUPTED,
+            PlanningJobStatus.FAILED,
+        }:
+            _print_full_row(
+                [
+                    ("Last planning job: ", STYLE_ROW_SELECTED),
+                    (
+                        f"#{latest_planning_job.planning_job_id} {latest_planning_job.status.value} "
+                        f"- {latest_planning_job.phase}; check with rawdog plans progress "
+                        f"{latest_planning_job.planning_job_id}",
+                        STYLE_ROW_SELECTED,
+                    ),
                 ],
                 style=STYLE_ROW_SELECTED,
             )
@@ -1812,7 +1893,7 @@ def _run_home_choice(choice: str) -> None:
     elif normalized == "s":
         _home_inspect()
     elif normalized == "p":
-        _home_status()
+        _home_plans()
     elif normalized == "w":
         _show_queue_examples()
     elif normalized == "m":
@@ -1885,15 +1966,258 @@ def _print_long_running_progress_note(title: str, lines: list[str]) -> None:
     )
 
 
+def _planning_job_options_json(
+    *,
+    root: Path,
+    store_kind: StoreKind,
+    group_by: DateGroupMode,
+    keep_context: bool,
+    drop_context: set[str],
+    filename_policy: DestinationFilenamePolicy,
+    time_shift: timedelta,
+    dry_run: bool,
+    limit: int | None,
+) -> str:
+    return json.dumps(
+        {
+            "root": str(root),
+            "store_kind": store_kind.value,
+            "group_by": group_by.value,
+            "keep_context": keep_context,
+            "drop_context": sorted(drop_context),
+            "filename_policy": filename_policy.value,
+            "time_shift_seconds": int(time_shift.total_seconds()),
+            "dry_run": dry_run,
+            "limit": limit,
+        },
+        sort_keys=True,
+    )
+
+
+def _create_reflow_planning_job(
+    config: RawdogConfig,
+    *,
+    root: Path,
+    store_kind: StoreKind,
+    group_by: DateGroupMode,
+    keep_context: bool,
+    drop_context: set[str],
+    filename_policy: DestinationFilenamePolicy,
+    time_shift: timedelta,
+    dry_run: bool,
+    limit: int | None,
+    planning_job_id: int | None = None,
+) -> PlanningJob:
+    if planning_job_id is not None:
+        with session(config.database_path) as connection:
+            job = get_planning_job(connection, planning_job_id)
+            if job is None:
+                raise typer.BadParameter(f"Unknown planning job: {planning_job_id}")
+            restart_planning_job(connection, planning_job_id)
+            refreshed = get_planning_job(connection, planning_job_id)
+        return refreshed or job
+    options_json = _planning_job_options_json(
+        root=root,
+        store_kind=store_kind,
+        group_by=group_by,
+        keep_context=keep_context,
+        drop_context=drop_context,
+        filename_policy=filename_policy,
+        time_shift=time_shift,
+        dry_run=dry_run,
+        limit=limit,
+    )
+    with session(config.database_path) as connection:
+        return create_planning_job(
+            connection,
+            PlanningJobCreate(
+                job_kind=f"{store_kind.value}-reflow",
+                subject=f"{root} -> {root}",
+                root_path=root,
+                store_kind=store_kind,
+                options_json=options_json,
+                message="Planning job created. No filesystem moves have started.",
+            ),
+        )
+
+
+def _print_planning_job_started(job: PlanningJob) -> None:
+    console.print(
+        Panel(
+            "\n".join(
+                [
+                    f"Planning {job.store_kind.value.upper()} reflow #{job.planning_job_id}",
+                    "",
+                    "Phase: scan",
+                    f"Root: {job.root_path}",
+                    "",
+                    "No filesystem moves have started.",
+                    f"Progress: rawdog plans progress {job.planning_job_id}",
+                    f"Resume after interrupt: rawdog plans planning-resume {job.planning_job_id}",
+                ]
+            ),
+            title="Planning Job",
+            border_style="yellow",
+            style=STYLE_PANEL,
+            expand=True,
+        )
+    )
+
+
+def _print_planning_job_interrupted(job_id: int) -> None:
+    _print_notice(
+        f"Planning job #{job_id} interrupted. No filesystem moves started. "
+        f"Check progress with `rawdog plans progress {job_id}` or resume with "
+        f"`rawdog plans planning-resume {job_id}`.",
+        style=STYLE_WARN,
+    )
+
+
+def _print_planning_job_status(job: PlanningJob) -> None:
+    console.print(
+        Panel(
+            "\n".join(_planning_job_status_lines(job)),
+            title=f"RAWDOG Planning Job #{job.planning_job_id}",
+            border_style="yellow",
+            style=STYLE_PANEL,
+            expand=True,
+        )
+    )
+
+
+def _latest_or_requested_planning_job(config: RawdogConfig, planning_job_id: int | None) -> PlanningJob:
+    with session(config.database_path) as connection:
+        job = (
+            get_planning_job(connection, planning_job_id)
+            if planning_job_id is not None
+            else get_latest_planning_job(connection)
+        )
+    if job is None:
+        label = str(planning_job_id) if planning_job_id is not None else "latest"
+        raise typer.BadParameter(f"No planning job found for {label}.")
+    return job
+
+
+def _resume_reflow_planning_job(
+    config: RawdogConfig,
+    job: PlanningJob,
+    *,
+    force_running: bool = False,
+) -> ExecutionPlan:
+    if job.status == PlanningJobStatus.DONE and job.execution_plan_id:
+        raise typer.BadParameter(
+            f"Planning job #{job.planning_job_id} already created execution plan #{job.execution_plan_id}."
+        )
+    if job.status == PlanningJobStatus.RUNNING and not force_running:
+        raise typer.BadParameter(
+            f"Planning job #{job.planning_job_id} is already marked running. "
+            "If the original process is gone, resume with --force."
+        )
+    try:
+        options = json.loads(job.options_json)
+    except json.JSONDecodeError as exc:
+        raise typer.BadParameter(f"Planning job #{job.planning_job_id} has unreadable options.") from exc
+    root = Path(options["root"])
+    store_kind = StoreKind(options["store_kind"])
+    group_by = DateGroupMode(options["group_by"])
+    keep_context = bool(options["keep_context"])
+    drop_context = set(options.get("drop_context") or [])
+    filename_policy = DestinationFilenamePolicy(options["filename_policy"])
+    time_shift = timedelta(seconds=int(options.get("time_shift_seconds") or 0))
+    dry_run = bool(options.get("dry_run", True))
+    limit = options.get("limit")
+    return _run_store_reflow_plan(
+        config,
+        root,
+        store_kind=store_kind,
+        group_by=group_by,
+        keep_context=keep_context,
+        drop_context=drop_context,
+        filename_policy=filename_policy,
+        time_shift=time_shift,
+        dry_run=dry_run,
+        limit=int(limit) if limit is not None else None,
+        planning_job_id=job.planning_job_id,
+    )
+
+
+def _planning_job_items_to_inventory(items) -> list[InventoryItem]:
+    return [
+        InventoryItem(
+            path=item.source_path,
+            relative_path=item.relative_path,
+            size_bytes=item.size_bytes,
+            mtime_ns=item.mtime_ns,
+        )
+        for item in items
+    ]
+
+
+def _planning_item_rows(items: list[InventoryItem]) -> list[PlanningJobItemCreate]:
+    return [
+        PlanningJobItemCreate(
+            source_path=item.path,
+            relative_path=item.relative_path,
+            size_bytes=item.size_bytes,
+            mtime_ns=item.mtime_ns,
+        )
+        for item in items
+    ]
+
+
+def _planning_job_status_lines(job: PlanningJob) -> list[str]:
+    elapsed = _format_elapsed(job.started_at, job.completed_at)
+    total_files = "unknown" if job.total_files is None else str(job.total_files)
+    total_batches = "unknown" if job.total_batches is None else str(job.total_batches)
+    lines = [
+        f"Planning {job.store_kind.value.upper()} reflow #{job.planning_job_id}",
+        "",
+        f"State: {job.status.value}",
+        f"Phase: {job.phase}",
+        f"Metadata batches: {job.completed_batches} / {total_batches}",
+        f"Files read: {job.completed_files} / {total_files}",
+    ]
+    if job.current_path:
+        lines.append(f"Current folder: {job.current_path}")
+    lines.append(f"Elapsed: {elapsed}")
+    if job.message:
+        lines.append(f"Note: {job.message}")
+    lines.extend(["", "No filesystem moves have started." if job.execution_plan_id is None else f"Execution plan: #{job.execution_plan_id}"])
+    if job.status == PlanningJobStatus.INTERRUPTED:
+        lines.append(f"Resume with: rawdog plans planning-resume {job.planning_job_id}")
+    elif job.status == PlanningJobStatus.RUNNING:
+        lines.append(
+            f"If this is stale, resume with: rawdog plans planning-resume {job.planning_job_id} --force"
+        )
+    return lines
+
+
+def _format_elapsed(started_at: datetime | None, completed_at: datetime | None = None) -> str:
+    if started_at is None:
+        return "unknown"
+    end = completed_at or datetime.now(UTC)
+    seconds = max(int((end - started_at).total_seconds()), 0)
+    hours, remainder = divmod(seconds, 3600)
+    minutes, sec = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m {sec}s"
+    return f"{sec}s"
+
+
 def _scan_items_with_progress(
     root: Path,
     *,
     description: str,
     exclude_roots: list[Path] | None = None,
     limit: int | None = None,
+    config: RawdogConfig | None = None,
+    planning_job_id: int | None = None,
 ) -> list[InventoryItem]:
     count = 0
     scanned_entries = 0
+    last_job_update = 0.0
     with Progress(
         SpinnerColumn(),
         TextColumn("[bold bright_green on black]{task.description}"),
@@ -1916,7 +2240,7 @@ def _scan_items_with_progress(
             progress.update(task, **update_args)
 
         def on_scan(path: Path, scanned: int, found: int) -> None:
-            nonlocal scanned_entries
+            nonlocal scanned_entries, last_job_update
             scanned_entries = scanned
             progress.update(
                 task,
@@ -1925,6 +2249,17 @@ def _scan_items_with_progress(
                     f"found {found} camera files - {_short_progress_path(path)}"
                 ),
             )
+            if config is not None and planning_job_id is not None and monotonic() - last_job_update >= 2:
+                with session(config.database_path) as connection:
+                    update_planning_job(
+                        connection,
+                        planning_job_id,
+                        phase="scan",
+                        completed_files=found,
+                        current_path=path,
+                        message="Scanning folders before metadata planning.",
+                    )
+                last_job_update = monotonic()
 
         items = scan_raw_files(
             root,
@@ -1939,6 +2274,19 @@ def _scan_items_with_progress(
             completed=len(items),
             status=f"checked {scanned_entries} files; {len(items)} camera files found",
         )
+        if config is not None and planning_job_id is not None:
+            with session(config.database_path) as connection:
+                replace_planning_job_items(connection, planning_job_id, _planning_item_rows(items))
+                update_planning_job(
+                    connection,
+                    planning_job_id,
+                    phase="scan",
+                    total_files=len(items),
+                    total_bytes=sum(item.size_bytes for item in items),
+                    completed_files=len(items),
+                    current_path=root,
+                    message="Inventory complete. Metadata planning will start next.",
+                )
     return items
 
 
@@ -2072,9 +2420,12 @@ def _build_fetch_plan_with_progress(
     transfer_action: DenTransferAction,
     items: list[InventoryItem] | None = None,
     item_capture_times: dict[Path, datetime] | None = None,
+    date_folder_template: str | None = None,
 ) -> DenPlan:
     items = items if items is not None else _scan_fetch_items_with_progress(source_root)
-    if item_capture_times is None and filename_policy != DestinationFilenamePolicy.ORIGINAL:
+    if item_capture_times is None and (
+        filename_policy != DestinationFilenamePolicy.ORIGINAL or date_folder_template is not None
+    ):
         item_capture_times = _capture_times_for_fetch_items_with_progress(items)
     with Progress(
         SpinnerColumn(),
@@ -2104,6 +2455,7 @@ def _build_fetch_plan_with_progress(
             transfer_action=transfer_action,
             items=items,
             item_capture_times=item_capture_times,
+            date_folder_template=date_folder_template,
             on_item=on_item,
         )
         progress.update(task, completed=len(items), status=f"{len(items)} files reviewed")
@@ -2301,27 +2653,7 @@ def _home_yard_import(action: DenTransferAction = DenTransferAction.COPY) -> Non
         except SafetyError as exc:
             raise typer.BadParameter(f"Yard move is same-drive only: {exc}. Use yard copy instead.") from exc
     project_name = _optional_prompt("Project name, or Enter to use the layout choices below")
-    detect_dates = _yes_no(
-        "Allow RAWDOG to recommend date folders for this import?",
-        default=True,
-        help_items=[
-            HelpItem("y", "Allow date folders", "RAWDOG may recommend capture-date folders for loose camera-card files. Media capture dates still win over filesystem dates.", STYLE_SAFE),
-            HelpItem("n", "Preserve source folders", "Do not create generated date/project folders for this import. Keep the source folder shape under the yard.", STYLE_WARN),
-        ],
-    )
-    group_by_date = (
-        _yes_no(
-            "When this looks like a camera card, put files in capture-date folders?",
-            default=True,
-            help_items=[
-                HelpItem("y", "Create date folders", "Use media capture dates to place loose camera files into folders such as 2026/2026-05.", STYLE_SAFE),
-                HelpItem("n", "Keep card folders", "Keep folders such as DCIM/100CANON instead of flattening into generated date buckets.", STYLE_WARN),
-            ],
-        )
-        if detect_dates
-        else False
-    )
-    naming = None if detect_dates and group_by_date else NamingConvention.KEEP_EXISTING
+    naming, filename_policy = _prompt_yard_import_layout(project_name=project_name)
     fetch(
         source=source,
         destination=destination,
@@ -2329,12 +2661,82 @@ def _home_yard_import(action: DenTransferAction = DenTransferAction.COPY) -> Non
         project_name=project_name,
         profile_name=None,
         naming=naming,
+        filename_policy=filename_policy,
         collision_policy=None,
         verify_after_copy=None,
         detect_sessions=False,
         action=action,
         dry_run=True,
     )
+
+
+def _prompt_yard_import_layout(
+    *,
+    project_name: str | None = None,
+) -> tuple[NamingConvention | None, DestinationFilenamePolicy | None]:
+    table = _styled_table(title="YARD Import Layout")
+    table.add_column("Key", justify="right")
+    table.add_column("Folder Layout")
+    table.add_column("File Names")
+    table.add_column("Use When")
+    table.add_row(
+        "1",
+        "RAWDOG recommendation",
+        "YARD default",
+        "Let the scan choose camera-card date buckets vs source folders.",
+    )
+    table.add_row(
+        "2",
+        "Keep source folders",
+        "Original names",
+        "Best Lightroom duplicate detection and least surprising import.",
+    )
+    table.add_row(
+        "3",
+        "Keep source folders",
+        "YARD default",
+        "Preserve folder shape but still use RAWDOG's configured filename policy.",
+    )
+    table.add_row(
+        "4",
+        "Capture-date folders",
+        "Original names",
+        "Group by media dates without changing camera filenames.",
+    )
+    table.add_row(
+        "5",
+        "Capture-date folders",
+        "YARD default",
+        "Full RAWDOG normalized import with date buckets and rollover-safe names.",
+    )
+    console.print(table)
+    if project_name:
+        _print_notice(
+            "Project name entered: date-folder choices become project/date folders for this import.",
+            style=STYLE_ROW_SELECTED,
+        )
+    choice = _ask_with_help(
+        "Choose yard import layout",
+        choices=["1", "2", "3", "4", "5"],
+        default="1",
+        help_title="YARD Import Layout",
+        help_items=[
+            HelpItem("1", "Recommendation", "Run source layout detection. The scan may choose keep-existing even if date folders are allowed.", STYLE_SAFE),
+            HelpItem("2", "Source + original", "Keep source folder paths and original camera filenames. This is the safest choice for Lightroom duplicate checks.", STYLE_SAFE),
+            HelpItem("3", "Source + default names", "Keep source folders but apply the configured YARD filename policy.", STYLE_ACTION),
+            HelpItem("4", "Date + original", "Use media capture dates for folders while preserving camera filenames.", STYLE_ROW_SELECTED),
+            HelpItem("5", "Date + default names", "Use media capture dates for folders and the configured YARD filename policy.", STYLE_WARN),
+        ],
+    )
+    if choice == "2":
+        return NamingConvention.KEEP_EXISTING, DestinationFilenamePolicy.ORIGINAL
+    if choice == "3":
+        return NamingConvention.KEEP_EXISTING, None
+    if choice == "4":
+        return NamingConvention.DDD, DestinationFilenamePolicy.ORIGINAL
+    if choice == "5":
+        return NamingConvention.DDD, None
+    return None, None
 
 
 def _print_yard_move_guidance() -> None:
@@ -3940,6 +4342,7 @@ def _run_den_reflow_plan(
     time_shift: timedelta = timedelta(),
     dry_run: bool = True,
     limit: int | None = None,
+    planning_job_id: int | None = None,
 ) -> ExecutionPlan:
     return _run_store_reflow_plan(
         config,
@@ -3952,6 +4355,7 @@ def _run_den_reflow_plan(
         time_shift=time_shift,
         dry_run=dry_run,
         limit=limit,
+        planning_job_id=planning_job_id,
     )
 
 
@@ -3966,6 +4370,7 @@ def _run_yard_reflow_plan(
     time_shift: timedelta = timedelta(),
     dry_run: bool = True,
     limit: int | None = None,
+    planning_job_id: int | None = None,
 ) -> ExecutionPlan:
     return _run_store_reflow_plan(
         config,
@@ -3978,6 +4383,7 @@ def _run_yard_reflow_plan(
         time_shift=time_shift,
         dry_run=dry_run,
         limit=limit,
+        planning_job_id=planning_job_id,
     )
 
 
@@ -3993,8 +4399,10 @@ def _run_store_reflow_plan(
     time_shift: timedelta = timedelta(),
     dry_run: bool = True,
     limit: int | None = None,
+    planning_job_id: int | None = None,
 ) -> ExecutionPlan:
     root = root.expanduser().resolve()
+    _ensure_database_write_space(config)
     with session(config.database_path) as connection:
         store = find_store_for_path(connection, root, store_kind)
     store_label = store_kind.value.upper()
@@ -4007,19 +4415,68 @@ def _run_store_reflow_plan(
             f"RAWDOG will build a preview plan inside this {store_kind.value}; it will not move files until commit.",
             "First it scans files, then reads capture dates, then checks proposed destination paths for conflicts.",
             "The scan shows a live count. Date and conflict-check phases show percent complete.",
+            "For large scans, RAWDOG records a planning job that can be checked or resumed after an interrupt.",
         ],
     )
-    plan = _build_den_reflow_plan(
-        root,
+    drop_context = drop_context or set()
+    planning_job = _create_reflow_planning_job(
+        config,
+        root=root,
+        store_kind=store_kind,
         group_by=group_by,
         keep_context=keep_context,
-        drop_context=drop_context or set(),
+        drop_context=drop_context,
         filename_policy=filename_policy,
         time_shift=time_shift,
+        dry_run=dry_run,
         limit=limit,
-        show_progress=True,
+        planning_job_id=planning_job_id,
     )
+    _print_planning_job_started(planning_job)
+    try:
+        plan = _build_den_reflow_plan(
+            root,
+            group_by=group_by,
+            keep_context=keep_context,
+            drop_context=drop_context,
+            filename_policy=filename_policy,
+            time_shift=time_shift,
+            limit=limit,
+            show_progress=True,
+            config=config,
+            planning_job_id=planning_job.planning_job_id,
+        )
+    except KeyboardInterrupt:
+        with session(config.database_path) as connection:
+            update_planning_job(
+                connection,
+                planning_job.planning_job_id,
+                status=PlanningJobStatus.INTERRUPTED,
+                message="Interrupted by operator. No filesystem moves started.",
+            )
+        _print_planning_job_interrupted(planning_job.planning_job_id)
+        raise
+    except Exception:
+        with session(config.database_path) as connection:
+            update_planning_job(
+                connection,
+                planning_job.planning_job_id,
+                status=PlanningJobStatus.FAILED,
+                message="Planning failed before execution plan creation.",
+                complete=True,
+            )
+        raise
     execution_plan = _persist_reflow_execution_plan(config, plan, store_kind=store_kind)
+    with session(config.database_path) as connection:
+        update_planning_job(
+            connection,
+            planning_job.planning_job_id,
+            status=PlanningJobStatus.DONE,
+            phase="execution-plan",
+            execution_plan_id=execution_plan.plan_id,
+            message=f"Preview execution plan #{execution_plan.plan_id} created. Files still require COMMIT PLAN.",
+            complete=True,
+        )
     _print_execution_plan_start(execution_plan)
     table = _styled_table(title=f"RAWDOG {store_label} Reflow Plan")
     table.add_column("Destination")
@@ -4104,6 +4561,140 @@ def _print_reflow_review_notes(
         )
 
 
+def _load_or_scan_reflow_items(
+    root: Path,
+    *,
+    limit: int | None,
+    show_progress: bool,
+    config: RawdogConfig | None,
+    planning_job_id: int | None,
+) -> list[InventoryItem]:
+    if config is not None and planning_job_id is not None:
+        with session(config.database_path) as connection:
+            saved_items = list_planning_job_items(connection, planning_job_id)
+        if saved_items:
+            return _planning_job_items_to_inventory(saved_items)
+    return (
+        _scan_items_with_progress(
+            root,
+            description="Scanning reflow files",
+            limit=limit,
+            config=config,
+            planning_job_id=planning_job_id,
+        )
+        if show_progress
+        else scan_raw_files(root, limit=limit)
+    )
+
+
+def _capture_times_for_reflow_items(
+    items: list[InventoryItem],
+    *,
+    show_progress: bool,
+    config: RawdogConfig | None,
+    planning_job_id: int | None,
+) -> dict[Path, datetime]:
+    if config is None or planning_job_id is None:
+        return (
+            _capture_times_for_items_with_progress(items, description="Reading reflow capture dates")
+            if show_progress
+            else capture_times([item.path for item in items])
+        )
+    if not items:
+        return {}
+    saved_captures: dict[Path, datetime] = {}
+    with session(config.database_path) as connection:
+        saved_items = list_planning_job_items(connection, planning_job_id)
+    for item in saved_items:
+        if item.captured_at is not None:
+            saved_captures[item.source_path] = item.captured_at
+
+    pending_items = [item for item in items if item.path not in saved_captures]
+    total_batches = (len(items) + 99) // 100
+    completed_batches = (len(saved_captures) + 99) // 100 if saved_captures else 0
+    with session(config.database_path) as connection:
+        update_planning_job(
+            connection,
+            planning_job_id,
+            phase="metadata",
+            total_files=len(items),
+            total_bytes=sum(item.size_bytes for item in items),
+            completed_files=len(saved_captures),
+            total_batches=total_batches,
+            completed_batches=min(completed_batches, total_batches),
+            message="Reading capture dates in metadata batches. No filesystem moves have started.",
+        )
+
+    captures = dict(saved_captures)
+    if not pending_items:
+        return captures
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[bold bright_green on black]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        TextColumn("[bright_white on black]{task.fields[status]}"),
+        TimeElapsedColumn(),
+        TimeRemainingColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task(
+            f"Planning reflow #{planning_job_id}: metadata batches",
+            total=len(items),
+            completed=len(saved_captures),
+            status="starting",
+        )
+        for chunk_start in range(0, len(pending_items), 100):
+            chunk = pending_items[chunk_start:chunk_start + 100]
+            current = chunk[0]
+            with session(config.database_path) as connection:
+                update_planning_job(
+                    connection,
+                    planning_job_id,
+                    phase="metadata",
+                    current_path=current.relative_path,
+                    message="Metadata batch running. No filesystem moves have started.",
+                )
+            media_times = media_capture_times([item.path for item in chunk]) if has_media_metadata_reader() else {}
+            with session(config.database_path) as connection:
+                for item in chunk:
+                    captured_at = media_times.get(item.path) or datetime.fromtimestamp(
+                        item.mtime_ns / 1_000_000_000,
+                        tz=UTC,
+                    )
+                    basis = "media" if item.path in media_times else "filesystem"
+                    captures[item.path] = captured_at
+                    update_planning_job_item_capture(
+                        connection,
+                        planning_job_id,
+                        item.path,
+                        captured_at,
+                        basis=basis,
+                    )
+                completed_files = len(captures)
+                completed_batches = min((completed_files + 99) // 100, total_batches)
+                update_planning_job(
+                    connection,
+                    planning_job_id,
+                    phase="metadata",
+                    completed_files=completed_files,
+                    completed_batches=completed_batches,
+                    current_path=chunk[-1].relative_path,
+                    message="Metadata batch complete. No filesystem moves have started.",
+                )
+            progress.update(
+                task,
+                completed=len(captures),
+                status=(
+                    f"{len(captures)}/{len(items)} files; "
+                    f"batch {min((len(captures) + 99) // 100, total_batches)}/{total_batches} - "
+                    f"{_short_progress_path(chunk[-1].relative_path)}"
+                ),
+            )
+    return captures
+
+
 def _build_den_reflow_plan(
     root: Path,
     *,
@@ -4114,20 +4705,25 @@ def _build_den_reflow_plan(
     time_shift: timedelta = timedelta(),
     limit: int | None = None,
     show_progress: bool = False,
+    config: RawdogConfig | None = None,
+    planning_job_id: int | None = None,
 ) -> DenPlan:
-    items = (
-        _scan_items_with_progress(root, description="Scanning reflow files", limit=limit)
-        if show_progress
-        else scan_raw_files(root, limit=limit)
+    items = _load_or_scan_reflow_items(
+        root,
+        limit=limit,
+        show_progress=show_progress,
+        config=config,
+        planning_job_id=planning_job_id,
     )
     rows: list[DenPlanRow] = []
     time_shift_rows: list[ReflowTimeShiftPlanRow] = []
     planned_destinations: set[Path] = set()
     shift_seconds = int(time_shift.total_seconds())
-    item_capture_times = (
-        _capture_times_for_items_with_progress(items, description="Reading reflow capture dates")
-        if show_progress
-        else capture_times([item.path for item in items])
+    item_capture_times = _capture_times_for_reflow_items(
+        items,
+        show_progress=show_progress,
+        config=config,
+        planning_job_id=planning_job_id,
     )
 
     def build_row(item: InventoryItem) -> None:
@@ -4199,11 +4795,31 @@ def _build_den_reflow_plan(
             task = progress.add_task("Checking reflow destinations", total=len(items), status="starting")
             for index, item in enumerate(items, start=1):
                 build_row(item)
+                if config is not None and planning_job_id is not None and (index == 1 or index % 500 == 0):
+                    with session(config.database_path) as connection:
+                        update_planning_job(
+                            connection,
+                            planning_job_id,
+                            phase="destinations",
+                            completed_files=index,
+                            current_path=item.relative_path,
+                            message="Checking destination paths. No filesystem moves have started.",
+                        )
                 progress.update(
                     task,
                     completed=index,
                     status=f"{index}/{len(items)} planned - {_short_progress_path(item.relative_path)}",
                 )
+            if config is not None and planning_job_id is not None:
+                with session(config.database_path) as connection:
+                    update_planning_job(
+                        connection,
+                        planning_job_id,
+                        phase="destinations",
+                        completed_files=len(items),
+                        current_path=root,
+                        message="Destination checks complete. Preview execution plan will be written next.",
+                    )
     else:
         for item in items:
             build_row(item)
@@ -4460,6 +5076,70 @@ def _home_status() -> None:
         limit=50,
         verbose=mode == "verbose",
     )
+
+
+def _home_plans() -> None:
+    while True:
+        _print_section_row("Plans")
+        _print_option("1.", "Check last planning progress")
+        _print_option("2.", "Status and recent execution plans")
+        _print_option("3.", "Active write marker")
+        _print_option("4.", "Resume interrupted planning job")
+        _print_option("0.", "Back")
+        choice = _ask_with_help(
+            "Choose plans action",
+            choices=["0", "1", "2", "3", "4"],
+            default="1",
+            help_title="Plans",
+            help_items=[
+                HelpItem("1", "Planning progress", "Show the latest long-running DEN/YARD reflow planning job.", STYLE_SAFE),
+                HelpItem("2", "Execution plans", "Show RAWDOG status and recent persisted copy/move/reflow plans.", STYLE_ACTION),
+                HelpItem("3", "Active marker", "Show whether a committed copy/move plan is currently marked active.", STYLE_ROW_SELECTED),
+                HelpItem("4", "Resume planning", "Restart an interrupted or failed reflow planning job from its saved scan/metadata state.", STYLE_WARN),
+                HelpItem("0", "Back", "Return to the main menu.", STYLE_MUTED),
+            ],
+        )
+        if choice == "0":
+            return
+        _, config = _load_or_exit()
+        if choice == "1":
+            with session(config.database_path) as connection:
+                job = get_latest_planning_job(connection)
+            if job is None:
+                _print_notice("No reflow planning job has been recorded yet.", style=STYLE_MUTED)
+            else:
+                _print_planning_job_status(job)
+            continue
+        if choice == "2":
+            _home_status()
+            continue
+        if choice == "3":
+            _print_active_run_notice(config)
+            continue
+        if choice == "4":
+            with session(config.database_path) as connection:
+                job = get_latest_planning_job(connection)
+            if job is None:
+                _print_notice("No reflow planning job has been recorded yet.", style=STYLE_MUTED)
+                continue
+            _print_planning_job_status(job)
+            force_running = False
+            if job.status == PlanningJobStatus.DONE and job.execution_plan_id:
+                _print_notice(
+                    f"Planning job #{job.planning_job_id} already wrote execution plan #{job.execution_plan_id}.",
+                    style=STYLE_SAFE,
+                )
+                continue
+            if job.status == PlanningJobStatus.RUNNING:
+                force_running = _yes_no(
+                    "This planning job is marked running. Resume anyway only if the original process stopped?",
+                    default=False,
+                )
+                if not force_running:
+                    continue
+            if not _yes_no("Resume this planning job now?", default=False):
+                continue
+            _resume_reflow_planning_job(config, job, force_running=force_running)
 
 
 def _home_store_setup() -> None:
@@ -4783,6 +5463,7 @@ def fetch(
 ) -> None:
     """Import RAW and camera video files from a card or folder into a working yard."""
     _, config = _load_or_exit()
+    _ensure_database_write_space(config)
     loaded_profile = None
     with session(config.database_path) as connection:
         if profile:
@@ -4902,6 +5583,7 @@ def fetch(
         console.print("Import preview cancelled. No plan written and no files copied.")
         return
     uses_capture_dates = _fetch_plan_uses_capture_dates(effective_naming, effective_filename_policy)
+    per_file_date_buckets = effective_naming == NamingConvention.DDD
     if uses_capture_dates:
         _print_media_metadata_reader_warning("this import")
         _print_notice(
@@ -4958,6 +5640,7 @@ def fetch(
             transfer_action=action,
             items=items,
             item_capture_times=item_capture_times,
+            date_folder_template=effective_template if per_file_date_buckets else None,
         )
         _print_fetch_plan_example(plan)
         _print_camera_numbering_warning([row.source_path for row in plan.rows])
@@ -4983,7 +5666,8 @@ def fetch(
             plan_ran = bool(finished and finished.completed_at)
         if plan_ran:
             write_destination_memory(memory, dry_run=False)
-            _run_post_fetch_quick_catalogue(destination_root, destination_folder or destination_root)
+            catalogue_root = destination_root if per_file_date_buckets else (destination_folder or destination_root)
+            _run_post_fetch_quick_catalogue(destination_root, catalogue_root)
     if detect_sessions:
         console.print("Session split suggestions: requested, but not applied to destination paths yet.")
     console.print(f"Dry run: {'yes' if effective_dry_run else 'no'}")
@@ -5248,6 +5932,7 @@ def _persist_den_execution_plan(
     *,
     queue_id: int | None = None,
 ) -> ExecutionPlan:
+    _ensure_database_write_space(config)
     skipped = sum(1 for row in plan.rows if row.status.startswith("skip"))
     collisions = sum(1 for row in plan.rows if row.status == "collision")
     what = f"{plan.transfer_action.value} RAW/camera video files into a RAWDOG destination"
@@ -5313,6 +5998,7 @@ def _persist_den_execution_plan(
 
 
 def _persist_reflow_execution_plan(config: RawdogConfig, plan: DenPlan, *, store_kind: StoreKind) -> ExecutionPlan:
+    _ensure_database_write_space(config)
     skipped = sum(1 for row in plan.rows if row.status.startswith("skip"))
     collisions = sum(1 for row in plan.rows if row.status == "collision")
     label = store_kind.value
@@ -5478,12 +6164,13 @@ def _build_fetch_plan(
     *,
     items: list[InventoryItem] | None = None,
     item_capture_times: dict[Path, datetime] | None = None,
+    date_folder_template: str | None = None,
     on_item: Callable[[InventoryItem, int, int], None] | None = None,
 ) -> DenPlan:
     items = items if items is not None else scan_raw_files(source_root)
     item_capture_times = item_capture_times if item_capture_times is not None else (
         capture_times([item.path for item in items])
-        if filename_policy != DestinationFilenamePolicy.ORIGINAL
+        if filename_policy != DestinationFilenamePolicy.ORIGINAL or date_folder_template is not None
         else {}
     )
     planned_destinations: set[Path] = set()
@@ -5492,17 +6179,24 @@ def _build_fetch_plan(
     for index, item in enumerate(items, start=1):
         if on_item is not None:
             on_item(item, index, total)
-        destination_parent = (
-            destination_folder / item.relative_path
-            if naming == NamingConvention.KEEP_EXISTING
-            else destination_folder
+        captured_at = item_capture_times.get(item.path) or datetime.fromtimestamp(
+            item.mtime_ns / 1_000_000_000,
+            tz=UTC,
         )
         if naming == NamingConvention.KEEP_EXISTING:
-            destination_parent = destination_parent.parent
+            destination_parent = destination_folder / item.relative_path.parent
+        elif naming == NamingConvention.DDD and date_folder_template is not None:
+            destination_parent = default_date_only_destination(
+                destination_root,
+                captured_at,
+                date_folder_template,
+            )
+        else:
+            destination_parent = destination_folder
         destination_path = destination_path_for_filename_policy(
             item.path,
             destination_parent,
-            item_capture_times.get(item.path) or datetime.fromtimestamp(item.mtime_ns / 1_000_000_000, tz=UTC),
+            captured_at,
             policy=filename_policy,
             reserved_destinations=planned_destinations,
             size_bytes=item.size_bytes,
@@ -5536,12 +6230,18 @@ def _build_fetch_plan(
 
 
 def _persist_fetch_execution_plan(config: RawdogConfig, plan: DenPlan) -> ExecutionPlan:
+    _ensure_database_write_space(config)
     skipped = sum(1 for row in plan.rows if row.status.startswith("skip"))
     collisions = sum(1 for row in plan.rows if row.status == "collision")
     action_label = "move" if plan.transfer_action == DenTransferAction.MOVE else "copy"
     result_label = "moved" if plan.transfer_action == DenTransferAction.MOVE else "copied"
+    destination_folders = {row.destination_path.parent for row in plan.rows if row.status == "plan_copy"}
+    if len(destination_folders) > 1:
+        destination_summary = f"under {plan.destination_root} across {len(destination_folders)} destination folders"
+    else:
+        destination_summary = f"into {plan.destination_folder}"
     expected = (
-        f"{plan.files_to_transfer} files should be {result_label} into {plan.destination_folder}; "
+        f"{plan.files_to_transfer} files should be {result_label} {destination_summary}; "
         f"{skipped} already-present files skipped; {collisions} collisions held for review."
     )
     with session(config.database_path) as connection:
@@ -6034,7 +6734,7 @@ def _confirm_and_execute_plan(
 
 
 def _audit_execution_row(row: ExecutionPlanRow, status: str) -> str:
-    if status in {"copied", "moved", "skipped_existing_same_name_size"}:
+    if status in {"copied", "copied_from_verified_partial", "moved", "skipped_existing_same_name_size"}:
         if not row.destination_path.exists():
             return "destination_missing"
         if row.destination_path.stat().st_size != row.size_bytes:
@@ -6050,11 +6750,13 @@ def _audit_execution_row(row: ExecutionPlanRow, status: str) -> str:
 
 
 def _execute_persisted_plan(config: RawdogConfig, plan_id: int) -> ExecutionPlan:
+    _ensure_database_write_space(config)
     with session(config.database_path) as connection:
         plan = get_execution_plan(connection, plan_id)
         if plan is None:
             raise typer.BadParameter(f"Unknown plan: {plan_id}")
         rows = list_execution_plan_rows(connection, plan_id)
+    _ensure_copy_plan_has_free_space(plan, rows)
     try:
         begin_active_run(
             config.database_path,
@@ -6069,11 +6771,54 @@ def _execute_persisted_plan(config: RawdogConfig, plan_id: int) -> ExecutionPlan
         )
     except ActiveRunError as exc:
         raise typer.BadParameter(str(exc)) from exc
+    except sqlite3.Error as exc:
+        raise typer.BadParameter(_database_error_message(config, exc)) from exc
 
     try:
         return _execute_persisted_plan_unlocked(config, plan, rows)
+    except sqlite3.Error as exc:
+        raise typer.BadParameter(_database_error_message(config, exc)) from exc
     finally:
-        finish_active_run(config.database_path, plan_id=plan_id)
+        try:
+            finish_active_run(config.database_path, plan_id=plan_id)
+        except sqlite3.Error as exc:
+            _print_notice(
+                f"Could not clear active-run marker because the RAWDOG database is unavailable: {exc}",
+                style=STYLE_WARN,
+            )
+
+
+def _copy_bytes_to_write(rows: list[ExecutionPlanRow]) -> int:
+    return sum(
+        row.size_bytes
+        for row in rows
+        if row.status in {"plan_copy", "planned", "failed"}
+        and row.transfer_action == DenTransferAction.COPY
+    )
+
+
+def _copy_space_reserve(required_bytes: int) -> int:
+    if required_bytes <= 0:
+        return 0
+    return min(max(int(required_bytes * 0.02), 50_000_000), 10_000_000_000)
+
+
+def _ensure_copy_plan_has_free_space(plan: ExecutionPlan, rows: list[ExecutionPlanRow]) -> None:
+    required_bytes = _copy_bytes_to_write(rows)
+    if required_bytes <= 0 or plan.destination_root is None:
+        return
+    try:
+        free_bytes = shutil.disk_usage(plan.destination_root).free
+    except OSError as exc:
+        raise typer.BadParameter(f"Could not check destination free space: {exc}") from exc
+    reserve_bytes = _copy_space_reserve(required_bytes)
+    if free_bytes < required_bytes + reserve_bytes:
+        raise typer.BadParameter(
+            "Destination does not have enough free space for this copy plan. "
+            f"Needed {_format_bytes(required_bytes)} plus {_format_bytes(reserve_bytes)} reserve; "
+            f"available {_format_bytes(free_bytes)} at {plan.destination_root}. "
+            "Free space or use a same-drive MOVE/reflow plan instead."
+        )
 
 
 def _execute_persisted_plan_unlocked(
@@ -6225,7 +6970,7 @@ def _execute_persisted_plan_unlocked(
                         )
                     )
                 audit_status = _audit_execution_row(row, status)
-                if status in {"copied", "moved"}:
+                if status in {"copied", "copied_from_verified_partial", "moved"}:
                     transferred += 1
                 elif status.startswith("skipped"):
                     skipped += 1
@@ -6391,6 +7136,7 @@ def den(
 ) -> None:
     """Consolidate a messy RAW source into a RAWDOG folder structure."""
     _, config = _load_or_exit()
+    _ensure_database_write_space(config)
     loaded_workflow = None
     with session(config.database_path) as connection:
         if workflow_name:
@@ -6608,6 +7354,7 @@ def status() -> None:
         profiles = list_profiles(connection)
         stores = list_stores(connection)
         latest_plans = list_execution_plans(connection, limit=3)
+        latest_planning_job = get_latest_planning_job(connection)
     active_run = _read_active_run_or_none(config)
     table.add_row("Projects", str(len(projects)))
     table.add_row("Profiles", str(len(profiles)))
@@ -6622,6 +7369,12 @@ def status() -> None:
     console.print(table)
     if active_run:
         _print_active_run_notice(config)
+    if latest_planning_job and latest_planning_job.status in {
+        PlanningJobStatus.RUNNING,
+        PlanningJobStatus.INTERRUPTED,
+        PlanningJobStatus.FAILED,
+    }:
+        _print_planning_job_status(latest_planning_job)
     if latest_plans:
         plan_table = _styled_table(title="Recent Execution Plans")
         plan_table.add_column("ID")
@@ -7996,6 +8749,32 @@ def plans_active_clear(force: bool = typer.Option(False, "--force", help="Clear 
     removed = clear_active_run(config.database_path)
     if removed:
         _print_notice(f"Cleared active-run marker for plan #{run.plan_id}.", style=STYLE_WARN)
+
+
+@plans_app.command("progress")
+def plans_progress(
+    planning_job_id: int | None = typer.Argument(None, help="Planning job ID. Defaults to the latest planning job."),
+) -> None:
+    """Show the latest or selected long-running planning job progress."""
+    _, config = _load_or_exit()
+    job = _latest_or_requested_planning_job(config, planning_job_id)
+    _print_planning_job_status(job)
+
+
+@plans_app.command("planning-resume")
+def plans_planning_resume(
+    planning_job_id: int | None = typer.Argument(None, help="Planning job ID. Defaults to the latest planning job."),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Resume a job that is still marked running after confirming the original process stopped.",
+    ),
+) -> None:
+    """Resume an interrupted reflow planning job from its saved options."""
+    _, config = _load_or_exit()
+    job = _latest_or_requested_planning_job(config, planning_job_id)
+    _print_planning_job_status(job)
+    _resume_reflow_planning_job(config, job, force_running=force)
 
 
 @plans_app.command("skipped")

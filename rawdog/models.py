@@ -72,6 +72,14 @@ class ExecutionPlanStatus(StrEnum):
     FAILED = "failed"
 
 
+class PlanningJobStatus(StrEnum):
+    RUNNING = "running"
+    INTERRUPTED = "interrupted"
+    DONE = "done"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
 class StoreKind(StrEnum):
     DEN = "den"
     YARD = "yard"
@@ -314,6 +322,62 @@ class ExecutionPlan:
     updated_at: datetime
     started_at: datetime | None = None
     completed_at: datetime | None = None
+
+
+@dataclass(slots=True, kw_only=True)
+class PlanningJobCreate:
+    job_kind: str
+    subject: str
+    root_path: Path
+    store_kind: StoreKind
+    options_json: str = "{}"
+    phase: str = "scan"
+    message: str | None = None
+
+
+@dataclass(slots=True, kw_only=True)
+class PlanningJob:
+    planning_job_id: int
+    job_kind: str
+    status: PlanningJobStatus
+    phase: str
+    subject: str
+    root_path: Path
+    store_kind: StoreKind
+    options_json: str
+    created_at: datetime
+    updated_at: datetime
+    total_files: int | None = None
+    total_bytes: int | None = None
+    completed_files: int = 0
+    total_batches: int | None = None
+    completed_batches: int = 0
+    current_path: Path | None = None
+    execution_plan_id: int | None = None
+    message: str | None = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+
+
+@dataclass(slots=True, kw_only=True)
+class PlanningJobItemCreate:
+    source_path: Path
+    relative_path: Path
+    size_bytes: int
+    mtime_ns: int
+
+
+@dataclass(slots=True, kw_only=True)
+class PlanningJobItem:
+    planning_job_item_id: int
+    planning_job_id: int
+    source_path: Path
+    relative_path: Path
+    size_bytes: int
+    mtime_ns: int
+    updated_at: datetime
+    captured_at: datetime | None = None
+    capture_basis: str | None = None
 
 
 @dataclass(slots=True, kw_only=True)

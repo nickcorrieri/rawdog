@@ -518,10 +518,11 @@ or disconnecting docks is not.
 `.partial` files are temporary transfer artifacts created only under the
 destination root during copy. They are not original RAW/camera video files, are ignored during
 source inventory, and are never merged into archive state. A stale `.partial`
-blocks that destination row and requires review; RAWdog does not auto-delete
-pre-existing `.partial` files. If RAWdog creates a `.partial` during the current
-copy attempt and that copy fails, it removes that current-run artifact before
-raising the error.
+blocks that destination row unless it SHA-256 verifies as the exact source bytes;
+verified partials are promoted to the final destination path. RAWdog does not
+auto-delete non-matching pre-existing `.partial` files. If RAWdog creates a
+`.partial` during the current copy attempt and that copy fails, it removes that
+current-run artifact before raising the error.
 
 ## Development
 

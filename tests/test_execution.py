@@ -3,6 +3,8 @@
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 from rawdog import cli
 from rawdog.config import build_config
 from rawdog.db import initialize, session
@@ -270,6 +272,49 @@ def test_post_execution_reports_write_source_and_den_context(tmp_path: Path) -> 
     failure_text = (destination / "RAWDOG_REPORTS" / "PLAN_33_failures.txt").read_text(encoding="utf-8")
     assert "This report is not a delete instruction." in skipped_text
     assert "Operation not permitted" in failure_text
+
+
+def test_copy_plan_refuses_execution_when_destination_space_is_short(tmp_path: Path, monkeypatch) -> None:
+    now = datetime.now(UTC)
+    plan = cli.ExecutionPlan(
+        plan_id=44,
+        plan_kind="den",
+        status=ExecutionPlanStatus.PLANNED,
+        what="copy RAW files",
+        subject=f"{tmp_path / 'source'} -> {tmp_path / 'den'}",
+        expected_result="one file should be copied",
+        execution_summary="Not started.",
+        post_audit_summary="Not audited.",
+        source_root=tmp_path / "source",
+        destination_root=tmp_path / "den",
+        created_at=now,
+        updated_at=now,
+    )
+    rows = [
+        cli.ExecutionPlanRow(
+            row_id=1,
+            plan_id=44,
+            source_path=tmp_path / "source" / "one.CR3",
+            destination_path=tmp_path / "den" / "one.CR3",
+            size_bytes=100_000_000,
+            transfer_action=DenTransferAction.COPY,
+            status="plan_copy",
+        )
+    ]
+    usage = type("Usage", (), {"free": 5_000_000})()
+    monkeypatch.setattr(cli.shutil, "disk_usage", lambda path: usage)
+
+    with pytest.raises(cli.typer.BadParameter, match="not have enough free space"):
+        cli._ensure_copy_plan_has_free_space(plan, rows)
+
+
+def test_database_write_space_guard_refuses_low_free_space(tmp_path: Path, monkeypatch) -> None:
+    config = build_config(OrganizationMode.PROJECT, database_path=tmp_path / "rawdog.sqlite")
+    usage = type("Usage", (), {"free": 5_000_000})()
+    monkeypatch.setattr(cli.shutil, "disk_usage", lambda path: usage)
+
+    with pytest.raises(cli.typer.BadParameter, match="database volume is too low"):
+        cli._ensure_database_write_space(config)
 
 
 def test_force_move_duplicates_removes_only_sha_verified_sources(tmp_path: Path, monkeypatch) -> None:

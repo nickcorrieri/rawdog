@@ -19,6 +19,7 @@ from rawdog.safety import (
     ensure_no_overwrite,
     ensure_same_filesystem,
 )
+from rawdog.verifier import verify_same_bytes
 
 
 def append_only_copy(
@@ -41,9 +42,17 @@ def append_only_copy(
     created_dirs = _create_destination_parent(destination, archive_root)
     partial = destination.with_name(destination.name + ".partial")
     if partial.exists():
+        if verify_same_bytes(source, partial):
+            ensure_no_overwrite(destination)
+            os.rename(partial, destination)
+            _preserve_macos_birthtime(source, destination)
+            _timestamp_created_date_dirs(created_dirs)
+            return "copied_from_verified_partial"
         return "skipped_existing_partial"
     try:
         _copy2_with_progress(source, partial, progress_callback=progress_callback)
+        if not verify_same_bytes(source, partial):
+            raise SafetyError(f"Copied bytes did not verify before final rename: {source} -> {destination}")
         os.rename(partial, destination)
         _preserve_macos_birthtime(source, destination)
         _timestamp_created_date_dirs(created_dirs)

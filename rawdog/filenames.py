@@ -62,7 +62,8 @@ def camera_identity_key(path: Path) -> str:
 def strip_capture_suffix(stem: str) -> str:
     stripped = CAPTURE_PREFIX_RE.sub("", stem)
     stripped = IDENTITY_PREFIX_RE.sub("", stripped)
-    return CAPTURE_SUFFIX_RE.sub("", stripped)
+    stripped = CAPTURE_SUFFIX_RE.sub("", stripped).rstrip("_-. ")
+    return stripped or stem
 
 
 def filename_capture_time(path: Path) -> datetime | None:

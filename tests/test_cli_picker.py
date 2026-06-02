@@ -15,9 +15,11 @@ from rawdog.models import (
     DestinationFilenamePolicy,
     NamingConvention,
     OrganizationMode,
+    PlanningJobStatus,
     StoreCreate,
     StoreKind,
 )
+from rawdog.planning_jobs import get_latest_planning_job, list_planning_job_items
 from rawdog.stores import StoreMediaCatalogResult, create_or_update_store
 
 
@@ -54,6 +56,15 @@ def test_home_fetch_runs_fetch_workflow(monkeypatch) -> None:
     cli._run_home_choice("f")
 
     assert calls == ["fetch"]
+
+
+def test_home_plans_runs_plans_workflow(monkeypatch) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(cli, "_home_plans", lambda: calls.append("plans"))
+
+    cli._run_home_choice("p")
+
+    assert calls == ["plans"]
 
 
 def test_home_fetch_fast_mode_preserves_layout_and_original_names(tmp_path: Path, monkeypatch) -> None:
@@ -125,14 +136,13 @@ def test_yes_no_shows_help_then_accepts_answer(monkeypatch) -> None:
     assert shown == ["Enable option?"]
 
 
-def test_home_yard_import_does_not_ask_unused_session_question(tmp_path: Path, monkeypatch) -> None:
+def test_home_yard_import_uses_numbered_layout_choice(tmp_path: Path, monkeypatch) -> None:
     labels: list[str] = []
     fetch_calls: list[dict] = []
 
-    def fake_yes_no(label: str, default: bool = False, **kwargs) -> bool:
+    def fake_ask(label: str, **kwargs) -> str:
         labels.append(label)
-        assert "session" not in label.lower()
-        return label.startswith("Allow") or label.startswith("When")
+        return "2"
 
     def fake_fetch(**kwargs) -> None:
         fetch_calls.append(kwargs)
@@ -140,17 +150,16 @@ def test_home_yard_import_does_not_ask_unused_session_question(tmp_path: Path, m
     monkeypatch.setattr(cli, "_choose_source_path", lambda label: tmp_path / "source")
     monkeypatch.setattr(cli, "_choose_store_path", lambda label, store_kind: tmp_path / "yard")
     monkeypatch.setattr(cli, "_optional_prompt", lambda label: None)
-    monkeypatch.setattr(cli, "_yes_no", fake_yes_no)
+    monkeypatch.setattr(cli, "_ask_with_help", fake_ask)
     monkeypatch.setattr(cli, "fetch", fake_fetch)
 
     cli._home_yard_import()
 
-    assert labels == [
-        "Allow RAWDOG to recommend date folders for this import?",
-        "When this looks like a camera card, put files in capture-date folders?",
-    ]
+    assert labels == ["Choose yard import layout"]
     assert len(fetch_calls) == 1
     assert fetch_calls[0]["detect_sessions"] is False
+    assert fetch_calls[0]["naming"] == NamingConvention.KEEP_EXISTING
+    assert fetch_calls[0]["filename_policy"] == DestinationFilenamePolicy.ORIGINAL
 
 
 def test_fetch_detected_layout_requires_preview_confirmation_before_planning(tmp_path: Path, monkeypatch) -> None:
@@ -850,6 +859,37 @@ def test_fetch_plan_date_suffixes_flattened_camera_names(tmp_path: Path) -> None
     assert [row.status for row in plan.rows] == ["plan_copy", "plan_copy"]
 
 
+def test_fetch_date_grouping_buckets_each_file_by_own_month(tmp_path: Path) -> None:
+    source = tmp_path / "DCIM"
+    destination = tmp_path / "RAW_YARD"
+    earliest_folder = destination / "2025" / "2025-04"
+    first = source / "100EOSR7" / "LS7A0001.CR3"
+    second = source / "101EOSR7" / "LS7A0002.CR3"
+    first.parent.mkdir(parents=True)
+    second.parent.mkdir(parents=True)
+    destination.mkdir()
+    first.write_bytes(b"raw-one")
+    second.write_bytes(b"raw-two")
+    first_ts = datetime(2025, 4, 30, 12, 1, tzinfo=UTC)
+    second_ts = datetime(2025, 5, 2, 12, 2, tzinfo=UTC)
+
+    plan = cli._build_fetch_plan(
+        source,
+        destination,
+        earliest_folder,
+        NamingConvention.DDD,
+        DestinationFilenamePolicy.DATE_ORIGINAL,
+        item_capture_times={first: first_ts, second: second_ts},
+        date_folder_template="YYYY/YYYY-MM",
+    )
+
+    destinations = {row.source_path.name: row.destination_path for row in plan.rows}
+    assert destinations == {
+        "LS7A0001.CR3": destination / "2025" / "2025-04" / "20250430-120100-00__LS7A0001.CR3",
+        "LS7A0002.CR3": destination / "2025" / "2025-05" / "20250502-120200-00__LS7A0002.CR3",
+    }
+
+
 def test_fetch_plan_can_be_yard_move_plan(tmp_path: Path) -> None:
     source = tmp_path / "DCIM"
     destination = tmp_path / "RAW_YARD"
@@ -947,9 +987,12 @@ def test_fetch_date_grouping_in_project_mode_uses_date_template_not_date_only(
     source = tmp_path / "gold-testdisk" / "DCIM"
     destination = tmp_path / "RAW_YARD"
     raw_file = source / "100EOSR7" / "7P1A9918.CR3"
+    second_file = source / "101EOSR7" / "7P1A9919.CR3"
     raw_file.parent.mkdir(parents=True)
+    second_file.parent.mkdir(parents=True)
     destination.mkdir()
     raw_file.write_bytes(b"recovered cr3")
+    second_file.write_bytes(b"recovered cr3 two")
     initialize(database)
     config = build_config(
         OrganizationMode.PROJECT,
@@ -963,7 +1006,10 @@ def test_fetch_date_grouping_in_project_mode_uses_date_template_not_date_only(
     monkeypatch.setattr(
         metadata,
         "_read_exiftool_tags_for_paths",
-        lambda paths, **kwargs: {raw_file: {"DateTimeOriginal": "2025:04:05 17:37:06"}},
+        lambda paths, **kwargs: {
+            raw_file: {"DateTimeOriginal": "2025:04:05 17:37:06"},
+            second_file: {"DateTimeOriginal": "2025:05:02 10:11:12"},
+        },
     )
 
     cli.fetch(
@@ -985,11 +1031,15 @@ def test_fetch_date_grouping_in_project_mode_uses_date_template_not_date_only(
         plan = cli.get_latest_execution_plan(connection)
         assert plan is not None
         rows = cli.list_execution_plan_rows(connection, plan.plan_id)
-    assert str(destination / "2025" / "2025-04") in plan.expected_result
-    assert rows[0].destination_path == (
+    destinations = {row.source_path.name: row.destination_path for row in rows}
+    assert "across 2 destination folders" in plan.expected_result
+    assert destinations["7P1A9918.CR3"] == (
         destination / "2025" / "2025-04" / "20250405-173706-00__7P1A9918.CR3"
     )
-    assert "Date_Only" not in str(rows[0].destination_path)
+    assert destinations["7P1A9919.CR3"] == (
+        destination / "2025" / "2025-05" / "20250502-101112-00__7P1A9919.CR3"
+    )
+    assert all("Date_Only" not in str(row.destination_path) for row in rows)
 
 
 def test_fetch_keep_existing_project_name_does_not_override_no_date_grouping(
@@ -1138,6 +1188,43 @@ def test_persisted_reflow_records_time_shift_rows_by_plan(tmp_path: Path) -> Non
         completed_time_shift_rows = cli.list_execution_plan_time_shift_rows(connection, execution_plan.plan_id)
     assert completed_time_shift_rows[0].status == "moved"
     assert completed_time_shift_rows[0].audit_status == "destination_verified"
+
+
+def test_yard_reflow_records_resumable_planning_job(tmp_path: Path, monkeypatch) -> None:
+    database = tmp_path / "rawdog.sqlite"
+    yard_root = tmp_path / "RAW_YARD"
+    source = yard_root / "103EOSR7" / "LS7A4622.CR3"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"raw")
+    captured_ts = datetime(2026, 4, 23, 12, 17, 32, tzinfo=UTC).timestamp()
+    os.utime(source, (captured_ts, captured_ts))
+    initialize(database)
+    with session(database) as connection:
+        create_or_update_store(connection, StoreCreate(name="primary", root_path=yard_root, store_kind=StoreKind.YARD))
+    config = build_config(OrganizationMode.PROJECT, working_root=yard_root, database_path=database)
+    monkeypatch.setattr(cli, "has_media_metadata_reader", lambda: False)
+    monkeypatch.setattr(cli, "_prompt_dry_run_plan_next", lambda config, plan_id: None)
+
+    execution_plan = cli._run_yard_reflow_plan(
+        config,
+        yard_root,
+        group_by=cli.DateGroupMode.DAY,
+        keep_context=False,
+        drop_context=set(),
+        filename_policy=DestinationFilenamePolicy.DATE_ORIGINAL,
+        dry_run=True,
+    )
+
+    with session(database) as connection:
+        planning_job = get_latest_planning_job(connection)
+    assert planning_job is not None
+    with session(database) as connection:
+        planning_items = list_planning_job_items(connection, planning_job.planning_job_id)
+    assert planning_job.status == PlanningJobStatus.DONE
+    assert planning_job.execution_plan_id == execution_plan.plan_id
+    assert planning_job.total_files == 1
+    assert planning_items[0].captured_at == datetime(2026, 4, 23, 12, 17, 32, tzinfo=UTC)
+    assert planning_items[0].capture_basis == "filesystem"
 
 
 def test_parse_time_shift_accepts_compound_offsets() -> None:
