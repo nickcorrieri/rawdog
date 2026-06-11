@@ -230,10 +230,11 @@ RAWDOG_ASCII = r"""
   |  |  [_____]    _)      APPEND-ONLY PHOTO OPS                   |
   |   \___________/        NO DELETE . NO OVERWRITE . FULL AUDIT   |
   |        / \__                                                   |
-  |       (    @\___       ARCHIVE DOG ONLINE                      |
-  |        /         O                                             |
-  |       /   (_____/                                              |
-  |      /_____/   U                                               |
+  |       (    @>---       ARCHIVE DOG ONLINE                      |
+  |        \______~                                                |
+  |         /    \                                                 |
+  |        /      \                                                |
+  |       (_)    (_)                                               |
   '----------------------------------------------------------------'
 """
 
