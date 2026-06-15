@@ -218,24 +218,25 @@ MIN_DATABASE_WRITE_FREE_BYTES = 250_000_000
 console = Console(force_terminal=True, color_system="256", style=STYLE_TEXT)
 
 RAWDOG_ASCII = r"""
-  .----------------------------------------------------------------.
-  |  RRRR    AAA   W   W  DDDD    OOO    GGGG                     |
-  |  R   R  A   A  W   W  D   D  O   O  G                         |
-  |  RRRR   AAAAA  W W W  D   D  O   O  G  GG                     |
-  |  R  R   A   A  WW WW  D   D  O   O  G   G                     |
-  |  R   R  A   A  W   W  DDDD    OOO    GGGG                     |
-  |----------------------------------------------------------------|
-  |    _________                                                   |
-  |   /  _____  \__        FETCH . DEN . BREED . SNIFF             |
-  |  |  [_____]    _)      APPEND-ONLY PHOTO OPS                   |
-  |   \___________/        NO DELETE . NO OVERWRITE . FULL AUDIT   |
-  |        / \__                                                   |
-  |       (    @>---       ARCHIVE DOG ONLINE                      |
-  |        \______~                                                |
-  |         /    \                                                 |
-  |        /      \                                                |
-  |       (_)    (_)                                               |
-  '----------------------------------------------------------------'
+██████╗  █████╗ ██╗    ██╗██████╗  ██████╗  ██████╗
+██╔══██╗██╔══██╗██║    ██║██╔══██╗██╔═══██╗██╔════╝
+██████╔╝███████║██║ █╗ ██║██║  ██║██║   ██║██║  ███╗
+██╔══██╗██╔══██║██║███╗██║██║  ██║██║   ██║██║   ██║
+██║  ██║██║  ██║╚███╔███╔╝██████╔╝╚██████╔╝╚██████╔╝
+╚═╝  ╚═╝╚═╝  ╚═╝ ╚══╝╚══╝ ╚═════╝  ╚═════╝  ╚═════╝
+
+          sniff • fetch • breed
+
+    _________
+   /  _____  \__        FETCH . DEN . BREED . SNIFF
+  |  [_____]    _)      APPEND-ONLY PHOTO OPS
+   \___________/        NO DELETE . NO OVERWRITE . FULL AUDIT
+        / \__
+       (    @>---       ARCHIVE DOG ONLINE
+        \______~
+         /    \
+        /      \
+       (_)    (_)
 """
 
 
@@ -1596,7 +1597,6 @@ def _show_home_menu() -> None:
     while True:
         banner = Text()
         banner.append(RAWDOG_ASCII, style=STYLE_ACTION)
-        banner.append("RAWDOG\n", style=STYLE_TITLE)
         banner.append(
             "RAW photo managing tool that can fetch, copy, and audit your RAW libraries.",
             style=STYLE_PANEL,
