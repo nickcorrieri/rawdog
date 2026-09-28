@@ -1,0 +1,16 @@
+{
+  "audit_sha": "1f1e2d02055a987c4dd7eef2ef02a74779b15731",
+  "repository": "/Users/nick/Projects/rawdog",
+  "scope": "Read-only static audit plus isolated fixture probes; no user media, installs, repo edits, or suite runs",
+  "interpreter": ".venv/bin/python with PYTHONDONTWRITEBYTECODE=1",
+  "fixture_location": "/private/tmp, TemporaryDirectory fixtures removed after probes",
+  "probes": [
+    {"name":"COPY_RACE","setup":"During append_only_copy progress callback create destination containing ARCHIVE ORIGINAL","result":"returned copied; destination became NEW, overwriting concurrent archive original","references":["rawdog/copier.py:53-56"]},
+    {"name":"RUNLOCK_RACE","setup":"Two begin_active_run calls read None before synchronization barrier; resume second after first finishes begin","result":"both returned success; final marker plan 2","references":["rawdog/runlock.py:97-134"]},
+    {"name":"STALE_SKIP","setup":"Persist skip_existing_same_name_size row, remove fixture destination, execute persisted plan","result":"plan done; review items 0; audit not_applicable; source present; destination absent","references":["rawdog/cli.py:6748-6749","rawdog/cli.py:6918-6924"]},
+    {"name":"CHANGED_MOVE","setup":"Persist MOVE row size 3, change fixture source from old to changed source, execute plan","result":"source moved; destination changed source; audit size_mismatch; plan done; review items 0","references":["rawdog/cli.py:6953-6978","rawdog/cli.py:7031-7040"]},
+    {"name":"CHANGED_DUPLICATE","setup":"Hash-review matching old pair; replace source with same-size new before duplicate removal","result":"unique source deleted; destination still old; audit source_removed_after_sha256_match","references":["rawdog/cli.py:8908-8939","rawdog/cli.py:9104-9113"]},
+    {"name":"SYMLINK_FORCE_DELETE","setup":"Yard source is symlink to outside/IMG_0001.CR3; destination den/IMG_0001.CR3 has equal bytes; hash-review and remove","result":"verified 1, rejected 0; outside target deleted; yard symlink remains; den exists","references":["rawdog/cli.py:8963-8965","rawdog/cli.py:9005-9006","rawdog/cli.py:9113"]}
+  ],
+  "repository_status_after_probes": "clean"
+}

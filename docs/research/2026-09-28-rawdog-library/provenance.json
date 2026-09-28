@@ -1,0 +1,82 @@
+{
+  "archive_date": "2026-09-28",
+  "audit_target": "1f1e2d02055a987c4dd7eef2ef02a74779b15731",
+  "scope": "Historical research and receipts. No probes or test suites rerun during packaging.",
+  "inspection": "All seven source files read before archival; no secrets or unrelated data identified. Original paths retained as provenance.",
+  "files": [
+    {
+      "archived_file": "rawdog-library-review.md",
+      "original_path": "/private/tmp/rawdog-library-review-2026-09-28.md",
+      "original_modified_at_utc": "2026-09-28T20:14:35.048566+00:00",
+      "original_size_bytes": 14918,
+      "original_sha256": "c9987b523a5b51a0f01add88014dbde0403a5d5008824148c9dcd0d277d0b087",
+      "archived_size_bytes": 14557,
+      "archived_sha256": "e0963ea6baf899dbf3c84ac63c01edbbb9dcc3e80425926631336d36c9e5201a",
+      "transformations": [
+        "Rebased repository source links to ../../../ with #L line anchors; rebased archived evidence links to sibling files. No findings or historical receipts changed."
+      ]
+    },
+    {
+      "archived_file": "rawdog-fido-audit-plan.md",
+      "original_path": "/Users/nick/.codex/visualizations/2026/09/25/01a0da18-e72b-76e2-854c-93df23d93e88/rawdog-fido-audit-plan.md",
+      "original_modified_at_utc": "2026-09-28T16:02:11.510404+00:00",
+      "original_size_bytes": 18317,
+      "original_sha256": "f48f2bbaf70593efe6f601b2c4f4cdcda67533cc5573b1a02263dc9c3c85138e",
+      "archived_size_bytes": 17551,
+      "archived_sha256": "9f83876ec124fbd347b16b81b09677c935037292feb1d62b15514dca1577a235",
+      "transformations": [
+        "Rebased repository source links to ../../../ with #L line anchors; rebased archived evidence links to sibling files. No findings or historical receipts changed."
+      ]
+    },
+    {
+      "archived_file": "rawdog-audit-probes.py.txt",
+      "original_path": "/Users/nick/.codex/visualizations/2026/09/25/01a0da18-e72b-76e2-854c-93df23d93e88/rawdog-audit-probes.py",
+      "original_modified_at_utc": "2026-09-28T16:01:36.729245+00:00",
+      "original_size_bytes": 3821,
+      "original_sha256": "42339926bc7a1c5975b698261067aa022ca6ac97f98450f1032f1bc8323705f1",
+      "archived_size_bytes": 3821,
+      "archived_sha256": "42339926bc7a1c5975b698261067aa022ca6ac97f98450f1032f1bc8323705f1",
+      "transformations": []
+    },
+    {
+      "archived_file": "rawdog-audit-probes.json",
+      "original_path": "/Users/nick/.codex/visualizations/2026/09/25/01a0da18-e72b-76e2-854c-93df23d93e88/rawdog-audit-probes.json",
+      "original_modified_at_utc": "2026-09-28T16:01:36.732476+00:00",
+      "original_size_bytes": 541,
+      "original_sha256": "70788d9dbc616d3aa9eb75d063fabd8834754b8f1a03cd6e434b5b85af4c90a4",
+      "archived_size_bytes": 541,
+      "archived_sha256": "70788d9dbc616d3aa9eb75d063fabd8834754b8f1a03cd6e434b5b85af4c90a4",
+      "transformations": []
+    },
+    {
+      "archived_file": "rawdog-independent-audit-evidence.json",
+      "original_path": "/Users/nick/.codex/visualizations/2026/09/25/01a0da18-e72b-76e2-854c-93df23d93e88/rawdog-independent-audit-evidence.json",
+      "original_modified_at_utc": "2026-09-28T16:01:36.735283+00:00",
+      "original_size_bytes": 2176,
+      "original_sha256": "267e7ef2ec95811db30fc943ecf642edc81a5211ad158048b2e200d69cd7599f",
+      "archived_size_bytes": 2176,
+      "archived_sha256": "267e7ef2ec95811db30fc943ecf642edc81a5211ad158048b2e200d69cd7599f",
+      "transformations": []
+    },
+    {
+      "archived_file": "rawdog-audit-tests.txt",
+      "original_path": "/Users/nick/.codex/visualizations/2026/09/25/01a0da18-e72b-76e2-854c-93df23d93e88/rawdog-audit-tests.log",
+      "original_modified_at_utc": "2026-09-28T16:01:36.737924+00:00",
+      "original_size_bytes": 2520,
+      "original_sha256": "e2866814c68365170b8fb6fa728eefa9810c045350ab352c2b2cc195846d6dd6",
+      "archived_size_bytes": 2520,
+      "archived_sha256": "e2866814c68365170b8fb6fa728eefa9810c045350ab352c2b2cc195846d6dd6",
+      "transformations": []
+    },
+    {
+      "archived_file": "rawdog-audit-preview-recheck.txt",
+      "original_path": "/Users/nick/.codex/visualizations/2026/09/25/01a0da18-e72b-76e2-854c-93df23d93e88/rawdog-audit-preview-recheck.log",
+      "original_modified_at_utc": "2026-09-28T16:01:36.741151+00:00",
+      "original_size_bytes": 98,
+      "original_sha256": "fc4efa05ec8ff7ed11c8f5fb2578bb82b5de5a8d34ed02c3e116981f5db95c2e",
+      "archived_size_bytes": 98,
+      "archived_sha256": "fc4efa05ec8ff7ed11c8f5fb2578bb82b5de5a8d34ed02c3e116981f5db95c2e",
+      "transformations": []
+    }
+  ]
+}

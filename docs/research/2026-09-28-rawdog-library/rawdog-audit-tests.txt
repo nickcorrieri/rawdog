@@ -1,0 +1,42 @@
+........................................F............................... [ 35%]
+........................................................................ [ 71%]
+.........................................................                [100%]
+=================================== FAILURES ===================================
+________ test_fetch_plan_example_prints_one_file_source_and_destination ________
+
+tmp_path = PosixPath('/private/tmp/rawdog-audit-01a0da18-tests/test_fetch_plan_example_prints0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x1071ba740>
+
+    def test_fetch_plan_example_prints_one_file_source_and_destination(
+        tmp_path: Path,
+        monkeypatch,
+    ) -> None:
+        source = tmp_path / "DCIM"
+        destination = tmp_path / "RAW_YARD"
+        destination_folder = destination / "2026" / "2026-05"
+        raw_file = source / "100EOSR7" / "IMG_0001.CR3"
+        raw_file.parent.mkdir(parents=True)
+        destination_folder.mkdir(parents=True)
+        raw_file.write_bytes(b"raw")
+        plan = cli._build_fetch_plan(source, destination, destination_folder, NamingConvention.DDD)
+        output = StringIO()
+        monkeypatch.setattr(
+            cli,
+            "console",
+            Console(file=output, force_terminal=False, color_system=None, width=100),
+        )
+    
+        cli._print_fetch_plan_example(plan)
+    
+        rendered = output.getvalue()
+        assert "SOURCE:" in rendered
+        assert "100EOSR7" in rendered
+        assert "DESTINATION:" in rendered
+        assert "RAW_YARD" in rendered
+>       assert "IMG_0001.CR3" in rendered
+E       AssertionError: assert 'IMG_0001.CR3' in '╭──────────────────────────────────────── One File Example ────────────────────────────────────────╮\n│ SOURCE: -----...             │\n╰──────────────────────────────────────────────────────────────────────────────────────────────────╯\n'
+
+tests/test_cli_picker.py:828: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_cli_picker.py::test_fetch_plan_example_prints_one_file_source_and_destination
+1 failed, 200 passed in 6.79s

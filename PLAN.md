@@ -7,6 +7,20 @@ The product is photography-first archival tooling with intentionally memorable
 branding. The project name, repository name, package branding, and CLI name are
 RAWDOG.
 
+## Current Improvement Milestone
+
+The 2026-09-28 owner-directed roadmap starts with small, deterministic synthetic
+photo files and explicit expected results, followed by safe library comparison,
+timestamp/placement work and a Mac/Windows interface. The roadmap now also covers
+forgotten-folder discovery across machines/drives and Lightroom missing-original
+recovery. See
+[Library Manager Plan](docs/LIBRARY_MANAGER_PLAN.md) and
+[Discovery and Lightroom](docs/LIBRARY_DISCOVERY_AND_LIGHTROOM.md), plus
+[Synthetic Photo Corpus](docs/SYNTHETIC_PHOTO_CORPUS.md).
+
+These documents distinguish future requirements from current implementation.
+Development uses generated temporary media only, never the owner's photo library.
+
 ## Product Boundaries
 
 RAWDOG is append-only RAW archival tooling. It supports SD card ingest,

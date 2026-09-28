@@ -1,0 +1,58 @@
+import sys, json, sqlite3, tempfile, io
+from pathlib import Path
+from datetime import UTC, datetime
+from unittest.mock import patch
+from rich.console import Console
+sys.path.insert(0, '/Users/nick/Projects/rawdog')
+from rawdog import cli
+from rawdog.config import build_config
+from rawdog.db import initialize, session
+from rawdog.models import OrganizationMode, StoreCreate, StoreKind, DenLayoutMode
+from rawdog.stores import create_or_update_store, StoreMediaCatalogEntry, upsert_store_media_catalog, store_db_path, store_media_catalog_status
+from rawdog.inventory import scan_raw_files
+from rawdog.verifier import sha256_file
+from rawdog.den import build_den_plan
+
+out = {}
+with tempfile.TemporaryDirectory(prefix='rawdog-probes-', dir='/private/tmp') as tmp:
+    root = Path(tmp)
+    scan = root/'drive'
+    den = scan/'DEN'
+    a, b = den/'May'/'IMG_0001.CR3', den/'July'/'IMG_0001.CR3'
+    for p in (a, b):
+        p.parent.mkdir(parents=True)
+        p.write_bytes(b'fixture-original')
+    db = root/'app.sqlite'
+    initialize(db)
+    config = build_config(OrganizationMode.PROJECT, archive_root=den, database_path=db)
+    with session(db) as conn:
+        store = create_or_update_store(conn, StoreCreate(name='primary', root_path=den, store_kind=StoreKind.DEN))
+    sink = io.StringIO()
+    with patch.object(cli, '_load_or_exit', return_value=(root/'config.json', config)), patch.object(cli, 'console', Console(file=sink)), patch.object(cli, '_ask_with_help', return_value='SCRAP JUNKYARD REPORT'):
+        cli._run_junkyard(yard_name=None, source_root=scan, den_name='primary', den_root=None, before=None, validate_first=False, hash_check=True, yes=True, prompt_cleanup=False)
+        report = next((root/'reports').glob('junkyard-candidates-*.tsv'))
+        parsed = cli._read_junkyard_report(report)
+        cli._run_junkyard_scrap(config, report, dry_run=False, hash_check=True, confirm_each=False)
+    out['overlapping_source_contains_den'] = {'generated_rows': len(parsed.rows), 'both_rows_inside_registered_den': all(den in x.source_path.parents for x in parsed.rows), 'remaining_originals': sum(p.exists() for p in (a,b)), 'hash_check': True}
+
+    p = den/'catalog.CR3'; p.write_bytes(b'old')
+    old_hash = sha256_file(p)
+    upsert_store_media_catalog(store,[StoreMediaCatalogEntry(store_path=p,size_bytes=3,date_created=datetime.now(UTC),date_type='media',sha256=old_hash)], full=True)
+    p.write_bytes(b'new-content')
+    upsert_store_media_catalog(store,[StoreMediaCatalogEntry(store_path=p,size_bytes=11,date_created=datetime.now(UTC),date_type='filesystem')], full=False)
+    with sqlite3.connect(store_db_path(den)) as conn:
+        size, digest, full_at = conn.execute('SELECT size_bytes, sha256, full_cataloged_at FROM media_catalog WHERE store_path=?',(str(p),)).fetchone()
+    status = store_media_catalog_status(store, scan_raw_files(den))
+    out['stale_catalog_hash'] = {'new_size':size,'old_hash_retained':digest==old_hash,'hash_differs_from_current':digest!=sha256_file(p),'full_marker_retained':bool(full_at),'reported_full_cataloged_files':status.full_cataloged_files}
+
+    inputs = root/'formats'; inputs.mkdir()
+    for ext in ('.CR3','.JPG','.MP4','.MPEG','.MPG','.XMP','.HEIC','.TIF'):
+        (inputs/f'IMG_0001{ext}').write_bytes(b'fixture')
+    out['scan_formats'] = [i.path.suffix for i in scan_raw_files(inputs)]
+
+    src, dest = root/'source', root/'dest'; src.mkdir(); dest.mkdir()
+    (src/'IMG_0001.CR3').write_bytes(b'unique-source')
+    (dest/'IMG_0001.CR3').write_bytes(b'other-content')
+    plan = build_den_plan(src,dest,layout_mode=DenLayoutMode.PRESERVE)
+    out['same_name_size_different_content'] = {'status':plan.rows[0].status,'sha256_equal':sha256_file(plan.rows[0].source_path)==sha256_file(plan.rows[0].destination_path)}
+print(json.dumps(out, indent=2))

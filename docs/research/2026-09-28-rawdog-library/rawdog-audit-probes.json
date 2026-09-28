@@ -1,0 +1,24 @@
+{
+  "overlapping_source_contains_den": {
+    "generated_rows": 2,
+    "both_rows_inside_registered_den": true,
+    "remaining_originals": 0,
+    "hash_check": true
+  },
+  "stale_catalog_hash": {
+    "new_size": 11,
+    "old_hash_retained": true,
+    "hash_differs_from_current": true,
+    "full_marker_retained": true,
+    "reported_full_cataloged_files": 1
+  },
+  "scan_formats": [
+    ".CR3",
+    ".JPG",
+    ".MP4"
+  ],
+  "same_name_size_different_content": {
+    "status": "skip_existing_same_name_size",
+    "sha256_equal": false
+  }
+}
