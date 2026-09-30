@@ -1992,6 +1992,442 @@ def test_direct_fetch_fallback_refuses_alias_before_layout_scan(tmp_path, monkey
     assert payload.read_bytes() == b"synthetic target"
 
 
+_PLAN_QUEUE_ENTRIES = (
+    "home-plans", "plans-list", "plans-show", "plans-active", "plans-progress", "plans-planning-resume",
+    "plans-skipped", "plans-time-shift", "plans-review", "plans-ops", "plans-run", "plans-resume",
+    "queue-create", "queue-add-den", "queue-add-sniff", "queue-add-score", "queue-list", "queue-show", "queue-run",
+)
+
+
+def _call_plan_queue_entry(entry, root, plan_id=1):
+    source, destination = root / "source", root / "destination"
+    calls = {
+        "home-plans": cli._home_plans,
+        "plans-list": lambda: cli.plans_list(limit=10),
+        "plans-show": lambda: cli.plans_show(plan_id, ops=True),
+        "plans-active": cli.plans_active,
+        "plans-progress": lambda: cli.plans_progress(planning_job_id=None),
+        "plans-planning-resume": lambda: cli.plans_planning_resume(planning_job_id=None, force=False),
+        "plans-skipped": lambda: cli.plans_skipped(plan_id, limit=10, export=None),
+        "plans-time-shift": lambda: cli.plans_time_shift(plan_id, limit=10, export=None),
+        "plans-review": lambda: cli.plans_review(plan_id, page_size=10),
+        "plans-ops": lambda: cli.plans_ops(plan_id, limit=10, export=None, verbose=False),
+        "plans-run": lambda: cli.plans_run(plan_id),
+        "plans-resume": lambda: cli.plans_resume(plan_id),
+        "queue-create": lambda: cli.queue_create("fixture", notes=None),
+        "queue-add-den": lambda: _call_den_path_entry("queue-add-den", source, destination),
+        "queue-add-sniff": lambda: cli.queue_add_sniff("fixture", source),
+        "queue-add-score": lambda: cli.queue_add_score("fixture", source),
+        "queue-list": cli.queue_list,
+        "queue-show": lambda: cli.queue_show("fixture"),
+        "queue-run": lambda: cli.queue_run("fixture", dry_run=True),
+    }
+    return calls[entry]()
+
+
+def _call_den_path_entry(entry, source, destination):
+    if entry == "queue-add-den":
+        return cli.queue_add_den(
+            "fixture", source, destination, layout=cli.DenLayoutMode.PRESERVE,
+            action=cli.DenTransferAction.COPY, project_name=None, template=None, group_by=None,
+        )
+    return cli.den(
+        source=None if entry == "den-workflow" else source,
+        destination=None if entry == "den-workflow" else destination,
+        workflow_name="fixture" if entry == "den-workflow" else None,
+        project_name=None, layout=cli.DenLayoutMode.PRESERVE, action=cli.DenTransferAction.COPY,
+        template=None, group_by=None, filename_policy=DestinationFilenamePolicy.ORIGINAL,
+        start_date=None, end_date=None, limit=None, drop_preserved_folder=None,
+        reflow_den=False, dry_run=True,
+    )
+
+
+def _plan_queue_fixture(root, monkeypatch):
+    source, destination = root / "source", root / "destination"
+    source.mkdir()
+    destination.mkdir()
+    (source / "IMG_0001.CR3").write_bytes(b"original")
+    config = build_config(OrganizationMode.PROJECT, database_path=root / "state.sqlite")
+    initialize(config.database_path)
+    _use_picker_config(monkeypatch, root / "config.json", config)
+    return config, source, destination
+
+
+def _seed_den_queue(config, source, destination):
+    with session(config.database_path) as connection:
+        queue = cli.create_or_update_queue(connection, cli.PlanQueueCreate(name="fixture"))
+        cli.add_queue_step(connection, cli.PlanQueueStepCreate(
+            queue_id=queue.queue_id, step_order=1, step_kind=cli.PlanStepKind.DEN,
+            source_root=source, destination_root=destination,
+            layout_mode=cli.DenLayoutMode.PRESERVE, transfer_action=cli.DenTransferAction.COPY,
+        ))
+    return queue
+
+
+def _seed_review_plan(config, source, destination):
+    with session(config.database_path) as connection:
+        plan = cli.create_execution_plan(connection, cli.ExecutionPlanCreate(
+            plan_kind="den", what="synthetic copy", subject="fixture", expected_result="review only",
+            source_root=source, destination_root=destination,
+        ))
+        cli.add_execution_plan_rows(connection, plan.plan_id, [cli.ExecutionPlanRowCreate(
+            source_path=source / "IMG_0001.CR3", destination_path=destination / "IMG_0001.CR3",
+            size_bytes=8, transfer_action=cli.DenTransferAction.COPY, status="plan_copy",
+        )])
+    return plan
+
+
+@pytest.mark.parametrize("entry", _PLAN_QUEUE_ENTRIES)
+def test_plan_queue_entries_validate_config_before_initialization(picker_repo_path, monkeypatch, entry):
+    alias = _picker_config_alias(
+        monkeypatch, picker_repo_path, field="database_path", ancestor=True, broken=False,
+    )
+    monkeypatch.setattr(cli, "_ask_with_help", _answers("1"))
+
+    def forbidden_initialize(*args, **kwargs):
+        raise AssertionError("plan/queue entry initialized an aliased database")
+
+    monkeypatch.setattr(cli, "initialize", forbidden_initialize)
+    with _forbid_unsafe_picker_io(monkeypatch, alias):
+        with pytest.raises(SafetyError, match="symlink"):
+            _call_plan_queue_entry(entry, picker_repo_path)
+
+
+@pytest.mark.parametrize("entry", ["plans-ops", "queue-add-den", "queue-run"])
+@pytest.mark.parametrize("field", ["config", "database_path", "working_root", "archive_root"])
+@pytest.mark.parametrize("ancestor", [False, True], ids=["leaf", "ancestor"])
+@pytest.mark.parametrize("broken", [False, True], ids=["live", "dangling"])
+def test_plan_queue_entries_refuse_config_alias_shapes(
+    picker_repo_path, monkeypatch, entry, field, ancestor, broken,
+):
+    alias = _picker_config_alias(monkeypatch, picker_repo_path, field=field, ancestor=ancestor, broken=broken)
+
+    def forbidden_initialize(*args, **kwargs):
+        raise AssertionError("plan/queue initialization preceded configured path validation")
+
+    monkeypatch.setattr(cli, "initialize", forbidden_initialize)
+    with _forbid_unsafe_picker_io(monkeypatch, alias):
+        with pytest.raises(SafetyError, match="symlink"):
+            _call_plan_queue_entry(entry, picker_repo_path)
+
+
+@pytest.mark.parametrize("entry", ["den", "den-workflow", "queue-add-den", "queue-run"])
+@pytest.mark.parametrize("role", ["source", "destination"])
+@pytest.mark.parametrize("ancestor", [False, True], ids=["leaf", "ancestor"])
+@pytest.mark.parametrize("broken", [False, True], ids=["live", "dangling"])
+def test_den_queue_paths_refuse_alias_before_resolution(
+    picker_repo_path, monkeypatch, entry, role, ancestor, broken,
+):
+    root = picker_repo_path
+    config, source, destination = _plan_queue_fixture(root, monkeypatch)
+    alias, selected, payload = _picker_alias_fixture(root, ancestor=ancestor, broken=broken)
+    source = selected if role == "source" else source
+    destination = selected if role == "destination" else destination
+    if entry == "den-workflow":
+        with session(config.database_path) as connection:
+            cli.create_or_update_workflow(connection, cli.ConsolidationWorkflowCreate(
+                name="fixture", source_root=source, destination_root=destination,
+            ))
+    elif entry == "queue-run":
+        _seed_den_queue(config, source, destination)
+    monkeypatch.setattr(cli, "_ensure_database_write_space", lambda config: None)
+
+    def forbidden_scan(*args, **kwargs):
+        raise AssertionError("planning/scanning began before path alias refusal")
+
+    for name in ("analyze_source_layout", "build_den_plan", "scan_raw_files", "_ask_with_help"):
+        monkeypatch.setattr(cli, name, forbidden_scan)
+    with _forbid_unsafe_picker_io(monkeypatch, alias):
+        with pytest.raises(SafetyError, match="symlink"):
+            if entry == "queue-run":
+                cli.queue_run("fixture", dry_run=True)
+            else:
+                _call_den_path_entry(entry, source, destination)
+    assert payload.read_bytes() == b"synthetic target"
+
+
+@pytest.mark.parametrize("entry", ["plans-show", "plans-ops", "plans-run", "plans-resume"])
+@pytest.mark.parametrize("field", ["source_root", "destination_root", "source_path", "destination_path"])
+@pytest.mark.parametrize("ancestor", [False, True], ids=["leaf", "ancestor"])
+@pytest.mark.parametrize("broken", [False, True], ids=["live", "dangling"])
+def test_persisted_plan_paths_refuse_alias_before_preview_or_prompt(
+    picker_repo_path, monkeypatch, entry, field, ancestor, broken,
+):
+    root = picker_repo_path
+    config, source, destination = _plan_queue_fixture(root, monkeypatch)
+    plan = _seed_review_plan(config, source, destination)
+    alias, selected, payload = _picker_alias_fixture(root, ancestor=ancestor, broken=broken)
+    table = "execution_plans" if field.endswith("_root") else "execution_plan_rows"
+    with session(config.database_path) as connection:
+        connection.execute(f"UPDATE {table} SET {field} = ? WHERE plan_id = ?", (str(selected), plan.plan_id))
+
+    def forbidden_review(*args, **kwargs):
+        raise AssertionError("review/export/prompt/execution began before stored path alias refusal")
+
+    for name in ("_write_plan_operation_manifest", "_ask_with_help", "_execute_persisted_plan"):
+        monkeypatch.setattr(cli, name, forbidden_review)
+    with _forbid_unsafe_picker_io(monkeypatch, alias):
+        with pytest.raises(SafetyError, match="symlink"):
+            _call_plan_queue_entry(entry, root, plan.plan_id)
+    assert payload.read_bytes() == b"synthetic target"
+
+
+def test_queue_validates_later_step_before_scanning_earlier_step(picker_repo_path, monkeypatch):
+    config, source, destination = _plan_queue_fixture(picker_repo_path, monkeypatch)
+    queue = _seed_den_queue(config, source, destination)
+    alias, selected, _ = _picker_alias_fixture(picker_repo_path, ancestor=True, broken=True)
+    with session(config.database_path) as connection:
+        cli.add_queue_step(connection, cli.PlanQueueStepCreate(
+            queue_id=queue.queue_id, step_order=2, step_kind=cli.PlanStepKind.SNIFF, source_root=selected,
+        ))
+
+    def forbidden_scan(*args, **kwargs):
+        raise AssertionError("queue scanned an earlier step before validating all stored paths")
+
+    monkeypatch.setattr(cli, "build_den_plan", forbidden_scan)
+    with _forbid_unsafe_picker_io(monkeypatch, alias):
+        with pytest.raises(SafetyError, match="symlink"):
+            cli.queue_run("fixture", dry_run=True)
+
+
+@pytest.mark.parametrize("entry", ["den", "den-workflow", "queue-run"])
+def test_healthy_den_queue_paths_reach_planning(picker_repo_path, monkeypatch, entry):
+    config, source, destination = _plan_queue_fixture(picker_repo_path, monkeypatch)
+    if entry == "den-workflow":
+        with session(config.database_path) as connection:
+            cli.create_or_update_workflow(connection, cli.ConsolidationWorkflowCreate(
+                name="fixture", source_root=source, destination_root=destination,
+            ))
+    elif entry == "queue-run":
+        _seed_den_queue(config, source, destination)
+    monkeypatch.setattr(cli, "_ensure_database_write_space", lambda config: None)
+
+    class ReachedPlanning(Exception):
+        pass
+
+    def reached_planning(*args, **kwargs):
+        raise ReachedPlanning
+
+    monkeypatch.setattr(cli, "analyze_source_layout", reached_planning)
+    monkeypatch.setattr(cli, "build_den_plan", reached_planning)
+    with pytest.raises(ReachedPlanning):
+        if entry == "queue-run":
+            cli.queue_run("fixture", dry_run=True)
+        else:
+            _call_den_path_entry(entry, source, destination)
+    assert (source / "IMG_0001.CR3").read_bytes() == b"original"
+    assert not (destination / "IMG_0001.CR3").exists()
+
+
+@pytest.mark.parametrize("entry", ["queue-add-den", "queue-add-sniff", "queue-add-score"])
+def test_healthy_queue_entry_persists_only_fixture_paths(picker_repo_path, monkeypatch, entry):
+    config, source, destination = _plan_queue_fixture(picker_repo_path, monkeypatch)
+    _call_plan_queue_entry("queue-create", picker_repo_path)
+    _call_plan_queue_entry(entry, picker_repo_path)
+    _call_plan_queue_entry("queue-list", picker_repo_path)
+    _call_plan_queue_entry("queue-show", picker_repo_path)
+    with session(config.database_path) as connection:
+        queue = cli.get_queue_by_name(connection, "fixture")
+        steps = cli.list_queue_steps(connection, queue.queue_id)
+    assert len(steps) == 1
+    assert steps[0].source_root == source
+    assert steps[0].destination_root == (destination if entry == "queue-add-den" else None)
+
+
+@pytest.mark.parametrize("entry", ["plans-show", "plans-ops", "plans-run", "plans-resume"])
+def test_healthy_plan_entries_allow_review_without_execution(picker_repo_path, monkeypatch, entry):
+    config, source, destination = _plan_queue_fixture(picker_repo_path, monkeypatch)
+    plan = _seed_review_plan(config, source, destination)
+    monkeypatch.setattr(cli, "_ask_with_help", lambda *args, **kwargs: "no")
+
+    def forbidden_execution(*args, **kwargs):
+        raise AssertionError("cancelled review must not execute")
+
+    monkeypatch.setattr(cli, "_execute_persisted_plan", forbidden_execution)
+    _call_plan_queue_entry(entry, picker_repo_path, plan.plan_id)
+    with session(config.database_path) as connection:
+        assert cli.get_execution_plan(connection, plan.plan_id).status == cli.ExecutionPlanStatus.PLANNED
+    assert (source / "IMG_0001.CR3").read_bytes() == b"original"
+    assert not (destination / "IMG_0001.CR3").exists()
+
+
+def _rewrite_preview_path(config, plan_id, field, path):
+    table = "execution_plans" if field.endswith("_root") else "execution_plan_rows"
+    with session(config.database_path) as connection:
+        connection.execute(f"UPDATE {table} SET {field} = ? WHERE plan_id = ?", (str(path), plan_id))
+
+
+def _interactive_preview(monkeypatch):
+    monkeypatch.setattr(cli.sys, "stdin", type("InteractiveInput", (), {"isatty": lambda self: True})())
+
+
+@pytest.mark.parametrize("entry", ["plans-choice-2", "home-status", "status"])
+@pytest.mark.parametrize("field", ["config", "database_path", "working_root", "archive_root"])
+@pytest.mark.parametrize("ancestor", [False, True], ids=["leaf", "ancestor"])
+@pytest.mark.parametrize("broken", [False, True], ids=["live", "dangling"])
+def test_status_entries_guard_real_config_before_initialization(
+    picker_repo_path, monkeypatch, entry, field, ancestor, broken,
+):
+    alias = _picker_config_alias(monkeypatch, picker_repo_path, field=field, ancestor=ancestor, broken=broken)
+    monkeypatch.setattr(cli, "_ask_with_help", _answers("2"))
+
+    def forbidden_initialize(*args, **kwargs):
+        raise AssertionError("Status initialized before configured alias refusal")
+
+    monkeypatch.setattr(cli, "initialize", forbidden_initialize)
+    calls = {"plans-choice-2": cli._home_plans, "home-status": cli._home_status, "status": cli.status}
+    with _forbid_unsafe_picker_io(monkeypatch, alias):
+        with pytest.raises(SafetyError, match="symlink"):
+            calls[entry]()
+
+
+def test_plans_choice_2_revalidates_config_after_status_returns(picker_repo_path, monkeypatch):
+    config, _, _ = _plan_queue_fixture(picker_repo_path, monkeypatch)
+    alias, selected, _ = _picker_alias_fixture(picker_repo_path, ancestor=True, broken=True)
+    actual_status = cli.status
+    replaced = False
+
+    def status_then_replace_config():
+        nonlocal replaced
+        actual_status()
+        _use_picker_config(monkeypatch, picker_repo_path / "config.json", replace(config, database_path=selected))
+        replaced = True
+
+    def guarded_initialize(path):
+        if replaced:
+            raise AssertionError("HOME status reload initialized the changed aliased database")
+        initialize(path)
+
+    monkeypatch.setattr(cli, "status", status_then_replace_config)
+    monkeypatch.setattr(cli, "initialize", guarded_initialize)
+    monkeypatch.setattr(cli, "_ask_with_help", _answers("2"))
+    with _forbid_unsafe_picker_io(monkeypatch, alias):
+        with pytest.raises(SafetyError, match="symlink"):
+            cli._home_plans()
+    assert replaced
+
+
+@pytest.mark.parametrize("field", ["source_root", "destination_root", "source_path", "destination_path"])
+@pytest.mark.parametrize("ancestor", [False, True], ids=["leaf", "ancestor"])
+@pytest.mark.parametrize("broken", [False, True], ids=["live", "dangling"])
+def test_plans_choice_2_refuses_stored_alias_before_preview(
+    picker_repo_path, monkeypatch, field, ancestor, broken,
+):
+    config, source, destination = _plan_queue_fixture(picker_repo_path, monkeypatch)
+    plan = _seed_review_plan(config, source, destination)
+    alias, selected, _ = _picker_alias_fixture(picker_repo_path, ancestor=ancestor, broken=broken)
+    _rewrite_preview_path(config, plan.plan_id, field, selected)
+    monkeypatch.setattr(cli, "_ask_with_help", _answers("2", str(plan.plan_id), "concise"))
+    monkeypatch.setattr(cli, "_yes_no", lambda *args, **kwargs: True)
+
+    def forbidden_preview(*args, **kwargs):
+        raise AssertionError("HOME status wrote a preview before stored alias refusal")
+
+    monkeypatch.setattr(cli, "_write_plan_operation_manifest", forbidden_preview)
+    with _forbid_unsafe_picker_io(monkeypatch, alias):
+        with pytest.raises(SafetyError, match="symlink"):
+            cli._home_plans()
+
+
+@pytest.mark.parametrize("entry", ["confirm", "confirm-reviewed", "dry-c", "dry-v"])
+@pytest.mark.parametrize("field", ["source_root", "destination_root", "source_path", "destination_path"])
+@pytest.mark.parametrize("ancestor", [False, True], ids=["leaf", "ancestor"])
+@pytest.mark.parametrize("broken", [False, True], ids=["live", "dangling"])
+def test_preview_refetch_revalidates_changes_after_initial_path_gate(
+    picker_repo_path, monkeypatch, entry, field, ancestor, broken,
+):
+    config, source, destination = _plan_queue_fixture(picker_repo_path, monkeypatch)
+    plan = _seed_review_plan(config, source, destination)
+    alias, selected, _ = _picker_alias_fixture(picker_repo_path, ancestor=ancestor, broken=broken)
+    cli._load_noncleanup_execution_plan(plan.plan_id)
+    _rewrite_preview_path(config, plan.plan_id, field, selected)
+    _interactive_preview(monkeypatch)
+
+    def forbidden_preview(*args, **kwargs):
+        raise AssertionError("freshly changed paths reached a preview, commit prompt or execution")
+
+    monkeypatch.setattr(cli, "_write_plan_operation_manifest", forbidden_preview)
+    monkeypatch.setattr(cli, "_execute_persisted_plan", forbidden_preview)
+    monkeypatch.setattr(cli, "_ask_with_help", _answers(entry[-1]) if entry.startswith("dry-") else forbidden_preview)
+    with _forbid_unsafe_picker_io(monkeypatch, alias):
+        with pytest.raises(SafetyError, match="symlink"):
+            if entry.startswith("dry-"):
+                cli._prompt_dry_run_plan_next(config, plan.plan_id)
+            else:
+                cli._confirm_and_execute_plan(config, plan.plan_id, review_already_shown=entry == "confirm-reviewed")
+
+
+@pytest.mark.parametrize("entry", ["plans-run", "plans-resume"])
+@pytest.mark.parametrize("field", ["source_path", "destination_path"])
+def test_plan_command_rechecks_row_changed_after_its_initial_loader(
+    picker_repo_path, monkeypatch, entry, field,
+):
+    config, source, destination = _plan_queue_fixture(picker_repo_path, monkeypatch)
+    plan = _seed_review_plan(config, source, destination)
+    alias, selected, _ = _picker_alias_fixture(picker_repo_path, ancestor=True, broken=False)
+    actual_load = cli._load_noncleanup_execution_plan
+
+    def load_then_change_row(plan_id):
+        result = actual_load(plan_id)
+        _rewrite_preview_path(config, plan_id, field, selected)
+        return result
+
+    def forbidden_prompt(*args, **kwargs):
+        raise AssertionError("changed row reached commit confirmation or execution")
+
+    monkeypatch.setattr(cli, "_load_noncleanup_execution_plan", load_then_change_row)
+    monkeypatch.setattr(cli, "_ask_with_help", forbidden_prompt)
+    monkeypatch.setattr(cli, "_execute_persisted_plan", forbidden_prompt)
+    with _forbid_unsafe_picker_io(monkeypatch, alias):
+        with pytest.raises(SafetyError, match="symlink"):
+            _call_plan_queue_entry(entry, picker_repo_path, plan.plan_id)
+
+
+@pytest.mark.parametrize("field", ["source_root", "destination_root"])
+@pytest.mark.parametrize("broken", [False, True], ids=["live", "dangling"])
+def test_operation_preview_revalidates_its_own_plan_root_refetch(picker_repo_path, monkeypatch, field, broken):
+    config, source, destination = _plan_queue_fixture(picker_repo_path, monkeypatch)
+    plan = _seed_review_plan(config, source, destination)
+    alias, selected, _ = _picker_alias_fixture(picker_repo_path, ancestor=True, broken=broken)
+    _, _, rows = cli._load_noncleanup_execution_plan(plan.plan_id)
+    _rewrite_preview_path(config, plan.plan_id, field, selected)
+
+    def forbidden_export(*args, **kwargs):
+        raise AssertionError("operation preview exported before validating its freshly fetched plan root")
+
+    monkeypatch.setattr(cli, "_write_plan_operation_manifest", forbidden_export)
+    with _forbid_unsafe_picker_io(monkeypatch, alias):
+        with pytest.raises(SafetyError, match="symlink"):
+            cli._print_plan_operation_review(config, plan.plan_id, rows)
+
+
+@pytest.mark.parametrize("entry", ["plans-choice-2", "confirm", "confirm-reviewed", "dry-c", "dry-v"])
+def test_healthy_status_and_refetch_previews_preserve_paused_plan(picker_repo_path, monkeypatch, entry):
+    config, source, destination = _plan_queue_fixture(picker_repo_path, monkeypatch)
+    plan = _seed_review_plan(config, source, destination)
+    _interactive_preview(monkeypatch)
+    monkeypatch.setattr(cli, "_yes_no", lambda *args, **kwargs: True)
+    answers = ("2", str(plan.plan_id), "concise", "0") if entry == "plans-choice-2" else (
+        (entry[-1], "p") if entry.startswith("dry-") else ("no",)
+    )
+    monkeypatch.setattr(cli, "_ask_with_help", _answers(*answers))
+
+    def forbidden_execution(*args, **kwargs):
+        raise AssertionError("preview or cancelled confirmation executed the plan")
+
+    monkeypatch.setattr(cli, "_execute_persisted_plan", forbidden_execution)
+    if entry == "plans-choice-2":
+        cli._home_plans()
+    elif entry.startswith("dry-"):
+        cli._prompt_dry_run_plan_next(config, plan.plan_id)
+    else:
+        cli._confirm_and_execute_plan(config, plan.plan_id, review_already_shown=entry == "confirm-reviewed")
+    with session(config.database_path) as connection:
+        assert cli.get_execution_plan(connection, plan.plan_id).status == cli.ExecutionPlanStatus.PLANNED
+    assert (source / "IMG_0001.CR3").read_bytes() == b"original"
+    assert not (destination / "IMG_0001.CR3").exists()
+
+
 def _answers(*values: str):
     answers = iter(values)
 

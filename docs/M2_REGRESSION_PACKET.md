@@ -14,7 +14,7 @@ cleanup selectors, lock files, and historical evidence remain unchanged.
 ## Repository admission and execution hold
 
 The [development lock](../development-lock.md) and
-[repository harness qualification hold](RAWDOG_REPO_TEST_HARNESS.md) apply.
+[repository harness qualification hold](RAWdog_REPO_TEST_HARNESS.md) apply.
 The shell harness still does not provide a Python/media execution mode. No
 old worker/launcher script, external-world environment contract, outside
 receipt path, or historical execution command is imported into this packet.

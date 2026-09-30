@@ -5259,7 +5259,7 @@ def _home_verify() -> None:
 
 def _home_status() -> None:
     status()
-    _, config = _load_or_exit()
+    _, config = _load_noncleanup_or_exit()
     with session(config.database_path) as connection:
         plans = list_execution_plans(connection, limit=5)
     if not plans:
@@ -5294,8 +5294,7 @@ def _home_status() -> None:
             HelpItem("verbose", "Verbose", "Show more row/path detail for debugging or LLM handoff.", STYLE_ACTION),
         ],
     )
-    with session(config.database_path) as connection:
-        rows = list_execution_plan_rows(connection, plan_ids[plan_choice])
+    config, _, rows = _load_noncleanup_execution_plan(plan_ids[plan_choice])
     _print_plan_operation_review(
         config,
         plan_ids[plan_choice],
@@ -5328,7 +5327,7 @@ def _home_plans() -> None:
         )
         if choice == "0":
             return
-        _, config = _load_or_exit()
+        _, config = _load_noncleanup_or_exit()
         if choice == "1":
             with session(config.database_path) as connection:
                 job = get_latest_planning_job(connection)
@@ -6729,6 +6728,7 @@ def _print_plan_operation_review(
     export_path: Path | None = None,
     verbose: bool = False,
 ) -> Path:
+    destination_root = _plan_destination_root(config, plan_id, rows)
     manifest_path = _write_plan_operation_manifest(config, plan_id, rows, export_path)
     console.print(
         Panel(
@@ -6745,7 +6745,6 @@ def _print_plan_operation_review(
         )
     )
     _print_destination_folder_summary(rows)
-    destination_root = _plan_destination_root(config, plan_id)
     _print_duplicate_year_warning(
         [row.destination_path for row in rows],
         destination_root=destination_root,
@@ -6788,10 +6787,16 @@ def _print_plan_operation_review(
     return manifest_path
 
 
-def _plan_destination_root(config: RawdogConfig, plan_id: int) -> Path | None:
+def _plan_destination_root(
+    config: RawdogConfig, plan_id: int, rows: list[ExecutionPlanRow],
+) -> Path | None:
+    _noncleanup_path(config.database_path)
     with session(config.database_path) as connection:
         plan = get_execution_plan(connection, plan_id)
-    return plan.destination_root if plan else None
+    if plan is None:
+        raise typer.BadParameter(f"Unknown plan: {plan_id}")
+    _require_execution_paths(plan, rows)
+    return plan.destination_root
 
 
 def _print_duplicate_year_warning(paths: list[Path], *, destination_root: Path | None, limit: int = 5) -> None:
@@ -6909,8 +6914,13 @@ def _prompt_dry_run_plan_next(config: RawdogConfig, plan_id: int) -> None:
             ],
         )
         if choice in {"c", "v"}:
+            _noncleanup_path(config.database_path)
             with session(config.database_path) as connection:
+                plan = get_execution_plan(connection, plan_id)
+                if plan is None:
+                    raise typer.BadParameter(f"Unknown plan: {plan_id}")
                 rows = list_execution_plan_rows(connection, plan_id)
+            _require_execution_paths(plan, rows)
             _print_plan_operation_review(config, plan_id, rows, limit=50, verbose=choice == "v")
             continue
         if choice == "r":
@@ -6927,11 +6937,13 @@ def _confirm_and_execute_plan(
     action: str = "Run",
     review_already_shown: bool = False,
 ) -> None:
+    _noncleanup_path(config.database_path)
     with session(config.database_path) as connection:
         plan = get_execution_plan(connection, plan_id)
         if plan is None:
             raise typer.BadParameter(f"Unknown plan: {plan_id}")
         rows = list_execution_plan_rows(connection, plan_id)
+    _require_execution_paths(plan, rows)
     if plan.status == ExecutionPlanStatus.DONE:
         console.print("Plan is already done.")
         return
@@ -7498,8 +7510,8 @@ def den(
         raise typer.BadParameter(str(exc)) from exc
     if start_date_value and end_date_value and start_date_value > end_date_value:
         raise typer.BadParameter("--start-date must be before or equal to --end-date.")
-    source_root = parse_user_path(str(source_value))
-    destination_root = parse_user_path(str(destination_value))
+    source_root = _noncleanup_path(str(source_value))
+    destination_root = _noncleanup_path(str(destination_value))
     effective_layout = loaded_workflow.layout_mode if loaded_workflow and not source else layout
     effective_action = loaded_workflow.transfer_action if loaded_workflow and not source else action
     effective_filename_policy = (
@@ -7686,7 +7698,7 @@ def den(
 @app.command()
 def status() -> None:
     """Show configured paths, projects, and archive state summary."""
-    _, config = _load_or_exit()
+    _, config = _load_noncleanup_or_exit()
     table = _styled_table(title="RAWDOG Status")
     table.add_column("Setting")
     table.add_column("Value")
@@ -8803,7 +8815,7 @@ def workflow_list() -> None:
 @plans_app.command("list")
 def plans_list(limit: int = typer.Option(10, "--limit", min=1, max=50)) -> None:
     """List recent persisted execution plans."""
-    _, config = _load_or_exit()
+    _, config = _load_noncleanup_or_exit()
     with session(config.database_path) as connection:
         plans = list_execution_plans(connection, limit=limit)
     table = _styled_table(title="RAWDOG Execution Plans")
@@ -8895,13 +8907,14 @@ def plans_show(
     ops: bool = typer.Option(False, "--ops", help="Also show filesystem operation preview."),
 ) -> None:
     """Show one persisted execution plan and its row summary."""
-    _, config = _load_or_exit()
+    _, config = _load_noncleanup_or_exit()
     with session(config.database_path) as connection:
         plan = get_execution_plan(connection, plan_id)
         if plan is None:
             raise typer.BadParameter(f"Unknown plan: {plan_id}")
         rows = list_execution_plan_rows(connection, plan_id)
         time_shift_rows = list_execution_plan_time_shift_rows(connection, plan_id)
+    _require_execution_paths(plan, rows)
     _print_execution_plan_start(plan)
     table = _styled_table(title=f"Plan #{plan.plan_id} Rows")
     table.add_column("Status")
@@ -9064,7 +9077,7 @@ def _read_active_run_or_none(config: RawdogConfig):
 @plans_app.command("active")
 def plans_active() -> None:
     """Show the active plan execution marker, if any."""
-    _, config = _load_or_exit()
+    _, config = _load_noncleanup_or_exit()
     _print_active_run_notice(config)
 
 
@@ -9101,7 +9114,7 @@ def plans_progress(
     planning_job_id: int | None = typer.Argument(None, help="Planning job ID. Defaults to the latest planning job."),
 ) -> None:
     """Show the latest or selected long-running planning job progress."""
-    _, config = _load_or_exit()
+    _, config = _load_noncleanup_or_exit()
     job = _latest_or_requested_planning_job(config, planning_job_id)
     _print_planning_job_status(job)
 
@@ -9116,7 +9129,7 @@ def plans_planning_resume(
     ),
 ) -> None:
     """Resume an interrupted reflow planning job from its saved options."""
-    _, config = _load_or_exit()
+    _, config = _load_noncleanup_or_exit()
     job = _latest_or_requested_planning_job(config, planning_job_id)
     _print_planning_job_status(job)
     _resume_reflow_planning_job(config, job, force_running=force)
@@ -9129,7 +9142,7 @@ def plans_skipped(
     export: Path | None = typer.Option(None, "--export", "-o", help="Optional CSV export path for skipped rows."),
 ) -> None:
     """Show skipped rows for a persisted execution plan."""
-    _, config = _load_or_exit()
+    _, config = _load_noncleanup_or_exit()
     with session(config.database_path) as connection:
         plan = get_execution_plan(connection, plan_id)
         if plan is None:
@@ -9169,7 +9182,7 @@ def plans_time_shift(
     export: Path | None = typer.Option(None, "--export", "-o", help="Optional CSV export path."),
 ) -> None:
     """Show timestamp-shift rows recorded for a reflow plan."""
-    _, config = _load_or_exit()
+    _, config = _load_noncleanup_or_exit()
     with session(config.database_path) as connection:
         plan = get_execution_plan(connection, plan_id)
         if plan is None:
@@ -9531,7 +9544,7 @@ def plans_review(
     page_size: int = typer.Option(20, "--limit", min=1, max=100, help="Rows per page."),
 ) -> None:
     """Interactively inspect failed, skipped, held, and review-needed rows for a plan."""
-    _, config = _load_or_exit()
+    _, config = _load_noncleanup_or_exit()
     with session(config.database_path) as connection:
         plan = get_execution_plan(connection, plan_id)
         if plan is None:
@@ -9571,6 +9584,17 @@ def plans_review(
         offset = next_offset
 
 
+def _load_noncleanup_execution_plan(plan_id: int) -> tuple[RawdogConfig, ExecutionPlan, list[ExecutionPlanRow]]:
+    _, config = _load_noncleanup_or_exit()
+    with session(config.database_path) as connection:
+        plan = get_execution_plan(connection, plan_id)
+        if plan is None:
+            raise typer.BadParameter(f"Unknown plan: {plan_id}")
+        rows = list_execution_plan_rows(connection, plan_id)
+    _require_execution_paths(plan, rows)
+    return config, plan, rows
+
+
 @plans_app.command("ops")
 def plans_ops(
     plan_id: int = typer.Argument(...),
@@ -9579,12 +9603,7 @@ def plans_ops(
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Show API, partial path, and safety rule details."),
 ) -> None:
     """Review exact Python filesystem operations for a persisted plan."""
-    _, config = _load_or_exit()
-    with session(config.database_path) as connection:
-        plan = get_execution_plan(connection, plan_id)
-        if plan is None:
-            raise typer.BadParameter(f"Unknown plan: {plan_id}")
-        rows = list_execution_plan_rows(connection, plan_id)
+    config, plan, rows = _load_noncleanup_execution_plan(plan_id)
     _print_execution_plan_start(plan)
     _print_plan_operation_review(config, plan_id, rows, limit=limit, export_path=export, verbose=verbose)
     _prompt_run_reviewed_plan(config, plan_id)
@@ -9593,21 +9612,15 @@ def plans_ops(
 @plans_app.command("run")
 def plans_run(plan_id: int = typer.Argument(...)) -> None:
     """Run a reviewed persisted copy/move execution plan."""
-    _, config = _load_or_exit()
+    config, _, _ = _load_noncleanup_execution_plan(plan_id)
     _confirm_and_execute_plan(config, plan_id, action="Run")
 
 
 @plans_app.command("resume")
 def plans_resume(plan_id: int = typer.Argument(...)) -> None:
     """Resume a persisted copy/move execution plan."""
-    _, config = _load_or_exit()
-    with session(config.database_path) as connection:
-        plan = get_execution_plan(connection, plan_id)
-        if plan is None:
-            raise typer.BadParameter(f"Unknown plan: {plan_id}")
+    config, plan, rows = _load_noncleanup_execution_plan(plan_id)
     _print_execution_plan_start(plan)
-    with session(config.database_path) as connection:
-        rows = list_execution_plan_rows(connection, plan_id)
     _print_plan_operation_review(config, plan_id, rows)
     _confirm_and_execute_plan(config, plan_id, action="Resume", review_already_shown=True)
 
@@ -9615,7 +9628,7 @@ def plans_resume(plan_id: int = typer.Argument(...)) -> None:
 @queue_app.command("create")
 def queue_create(name: str = typer.Argument(...), notes: str | None = typer.Option(None, "--notes")) -> None:
     """Create or update a safe plan queue."""
-    _, config = _load_or_exit()
+    _, config = _load_noncleanup_or_exit()
     with session(config.database_path) as connection:
         queue = create_or_update_queue(connection, PlanQueueCreate(name=name, notes=notes))
     console.print(f"Queued plan #{queue.queue_id}: {queue.name}")
@@ -9637,9 +9650,9 @@ def queue_add_den(
     ),
 ) -> None:
     """Add a safe den step to a queue."""
-    _, config = _load_or_exit()
-    source_root = parse_user_path(str(source))
-    destination_root = parse_user_path(str(destination))
+    _, config = _load_noncleanup_or_exit()
+    source_root = _noncleanup_path(str(source))
+    destination_root = _noncleanup_path(str(destination))
     destination_inside_source = _destination_inside_source(source_root, destination_root)
     if destination_inside_source and action == DenTransferAction.MOVE:
         raise typer.BadParameter(
@@ -9694,7 +9707,7 @@ def queue_add_score(name: str = typer.Argument(...), root: Path = typer.Argument
 
 
 def _add_read_only_queue_step(name: str, root: Path, step_kind: PlanStepKind) -> None:
-    _, config = _load_or_exit()
+    _, config = _load_noncleanup_or_exit()
     source_root = parse_user_path(str(root))
     try:
         ensure_existing_directory(source_root, "source")
@@ -9721,7 +9734,7 @@ def _add_read_only_queue_step(name: str, root: Path, step_kind: PlanStepKind) ->
 @queue_app.command("list")
 def queue_list() -> None:
     """List safe plan queues."""
-    _, config = _load_or_exit()
+    _, config = _load_noncleanup_or_exit()
     with session(config.database_path) as connection:
         queues = list_queues(connection)
     table = _styled_table(title="RAWDOG Plan Queues")
@@ -9737,7 +9750,7 @@ def queue_list() -> None:
 @queue_app.command("show")
 def queue_show(name: str = typer.Argument(...)) -> None:
     """Show queued safe steps."""
-    _, config = _load_or_exit()
+    _, config = _load_noncleanup_or_exit()
     with session(config.database_path) as connection:
         queue = get_queue_by_name(connection, name)
         if not queue:
@@ -9766,7 +9779,7 @@ def queue_run(
     dry_run: bool = typer.Option(True, "--dry-run/--commit", help="Preview the queue before execution."),
 ) -> None:
     """Preview or execute queued safe steps in order."""
-    _, config = _load_or_exit()
+    _, config = _load_noncleanup_or_exit()
     with session(config.database_path) as connection:
         queue = get_queue_by_name(connection, name)
         if not queue:
@@ -9774,6 +9787,11 @@ def queue_run(
         steps = list_queue_steps(connection, queue.queue_id)
     if not steps:
         raise typer.BadParameter(f"Queue has no steps: {name}")
+
+    for step in steps:
+        for path in (step.source_root, step.destination_root):
+            if path is not None:
+                _noncleanup_path(path)
 
     total_files = 0
     total_bytes = 0
