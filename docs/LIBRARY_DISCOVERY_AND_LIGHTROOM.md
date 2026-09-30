@@ -157,6 +157,46 @@ An exact original found only in a protected backup remains protected: propose a
 verified working copy at an approved stable location rather than turning the
 backup into the working library. No absence result proves destruction everywhere.
 
+## Proposed future extension: Apple Photos import confidence (M8)
+
+This is a read-only proposal after the M3 inventory foundation, not dispatched
+implementation or accepted coverage. With the user's permission, compare an
+incoming source against explicitly selected Apple Photos libraries and report
+four independent observations per asset or bundle:
+
+| Evidence | Report only when |
+| --- | --- |
+| Record seen in Photos | A qualified, dated read-only observation identifies a record in a selected library. This says nothing by itself about the original bytes or backup. |
+| Original bytes independently verified | Accessible original bytes are read and matched to the incoming source by fresh full-content identity, including the required related components and ancillary payload checks. A preview, derivative or matching name/metadata cannot establish this. |
+| Original retrieved from iCloud and verified | The user explicitly permits retrieval; the retrieved unmodified original bytes are independently checked against the incoming source, with bundle completeness and retrieval provenance recorded. Cloud presence or a thumbnail alone is unverified. |
+| Independent backup verified | A separate copy on independently identified storage is freshly verified under the ordinary full-payload and backup-role rules. A Photos record, iCloud copy, or second view of the same storage is not this evidence. |
+
+Show each observation's source, scope, time, capability and verification status.
+Use explicit unknown/unverified states for inaccessible originals, unavailable
+cloud content, unsupported access, incomplete Live Photo or sidecar payloads,
+stale observations and interrupted checks. Library size, Photos import-success
+messages, and matching names, dates or camera metadata do not prove that original
+bytes were retained. Optimized storage may leave originals in iCloud; referenced
+imports may point to files outside the Photos library. Do not infer an accessible
+original from the existence of a Photos record or library package.
+
+Preserve incoming sources and Photos libraries. No automatic import, catalog edit,
+original hydration, cloud retrieval, file move or deletion follows a match.
+Require explicit user permission for library selection and for any later cloud
+retrieval; report the libraries and asset scopes actually inspected, plus excluded,
+inaccessible, offline or unselected libraries. A match or absence in one library
+does not answer for every library on a machine or account. A mere Photos match
+never grants deletion authority; any future cleanup remains under its separate
+reviewed keeper, payload, backup and action-time safety gates.
+
+The supported read-only observation/export method and available original-byte
+access must be qualified per macOS/Photos version before implementation. Current
+Apple capability research is preliminary; version-specific API behavior, managed
+versus referenced import coverage, cloud retrieval semantics and multi-library
+coverage remain unverified. Keep these gaps visible rather than claiming an
+adapter or test acceptance. Proposed synthetic cases should distinguish all four
+evidence fields and the unknown states without using personal Photos libraries.
+
 ## Mac and Windows delivery
 
 Mac and Windows are product targets. Keep scanning, matching, planning and job
