@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
@@ -16,6 +17,8 @@ from rawdog.models import (
     ExecutionPlanTimeShiftRow,
     ExecutionPlanTimeShiftRowCreate,
 )
+from rawdog.safety import SafetyError
+from rawdog.verifier import capture_file_version
 
 
 def _now() -> str:
@@ -64,9 +67,10 @@ def add_execution_plan_rows(
     connection.executemany(
         """
         INSERT INTO execution_plan_rows (
-            plan_id, source_path, destination_path, size_bytes, transfer_action, status
+            plan_id, source_path, destination_path, size_bytes, transfer_action, status,
+            source_version, destination_version
         )
-        VALUES (?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
             (
@@ -76,10 +80,22 @@ def add_execution_plan_rows(
                 row.size_bytes,
                 row.transfer_action.value,
                 row.status,
+                row.source_version or _reviewed_version(row.source_path),
+                row.destination_version or (
+                    _reviewed_version(row.destination_path) if row.status.startswith("skip") else None
+                ),
             )
             for row in rows
         ],
     )
+
+
+def _reviewed_version(path: Path) -> str | None:
+    try:
+        return json.dumps(capture_file_version(path), sort_keys=True)
+    except (OSError, SafetyError):
+        # Incomplete/legacy evidence is retained for review, never synthesized at run time.
+        return None
 
 
 def add_execution_plan_time_shift_rows(
@@ -299,6 +315,8 @@ def row_to_plan_row(row: sqlite3.Row) -> ExecutionPlanRow:
         executed_at=datetime.fromisoformat(row["executed_at"]) if row["executed_at"] else None,
         audited_at=datetime.fromisoformat(row["audited_at"]) if row["audited_at"] else None,
         error=row["error"],
+        source_version=row["source_version"],
+        destination_version=row["destination_version"],
     )
 
 

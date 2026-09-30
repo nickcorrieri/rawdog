@@ -160,10 +160,12 @@ from rawdog.runlock import (
 )
 from rawdog.safety import (
     SafetyError,
+    absolute_lexical_path,
     ensure_consolidation_roots,
     ensure_distinct_roots,
     ensure_existing_directory,
     ensure_import_roots,
+    ensure_no_symlink_components,
     ensure_same_filesystem,
     reject_dangerous_arguments,
 )
@@ -186,7 +188,12 @@ from rawdog.stores import (
     store_media_catalog_status,
     upsert_store_media_catalog,
 )
-from rawdog.verifier import sha256_file, verify_same_bytes
+from rawdog.verifier import (
+    capture_file_version,
+    require_file_version,
+    sha256_file,
+    verify_same_bytes,
+)
 from rawdog.workflows import (
     create_or_update_workflow,
     get_workflow_by_name,
@@ -328,6 +335,21 @@ def _load_or_exit() -> tuple[Path, RawdogConfig]:
     return config_path, config
 
 
+def _load_noncleanup_or_exit() -> tuple[Path, RawdogConfig]:
+    config_path = _noncleanup_path(default_config_path())
+    if not config_path.exists():
+        raise typer.BadParameter(_init_guidance_text())
+    config = load_config(config_path)
+    config = replace(
+        config,
+        database_path=_noncleanup_path(config.database_path),
+        working_root=_noncleanup_path(config.working_root) if config.working_root is not None else None,
+        archive_root=_noncleanup_path(config.archive_root) if config.archive_root is not None else None,
+    )
+    initialize(config.database_path)
+    return config_path, config
+
+
 def _init_guidance_text() -> str:
     config_path = default_config_path()
     database_path = default_database_path()
@@ -350,7 +372,7 @@ def _init_guidance_text() -> str:
 
 
 def _is_initialized() -> bool:
-    return default_config_path().exists()
+    return _noncleanup_path(default_config_path()).exists()
 
 
 def _print_init_guidance() -> None:
@@ -589,8 +611,199 @@ def _choose_path(label: str, *, browse_number_selection: bool = False) -> Path:
         console.print("[bold red]Invalid choice.[/] Try again.")
 
 
+def _noncleanup_path(value: Path | str) -> Path:
+    path = parse_user_path(value) if isinstance(value, str) else value
+    ensure_no_symlink_components(path)
+    return absolute_lexical_path(path)
+
+
+def _noncleanup_existing_directory(value: Path | str) -> Path | None:
+    path = _noncleanup_path(value)
+    if path.is_dir():
+        return path
+    _print_error(f"Folder must already exist: {path}")
+    return None
+
+
+def _noncleanup_confirm_destination(value: Path | str) -> Path | None:
+    path = _noncleanup_path(value)
+    if path.exists():
+        return _noncleanup_existing_directory(path)
+    if _noncleanup_existing_directory(path.parent) is None:
+        return None
+    if not _yes_no(f"Destination does not exist. Create {path}?", default=True):
+        return None
+    path = _noncleanup_path(path)
+    path.mkdir(exist_ok=True)
+    return _noncleanup_existing_directory(path)
+
+
+def _noncleanup_manual_path(label: str, *, destination: bool = False) -> Path | None:
+    raw = _ask_with_help(label, help_title="Manual Path", help_items=_generic_path_help("path"))
+    return _noncleanup_confirm_destination(raw) if destination else _noncleanup_existing_directory(raw)
+
+
+def _noncleanup_child_folders(root: Path) -> list[Path]:
+    root = _noncleanup_path(root)
+    folders = []
+    for child in root.iterdir():
+        child = _noncleanup_path(child)
+        if child.is_dir():
+            folders.append(child)
+    return sorted(folders, key=lambda path: (path.name.casefold(), path.name))
+
+
+def _noncleanup_browse_folder(start: Path, *, destination: bool = False) -> Path:
+    current = _noncleanup_existing_directory(start)
+    if current is None:
+        raise SafetyError(f"Browser start is not an existing directory: {start}")
+    page = 0
+    while True:
+        current = _noncleanup_path(current)
+        folders = _noncleanup_child_folders(current)
+        page_count = max(1, (len(folders) + 5) // 6)
+        page %= page_count
+        visible = folders[page * 6 : page * 6 + 6]
+        _print_notice(f"Browsing: {current}; folders sorted by name.")
+        for index, child in enumerate(visible, start=1):
+            _print_folder_option(str(index), child.name)
+        if page_count > 1:
+            _print_option("7", "More folders")
+        _print_option("8", "Parent folder")
+        _print_option("9", "Use this folder")
+        _print_option("0", "Manual path")
+        selection = _ask_with_help(
+            "Choose folder (Ctrl-C to exit)", default="9", help_title="Folder Browser",
+            help_items=_generic_path_help("folder"),
+        )
+        if selection in {"9", "."}:
+            path = _noncleanup_confirm_destination(current) if destination else _noncleanup_existing_directory(current)
+            if path is not None:
+                return path
+        elif selection == "7" and page_count > 1:
+            page = (page + 1) % page_count
+        elif selection in {"8", ".."}:
+            current = _noncleanup_path(current.parent)
+            page = 0
+        elif selection == "0":
+            path = _noncleanup_manual_path("Path", destination=destination)
+            if path is not None:
+                if destination:
+                    return path
+                current, page = path, 0
+        elif selection.isdigit() and 1 <= int(selection) <= len(visible):
+            current = _noncleanup_path(visible[int(selection) - 1])
+            page = 0
+        elif not selection.isdigit():
+            path = _noncleanup_confirm_destination(selection) if destination else _noncleanup_existing_directory(selection)
+            if path is not None:
+                if destination:
+                    return path
+                current, page = path, 0
+        else:
+            _print_error("Invalid folder choice. Try again.")
+
+
+def _noncleanup_standard_paths() -> list[tuple[str, Path]]:
+    # Listing suggestions does not probe them or enumerate mounted volumes.
+    home = Path.home()
+    return [("Documents", home / "Documents"), ("Desktop", home / "Desktop"),
+            ("Downloads", home / "Downloads"), ("Volumes", Path("/Volumes"))]
+
+
+def _choose_noncleanup_path(
+    label: str, *, browse_number_selection: bool = False, destination: bool = False,
+) -> Path:
+    choices = _noncleanup_standard_paths()
+    while True:
+        _print_section_row(label)
+        for index, (name, path) in enumerate(choices, start=1):
+            _print_path_option(str(index), name, path)
+        _print_option("0", "Enter manual path")
+        selection = _ask_with_help(
+            "Choose a path, b-number to browse, or type a path", default="1",
+            help_title=label, help_items=_generic_path_help("path"),
+        )
+        if selection == "0":
+            path = _noncleanup_manual_path(label, destination=destination)
+        else:
+            browse = selection.lower().startswith("b") and selection[1:].isdigit()
+            number = selection[1:] if browse else selection
+            if number.isdigit():
+                if not 1 <= int(number) <= len(choices):
+                    _print_error("Invalid path choice. Try again.")
+                    continue
+                selected = _noncleanup_existing_directory(choices[int(number) - 1][1])
+                if selected is None:
+                    continue
+                if browse or browse_number_selection:
+                    return _noncleanup_browse_folder(selected, destination=destination)
+            else:
+                selected = _noncleanup_path(selection)
+            path = _noncleanup_confirm_destination(selected) if destination else _noncleanup_existing_directory(selected)
+        if path is not None:
+            return path
+
+
+def _noncleanup_known_stores(store_kind: StoreKind) -> list[Store]:
+    try:
+        _, config = _load_noncleanup_or_exit()
+        with session(config.database_path) as connection:
+            for store in list_stores(connection):
+                _noncleanup_path(store.root_path)
+            return _list_configured_stores(connection, config, store_kind)
+    except typer.BadParameter:
+        return []
+
+
+def _pick_noncleanup_registered_store(stores: list[Store], noun: str) -> Path | None:
+    for store in stores:
+        _noncleanup_path(store.root_path)
+    path = _pick_registered_store(stores, noun)
+    return _noncleanup_existing_directory(path) if path is not None else None
+
+
+def _choose_noncleanup_store_path(label: str, store_kind: StoreKind) -> Path:
+    stores = _noncleanup_known_stores(store_kind)
+    if not stores:
+        return _choose_noncleanup_path(label, browse_number_selection=True)
+    page = 0
+    while True:
+        visible = _store_page(stores, page)
+        _print_section_row(label)
+        for index, store in enumerate(visible, start=1):
+            _print_path_option(str(index), store.name, store.root_path)
+        if _has_next_store_page(stores, page):
+            _print_option("6", "Next stores")
+        _print_option("0", "Other / browse folders")
+        selection = _ask_with_help(
+            "Choose store, b-number to browse, or type a path", default="1",
+            help_title=label, help_items=_generic_path_help("store"),
+        )
+        if selection == "0":
+            return _choose_noncleanup_path(label, browse_number_selection=True)
+        if selection == "6" and _has_next_store_page(stores, page):
+            page = _next_store_page(stores, page)
+            continue
+        browse = selection.lower().startswith("b") and selection[1:].isdigit()
+        number = selection[1:] if browse else selection
+        if number.isdigit():
+            if not 1 <= int(number) <= len(visible):
+                _print_error("Invalid store choice. Try again.")
+                continue
+            store = visible[int(number) - 1]
+            path = _noncleanup_existing_directory(store.root_path)
+            if path is not None:
+                _mark_store_used(store)
+                return _noncleanup_browse_folder(path) if browse else path
+        else:
+            path = _noncleanup_existing_directory(selection)
+            if path is not None:
+                return path
+
+
 def _choose_source_path(label: str) -> Path:
-    yards = _known_stores(StoreKind.YARD)
+    yards = _noncleanup_known_stores(StoreKind.YARD)
     page = 0
     while True:
         _print_section_row(f"{label} (Ctrl-C to exit)")
@@ -622,7 +835,7 @@ def _choose_source_path(label: str) -> Path:
         if selection == "9":
             return _choose_explored_source_path(label)
         if selection == "0":
-            path = _manual_existing_directory("Source path")
+            path = _noncleanup_manual_path("Source path")
             if path:
                 return path
             continue
@@ -634,23 +847,22 @@ def _choose_source_path(label: str) -> Path:
         page_stores = _store_page(yards, page)
         if 1 <= index <= len(page_stores):
             store = page_stores[index - 1]
-            path = store.root_path
-            if path.exists() and path.is_dir():
+            path = _noncleanup_existing_directory(store.root_path)
+            if path is not None:
                 _mark_store_used(store)
                 return path
-            console.print(f"[bold red]Source folder is not available:[/] {path}")
+            console.print(f"[bold red]Source folder is not available:[/] {store.root_path}")
             continue
         console.print("[bold red]Invalid source choice.[/] Try again.")
 
 
 def _choose_explored_source_path(label: str) -> Path:
-    start = _choose_standard_root(f"{label} start")
-    return _browse_folder(start, confirm_label="Use this source folder", manual_mode="existing", max_children=6)
+    return _choose_noncleanup_path(label, browse_number_selection=True)
 
 
 def _choose_den_destination_path(label: str) -> Path:
-    _, config = _load_or_exit()
-    dens = _known_stores(StoreKind.DEN)
+    _, config = _load_noncleanup_or_exit()
+    dens = _noncleanup_known_stores(StoreKind.DEN)
     while True:
         _print_section_row(f"{label} (Ctrl-C to exit)")
         primary_den = next((store for store in dens if store.name.lower() == "primary"), None)
@@ -686,21 +898,22 @@ def _choose_den_destination_path(label: str) -> Path:
             if not default_den:
                 console.print("[bold yellow]No default den configured.[/]")
                 continue
-            path = _confirm_destination_path(default_den)
+            path = _noncleanup_confirm_destination(default_den)
             if path:
                 _register_or_mark_store_path(path, StoreKind.DEN, "primary")
                 return path
             continue
         if selection == "2":
-            path = _pick_registered_store(dens, "den")
+            path = _pick_noncleanup_registered_store(dens, "den")
             if path:
                 return path
             continue
         if selection == "3":
-            start = _choose_standard_root("Destination start")
-            return _browse_den_destination(start, dens)
+            path = _choose_noncleanup_path("Destination start", browse_number_selection=True, destination=True)
+            _register_or_mark_store_path(path, StoreKind.DEN, path.name or "den")
+            return path
         if selection == "0":
-            path = _manual_destination_path("Destination path")
+            path = _noncleanup_manual_path("Destination path", destination=True)
             if path:
                 _register_or_mark_store_path(path, StoreKind.DEN, path.name or "den")
                 return path
@@ -1733,7 +1946,7 @@ def _normalize_home_choice(choice: str) -> str | None:
 
 def _print_latest_plan_hint() -> None:
     try:
-        _, config = _load_or_exit()
+        _, config = _load_noncleanup_or_exit()
         with session(config.database_path) as connection:
             latest_plan = get_latest_execution_plan(connection)
             latest_planning_job = get_latest_planning_job(connection)
@@ -1930,7 +2143,7 @@ def _home_fetch_workflow() -> None:
         _home_yard_import(DenTransferAction.COPY)
         return
     source = _choose_source_path("Fetch source")
-    destination = _choose_store_path("Fetch destination", StoreKind.YARD)
+    destination = _choose_noncleanup_store_path("Fetch destination", StoreKind.YARD)
     fetch(
         source=source,
         destination=destination,
@@ -2647,7 +2860,7 @@ def _home_yard_import(action: DenTransferAction = DenTransferAction.COPY) -> Non
     if action == DenTransferAction.MOVE:
         _print_yard_move_guidance()
     source = _choose_source_path("Import source")
-    destination = _choose_store_path("Import destination", StoreKind.YARD)
+    destination = _choose_noncleanup_store_path("Import destination", StoreKind.YARD)
     if action == DenTransferAction.MOVE:
         try:
             ensure_same_filesystem(source, destination)
@@ -3658,17 +3871,17 @@ def _choose_catalogue_target(
 
 
 def _choose_registered_catalogue_store(store_kind: StoreKind, label: str) -> tuple[Store, Path]:
-    stores = _known_stores(store_kind)
+    stores = _noncleanup_known_stores(store_kind)
     if not stores:
         raise typer.BadParameter(f"No registered {store_kind.value}s. Choose manual folder first.")
-    path = _pick_registered_store(stores, store_kind.value)
+    path = _pick_noncleanup_registered_store(stores, store_kind.value)
     if path is None:
         raise typer.BadParameter("No store selected.")
-    store = _store_for_exact_path(path, store_kind)
+    store = next((store for store in stores if _noncleanup_path(store.root_path) == path), None)
     if store is None:
         raise typer.BadParameter(f"Selected {store_kind.value} is not registered.")
     _mark_store_used(store)
-    return store, store.root_path
+    return store, _noncleanup_path(store.root_path)
 
 
 def _register_manual_catalogue_store(label: str) -> tuple[Store, Path]:
@@ -3677,7 +3890,7 @@ def _register_manual_catalogue_store(label: str) -> tuple[Store, Path]:
         "Set this up as a yard or den; for a temporary spot, use the default temporary name.",
         style=STYLE_ROW_SELECTED,
     )
-    root = _choose_path(label, browse_number_selection=True)
+    root = _choose_noncleanup_path(label, browse_number_selection=True)
     kind_choice = _ask_with_help(
         "Set this folder up as a yard or den",
         choices=["y", "yard", "d", "den"],
@@ -3700,8 +3913,8 @@ def _register_manual_catalogue_store(label: str) -> tuple[Store, Path]:
         ],
         styled=False,
     ).strip() or default_name
-    _, config = _load_or_exit()
-    root_path = parse_user_path(str(root))
+    _, config = _load_noncleanup_or_exit()
+    root_path = _noncleanup_path(root)
     try:
         ensure_existing_directory(root_path, f"{store_kind.value} root")
     except SafetyError as exc:
@@ -3895,7 +4108,7 @@ def _print_media_catalogue_result(
 
 def _run_post_fetch_quick_catalogue(destination_root: Path, scan_root: Path) -> None:
     try:
-        _, config = _load_or_exit()
+        _, config = _load_noncleanup_or_exit()
         with session(config.database_path) as connection:
             store = find_store_for_path(connection, destination_root, StoreKind.YARD)
             if store is None:
@@ -3946,8 +4159,8 @@ def _home_den_organization() -> None:
             expand=True,
         )
     )
-    root = _choose_store_path("DEN to inspect", StoreKind.DEN)
-    _, config = _load_or_exit()
+    root = _choose_noncleanup_store_path("DEN to inspect", StoreKind.DEN)
+    _, config = _load_noncleanup_or_exit()
     _run_den_organization_report(config, root)
     if not _yes_no("Build an in-place same-DEN rename/move reflow plan?", default=False):
         return
@@ -3997,8 +4210,8 @@ def _home_yard_reflow() -> None:
             expand=True,
         )
     )
-    root = _choose_store_path("YARD to reflow", StoreKind.YARD)
-    _, config = _load_or_exit()
+    root = _choose_noncleanup_store_path("YARD to reflow", StoreKind.YARD)
+    _, config = _load_noncleanup_or_exit()
     group_by = _choose_date_grouping(DenLayoutMode.DATE)
     keep_context, drop_context = _choose_reflow_context_policy(root, default_keep=False)
     filename_policy = _prompt_filename_policy(
@@ -4032,8 +4245,8 @@ def _home_yard_reflow() -> None:
 
 
 def _choose_audit_root(label: str) -> Path:
-    yards = _known_stores(StoreKind.YARD)
-    dens = _known_stores(StoreKind.DEN)
+    yards = _noncleanup_known_stores(StoreKind.YARD)
+    dens = _noncleanup_known_stores(StoreKind.DEN)
     while True:
         _print_section_row(f"{label} (Ctrl-C to exit)")
         _print_option("1.", f"Pick registered yard ({len(yards)} available)")
@@ -4052,19 +4265,19 @@ def _choose_audit_root(label: str) -> Path:
             ],
         )
         if selection == "1":
-            path = _pick_registered_store(yards, "yard")
+            path = _pick_noncleanup_registered_store(yards, "yard")
             if path:
                 return path
             continue
         if selection == "2":
-            path = _pick_registered_store(dens, "den")
+            path = _pick_noncleanup_registered_store(dens, "den")
             if path:
                 return path
             continue
         if selection == "3":
             return _choose_explored_source_path(label)
         if selection == "0":
-            path = _manual_existing_directory("Audit path")
+            path = _noncleanup_manual_path("Audit path")
             if path:
                 return path
             continue
@@ -4402,10 +4615,14 @@ def _run_store_reflow_plan(
     limit: int | None = None,
     planning_job_id: int | None = None,
 ) -> ExecutionPlan:
-    root = root.expanduser().resolve()
-    _ensure_database_write_space(config)
+    ensure_no_symlink_components(root)
+    ensure_no_symlink_components(config.database_path)
+    root = absolute_lexical_path(root)
     with session(config.database_path) as connection:
+        for registered_store in list_stores(connection, store_kind):
+            ensure_no_symlink_components(registered_store.root_path)
         store = find_store_for_path(connection, root, store_kind)
+    _ensure_database_write_space(config)
     store_label = store_kind.value.upper()
     if store is None:
         raise typer.BadParameter(f"{store_label} reflow is only allowed inside a registered {store_kind.value}.")
@@ -4709,6 +4926,9 @@ def _build_den_reflow_plan(
     config: RawdogConfig | None = None,
     planning_job_id: int | None = None,
 ) -> DenPlan:
+    ensure_no_symlink_components(root)
+    if config is not None:
+        ensure_no_symlink_components(config.database_path)
     items = _load_or_scan_reflow_items(
         root,
         limit=limit,
@@ -4716,6 +4936,8 @@ def _build_den_reflow_plan(
         config=config,
         planning_job_id=planning_job_id,
     )
+    for item in items:
+        ensure_no_symlink_components(item.path)
     rows: list[DenPlanRow] = []
     time_shift_rows: list[ReflowTimeShiftPlanRow] = []
     planned_destinations: set[Path] = set()
@@ -4728,6 +4950,7 @@ def _build_den_reflow_plan(
     )
 
     def build_row(item: InventoryItem) -> None:
+        ensure_no_symlink_components(item.path)
         capture = _reflow_capture_time_info(
             item.path,
             time_shift=time_shift,
@@ -4749,6 +4972,7 @@ def _build_den_reflow_plan(
             reserved_destinations=planned_destinations,
             size_bytes=item.size_bytes,
         )
+        ensure_no_symlink_components(destination)
         status = "plan_copy"
         if destination == item.path:
             status = "skip_existing_same_name_size"
@@ -4757,7 +4981,8 @@ def _build_den_reflow_plan(
         elif destination.exists():
             status = (
                 "skip_existing_same_name_size"
-                if destination.name == item.path.name and destination.stat().st_size == item.size_bytes
+                if (destination.name == item.path.name and destination.stat().st_size == item.size_bytes
+                    and verify_same_bytes(item.path, destination))
                 else "collision"
             )
         if status == "plan_copy":
@@ -5002,8 +5227,9 @@ def _home_rebuild_store_catalog(store_kind: StoreKind) -> None:
         f"Rebuild scans every RAW/camera video/JPEG file currently in a {noun} and rewrites that {noun}'s portable catalog.",
         style=STYLE_ROW_SELECTED,
     )
-    root = _choose_store_path(f"{noun.title()} catalog to rebuild", store_kind)
-    store = _store_for_exact_path(root, store_kind)
+    root = _choose_noncleanup_store_path(f"{noun.title()} catalog to rebuild", store_kind)
+    store = next((store for store in _noncleanup_known_stores(store_kind)
+                  if _noncleanup_path(store.root_path) == root), None)
     if store is None:
         raise typer.BadParameter(f"Selected {noun} is not registered. Use top-level M to register it first.")
     dry_run = not _yes_no(f"Write rebuilt {noun} catalog now?", default=False)
@@ -5463,7 +5689,7 @@ def fetch(
     ),
 ) -> None:
     """Import RAW and camera video files from a card or folder into a working yard."""
-    _, config = _load_or_exit()
+    _, config = _load_noncleanup_or_exit()
     _ensure_database_write_space(config)
     loaded_profile = None
     with session(config.database_path) as connection:
@@ -5480,9 +5706,10 @@ def fetch(
     destination_root = destination or (loaded_profile.destination_root if loaded_profile else None)
 
     if source_root is None:
-        source_root = _choose_path("Import source")
+        source_root = _choose_noncleanup_path("Import source")
     if destination_root is None:
-        destination_root = config.working_root or _choose_path("Import destination")
+        destination_root = (_noncleanup_path(config.working_root) if config.working_root
+                            else _choose_noncleanup_path("Import destination"))
 
     source_root = parse_user_path(str(source_root))
     destination_root = parse_user_path(str(destination_root))
@@ -5741,7 +5968,7 @@ def backup(
 @app.command()
 def sniff(roots: list[Path] | None = typer.Argument(None, help="Folders or volumes to inspect.")) -> None:
     """Inspect folders or configured RAWDOG roots."""
-    _, config = _load_or_exit()
+    _, config = _load_noncleanup_or_exit()
     sniff_roots = roots or [root for root in [config.working_root, config.archive_root] if root]
     if not sniff_roots:
         raise typer.BadParameter("No roots provided and no default roots are configured.")
@@ -5827,7 +6054,7 @@ def den_organization(
     root: Path = typer.Argument(..., help="Registered den root to inspect."),
 ) -> None:
     """Report DEN folder-shape issues without moving files."""
-    _, config = _load_or_exit()
+    _, config = _load_noncleanup_or_exit()
     _run_den_organization_report(config, root)
 
 
@@ -5863,7 +6090,7 @@ def den_reflow(
     dry_run: bool = typer.Option(True, "--dry-run/--commit", help="Preview before execution."),
 ) -> None:
     """Build an in-place same-den rename/move plan for date buckets and filenames."""
-    _, config = _load_or_exit()
+    _, config = _load_noncleanup_or_exit()
     _run_den_reflow_plan(
         config,
         root,
@@ -5911,7 +6138,7 @@ def yard_reflow(
     dry_run: bool = typer.Option(True, "--dry-run/--commit", help="Preview before execution."),
 ) -> None:
     """Build an in-place same-yard rename/move plan for date buckets and filenames."""
-    _, config = _load_or_exit()
+    _, config = _load_noncleanup_or_exit()
     _run_yard_reflow_plan(
         config,
         root,
@@ -6168,7 +6395,11 @@ def _build_fetch_plan(
     date_folder_template: str | None = None,
     on_item: Callable[[InventoryItem, int, int], None] | None = None,
 ) -> DenPlan:
+    for root in (source_root, destination_root, destination_folder):
+        ensure_no_symlink_components(root)
     items = items if items is not None else scan_raw_files(source_root)
+    for item in items:
+        ensure_no_symlink_components(item.path)
     item_capture_times = item_capture_times if item_capture_times is not None else (
         capture_times([item.path for item in items])
         if filename_policy != DestinationFilenamePolicy.ORIGINAL or date_folder_template is not None
@@ -6207,7 +6438,7 @@ def _build_fetch_plan(
             status = "skip_existing_same_name_size"
         elif destination_path in planned_destinations:
             status = "collision"
-        elif planned_copy.reason == "collision_size_mismatch":
+        elif planned_copy.reason in {"collision_size_mismatch", "collision_content_mismatch"}:
             status = "collision"
         else:
             status = "plan_copy"
@@ -6734,32 +6965,73 @@ def _confirm_and_execute_plan(
     _print_execution_plan_start(finished)
 
 
+def _expected_source_version(row: ExecutionPlanRow) -> dict:
+    if not row.source_version:
+        raise SafetyError("Plan has no reviewed source identity; regenerate and review it before execution.")
+    try:
+        expected = json.loads(row.source_version)
+    except (TypeError, ValueError) as exc:
+        raise SafetyError("Plan source identity is unreadable; review is required.") from exc
+    if not isinstance(expected, dict) or not expected.get("sha256") or expected.get("size") != row.size_bytes:
+        raise SafetyError("Plan source identity is incomplete or disagrees with reviewed size.")
+    return expected
+
+
 def _audit_execution_row(row: ExecutionPlanRow, status: str) -> str:
-    if status in {"copied", "copied_from_verified_partial", "moved", "skipped_existing_same_name_size"}:
-        if not row.destination_path.exists():
-            return "destination_missing"
-        if row.destination_path.stat().st_size != row.size_bytes:
-            return "size_mismatch"
-        return "destination_verified"
     if status == "skipped_collision" or row.status == "collision":
         return "needs_collision_review"
     if status == "skipped_existing_partial":
         return "needs_partial_review"
-    if row.status.startswith("skip"):
-        return "not_applicable"
-    return "not_audited"
+    verified_statuses = {
+        "copied", "copied_from_verified_partial", "moved", "skipped_existing_same_name_size",
+        "skip_existing_same_name_size", "skip_already_in_place", "source_removed_verified_duplicate",
+    }
+    if status not in verified_statuses:
+        return "needs_identity_review"
+    try:
+        expected = _expected_source_version(row)
+        ensure_no_symlink_components(row.source_path)
+        ensure_no_symlink_components(row.destination_path)
+        try:
+            actual = capture_file_version(row.destination_path)
+        except FileNotFoundError:
+            return "destination_missing"
+        if actual["size"] != row.size_bytes:
+            return "size_mismatch"
+        if any(actual.get(key) != expected.get(key) for key in ("sha256", "size", "ancillary")):
+            return "content_mismatch"
+        if status == "moved" and any(actual.get(key) != expected.get(key) for key in ("dev", "ino")):
+            return "needs_move_identity_review"
+        if status.startswith("skip"):
+            if not row.destination_version:
+                return "needs_skip_review"
+            require_file_version(row.destination_path, json.loads(row.destination_version))
+        if status != "source_removed_verified_duplicate" and not (
+            row.transfer_action == DenTransferAction.MOVE and status == "moved"
+        ):
+            require_file_version(row.source_path, expected)
+        return "destination_verified"
+    except (OSError, SafetyError, ValueError, TypeError):
+        return "needs_identity_review"
 
 
 def _execute_persisted_plan(config: RawdogConfig, plan_id: int) -> ExecutionPlan:
-    _ensure_database_write_space(config)
+    ensure_no_symlink_components(config.database_path)
     with session(config.database_path) as connection:
         plan = get_execution_plan(connection, plan_id)
         if plan is None:
             raise typer.BadParameter(f"Unknown plan: {plan_id}")
         rows = list_execution_plan_rows(connection, plan_id)
+        stores = list_stores(connection)
+    _require_execution_paths(plan, rows)
+    lock_roots = _operation_lock_roots(
+        [path for row in rows for path in (row.source_path, row.destination_path)],
+        stores, [root for root in (plan.source_root, plan.destination_root) if root],
+    )
+    _ensure_database_write_space(config)
     _ensure_copy_plan_has_free_space(plan, rows)
     try:
-        begin_active_run(
+        active_run = begin_active_run(
             config.database_path,
             plan_id=plan_id,
             what=plan.what,
@@ -6769,6 +7041,7 @@ def _execute_persisted_plan(config: RawdogConfig, plan_id: int) -> ExecutionPlan
             destination_root=plan.destination_root,
             store_kind=_store_kind_label_for_plan(plan),
             write_lock=True,
+            lock_roots=lock_roots,
         )
     except ActiveRunError as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -6781,12 +7054,62 @@ def _execute_persisted_plan(config: RawdogConfig, plan_id: int) -> ExecutionPlan
         raise typer.BadParameter(_database_error_message(config, exc)) from exc
     finally:
         try:
-            finish_active_run(config.database_path, plan_id=plan_id)
+            finish_active_run(config.database_path, plan_id=plan_id, token=active_run.token)
         except sqlite3.Error as exc:
             _print_notice(
                 f"Could not clear active-run marker because the RAWDOG database is unavailable: {exc}",
                 style=STYLE_WARN,
             )
+
+
+def _require_execution_paths(plan: ExecutionPlan, rows: list[ExecutionPlanRow]) -> None:
+    for root in (plan.source_root, plan.destination_root):
+        if root is not None:
+            ensure_no_symlink_components(root)
+    for row in rows:
+        ensure_no_symlink_components(row.source_path)
+        ensure_no_symlink_components(row.destination_path)
+
+
+def _operation_lock_roots(paths: list[Path], stores: list[Store], fallback_roots: list[Path]) -> tuple[Path, ...]:
+    # Validate every spelling before inspecting any row, fallback or registered root.
+    for path in [*paths, *fallback_roots, *(store.root_path for store in stores)]:
+        ensure_no_symlink_components(path)
+    registered_roots = sorted(
+        {absolute_lexical_path(store.root_path) for store in stores}, key=lambda root: len(root.parts), reverse=True,
+    )
+    fallbacks = [absolute_lexical_path(root) for root in fallback_roots]
+    roots = set()
+    for path in paths:
+        lexical = absolute_lexical_path(path)
+        registered = next((root for root in registered_roots if lexical.is_relative_to(root)), None)
+        if registered:
+            root = registered
+        else:
+            matches = [root for root in fallbacks if lexical.is_relative_to(root)]
+            root = min(matches, key=lambda root: len(root.parts)) if matches else lexical.parent
+        if not lexical.is_relative_to(root):
+            raise SafetyError(f"registered lock root does not contain the selected lexical path: {lexical}")
+        # Include common existing row ancestors regardless of database-local
+        # root selection. Do not create future date folders just to lock them.
+        current = lexical.parent
+        while current != root.parent:
+            ensure_no_symlink_components(current)
+            if current.is_dir():
+                roots.add(current)
+            if current == root:
+                break
+            current = current.parent
+        ensure_no_symlink_components(root)
+        if not root.exists():
+            current = root.parent
+            while True:
+                ensure_no_symlink_components(current)
+                if current.exists():
+                    break
+                current = current.parent
+            roots.add(current)
+    return tuple(sorted(roots, key=str))
 
 
 def _copy_bytes_to_write(rows: list[ExecutionPlanRow]) -> int:
@@ -6805,6 +7128,7 @@ def _copy_space_reserve(required_bytes: int) -> int:
 
 
 def _ensure_copy_plan_has_free_space(plan: ExecutionPlan, rows: list[ExecutionPlanRow]) -> None:
+    _require_execution_paths(plan, rows)
     required_bytes = _copy_bytes_to_write(rows)
     if required_bytes <= 0 or plan.destination_root is None:
         return
@@ -6827,6 +7151,8 @@ def _execute_persisted_plan_unlocked(
     plan: ExecutionPlan,
     rows: list[ExecutionPlanRow],
 ) -> ExecutionPlan:
+    ensure_no_symlink_components(config.database_path)
+    _require_execution_paths(plan, rows)
     plan_id = plan.plan_id
     with session(config.database_path) as connection:
         mark_execution_plan_started(connection, plan_id)
@@ -6917,7 +7243,7 @@ def _execute_persisted_plan_unlocked(
 
             if row.status not in {"plan_copy", "planned", "failed"}:
                 audit_status = _audit_execution_row(row, row.status)
-                if audit_status.startswith("needs") or audit_status.endswith("missing"):
+                if audit_status != "destination_verified":
                     review += 1
                     review_rows.append(row)
                 if row.status.startswith("skip"):
@@ -6952,22 +7278,32 @@ def _execute_persisted_plan_unlocked(
             try:
                 if plan.destination_root is None:
                     raise SafetyError("execution plan is missing destination root")
+                expected_source = _expected_source_version(row)
+                ensure_no_symlink_components(row.source_path)
+                ensure_no_symlink_components(row.destination_path)
+                ensure_no_symlink_components(plan.destination_root)
                 if (
                     row.transfer_action == DenTransferAction.MOVE
                     and not row.source_path.exists()
                     and row.destination_path.exists()
-                    and row.destination_path.stat().st_size == row.size_bytes
+                    and _destination_matches_reviewed_payload(
+                        row.destination_path, expected_source, require_same_object=True,
+                    )
                 ):
                     status = "moved"
                 else:
                     status = (
-                        append_only_move(row.source_path, row.destination_path, plan.destination_root)
+                        append_only_move(
+                            row.source_path, row.destination_path, plan.destination_root,
+                            expected_source_version=expected_source,
+                        )
                         if row.transfer_action == DenTransferAction.MOVE
                         else append_only_copy(
                             row.source_path,
                             row.destination_path,
                             plan.destination_root,
                             progress_callback=advance_bytes,
+                            expected_source_version=expected_source,
                         )
                     )
                 audit_status = _audit_execution_row(row, status)
@@ -6975,7 +7311,7 @@ def _execute_persisted_plan_unlocked(
                     transferred += 1
                 elif status.startswith("skipped"):
                     skipped += 1
-                if audit_status.startswith("needs") or audit_status.endswith("missing"):
+                if audit_status != "destination_verified":
                     review += 1
                     review_rows.append(row)
                 with session(config.database_path) as connection:
@@ -7072,6 +7408,14 @@ def _execute_persisted_plan_unlocked(
     return finished
 
 
+def _destination_matches_reviewed_payload(
+    destination: Path, expected: dict, *, require_same_object: bool = False,
+) -> bool:
+    actual = capture_file_version(destination)
+    keys = ("sha256", "size", "ancillary", "dev", "ino") if require_same_object else ("sha256", "size", "ancillary")
+    return all(actual.get(key) == expected.get(key) for key in keys)
+
+
 def _find_store_for_destination(connection: sqlite3.Connection, path: Path) -> Store | None:
     return find_store_for_path(connection, path, StoreKind.DEN) or find_store_for_path(connection, path, StoreKind.YARD)
 
@@ -7136,7 +7480,7 @@ def den(
     dry_run: bool = typer.Option(True, "--dry-run/--commit", help="Preview before execution."),
 ) -> None:
     """Consolidate a messy RAW source into a RAWDOG folder structure."""
-    _, config = _load_or_exit()
+    _, config = _load_noncleanup_or_exit()
     _ensure_database_write_space(config)
     loaded_workflow = None
     with session(config.database_path) as connection:

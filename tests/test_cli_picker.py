@@ -1,10 +1,14 @@
 # Author: Nicholas Corrieri
 
+import json
 import os
+from contextlib import contextmanager
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from io import StringIO
 from pathlib import Path
 
+import pytest
 from rich.console import Console
 
 from rawdog import cli, metadata
@@ -18,8 +22,10 @@ from rawdog.models import (
     PlanningJobStatus,
     StoreCreate,
     StoreKind,
+    model_to_json_data,
 )
 from rawdog.planning_jobs import get_latest_planning_job, list_planning_job_items
+from rawdog.safety import SafetyError
 from rawdog.stores import StoreMediaCatalogResult, create_or_update_store
 
 
@@ -72,7 +78,7 @@ def test_home_fetch_fast_mode_preserves_layout_and_original_names(tmp_path: Path
 
     monkeypatch.setattr(cli, "_yes_no", lambda label, default=False, **kwargs: True)
     monkeypatch.setattr(cli, "_choose_source_path", lambda label: tmp_path / "source")
-    monkeypatch.setattr(cli, "_choose_store_path", lambda label, store_kind: tmp_path / "yard")
+    monkeypatch.setattr(cli, "_choose_noncleanup_store_path", lambda label, store_kind: tmp_path / "yard")
     monkeypatch.setattr(cli, "fetch", lambda **kwargs: fetch_calls.append(kwargs))
 
     cli._home_fetch_workflow()
@@ -148,7 +154,7 @@ def test_home_yard_import_uses_numbered_layout_choice(tmp_path: Path, monkeypatc
         fetch_calls.append(kwargs)
 
     monkeypatch.setattr(cli, "_choose_source_path", lambda label: tmp_path / "source")
-    monkeypatch.setattr(cli, "_choose_store_path", lambda label, store_kind: tmp_path / "yard")
+    monkeypatch.setattr(cli, "_choose_noncleanup_store_path", lambda label, store_kind: tmp_path / "yard")
     monkeypatch.setattr(cli, "_optional_prompt", lambda label: None)
     monkeypatch.setattr(cli, "_ask_with_help", fake_ask)
     monkeypatch.setattr(cli, "fetch", fake_fetch)
@@ -182,7 +188,7 @@ def test_fetch_detected_layout_requires_preview_confirmation_before_planning(tmp
     def fail_plan(*args, **kwargs):
         raise AssertionError("fetch should stop before capture-date planning")
 
-    monkeypatch.setattr(cli, "_load_or_exit", lambda: (tmp_path / "config.json", config))
+    _use_picker_config(monkeypatch, tmp_path / "config.json", config)
     monkeypatch.setattr(cli.sys, "stdin", type("FakeStdin", (), {"isatty": lambda self: True})())
     monkeypatch.setattr(cli, "_yes_no", fake_yes_no)
     monkeypatch.setattr(cli, "earliest_raw_capture_time", fail_plan)
@@ -379,7 +385,7 @@ def test_choose_audit_root_can_pick_registered_den(tmp_path: Path, monkeypatch) 
             StoreCreate(name="primary", root_path=yard_root, store_kind=StoreKind.YARD),
         )
     config = build_config(OrganizationMode.PROJECT, database_path=database)
-    monkeypatch.setattr(cli, "_load_or_exit", lambda: (tmp_path / "config.json", config))
+    _use_picker_config(monkeypatch, tmp_path / "config.json", config)
     monkeypatch.setattr(cli.Prompt, "ask", _answers("2", "1"))
 
     picked = cli._choose_audit_root("Audit")
@@ -390,7 +396,7 @@ def test_choose_audit_root_can_pick_registered_den(tmp_path: Path, monkeypatch) 
 def test_choose_source_path_requires_existing_manual_path(tmp_path: Path, monkeypatch) -> None:
     source = tmp_path / "source"
     source.mkdir()
-    monkeypatch.setattr(cli, "_known_stores", lambda store_kind: [])
+    monkeypatch.setattr(cli, "_noncleanup_known_stores", lambda store_kind: [])
     monkeypatch.setattr(cli.Prompt, "ask", _answers("0", str(tmp_path / "missing"), "0", str(source)))
 
     picked = cli._choose_source_path("Source")
@@ -403,8 +409,8 @@ def test_choose_den_destination_uses_default_and_can_create_missing_path(tmp_pat
     database = tmp_path / "rawdog.sqlite"
     initialize(database)
     config = build_config(OrganizationMode.PROJECT, archive_root=destination, database_path=database)
-    monkeypatch.setattr(cli, "_load_or_exit", lambda: (tmp_path / "config.json", config))
-    monkeypatch.setattr(cli, "_known_stores", lambda store_kind: [])
+    _use_picker_config(monkeypatch, tmp_path / "config.json", config)
+    monkeypatch.setattr(cli, "_noncleanup_known_stores", lambda store_kind: [])
     monkeypatch.setattr(cli, "_yes_no", lambda question, default=False: True)
     monkeypatch.setattr(cli.Prompt, "ask", _answers("1"))
 
@@ -428,7 +434,7 @@ def test_choose_den_destination_uses_primary_registered_den_when_init_default_mi
             StoreCreate(name="primary", root_path=den_root, store_kind=StoreKind.DEN),
         )
     config = build_config(OrganizationMode.PROJECT, database_path=database)
-    monkeypatch.setattr(cli, "_load_or_exit", lambda: (tmp_path / "config.json", config))
+    _use_picker_config(monkeypatch, tmp_path / "config.json", config)
     monkeypatch.setattr(cli.Prompt, "ask", _answers("1"))
 
     picked = cli._choose_den_destination_path("Destination")
@@ -757,7 +763,7 @@ def test_den_command_allows_registered_same_root_reflow_plan(tmp_path: Path, mon
     with session(database) as connection:
         create_or_update_store(connection, StoreCreate(name="primary", root_path=den_root, store_kind=StoreKind.DEN))
     config = build_config(OrganizationMode.PROJECT, archive_root=den_root, database_path=database)
-    monkeypatch.setattr(cli, "_load_or_exit", lambda: (tmp_path / "config.json", config))
+    _use_picker_config(monkeypatch, tmp_path / "config.json", config)
 
     cli.den(
         source=den_root,
@@ -1001,7 +1007,7 @@ def test_fetch_date_grouping_in_project_mode_uses_date_template_not_date_only(
         project_folder_template="YYYY/YYYYMMDD_PROJECT",
         yard_filename_policy=DestinationFilenamePolicy.DATE_ORIGINAL,
     )
-    monkeypatch.setattr(cli, "_load_or_exit", lambda: (tmp_path / "config.json", config))
+    _use_picker_config(monkeypatch, tmp_path / "config.json", config)
     monkeypatch.setattr(cli, "_prompt_dry_run_plan_next", lambda config, plan_id: None)
     monkeypatch.setattr(
         metadata,
@@ -1057,7 +1063,7 @@ def test_fetch_keep_existing_project_name_does_not_override_no_date_grouping(
     os.utime(raw_file, (project_ts, project_ts))
     initialize(database)
     config = build_config(OrganizationMode.PROJECT, database_path=database)
-    monkeypatch.setattr(cli, "_load_or_exit", lambda: (tmp_path / "config.json", config))
+    _use_picker_config(monkeypatch, tmp_path / "config.json", config)
     monkeypatch.setattr(cli, "_prompt_dry_run_plan_next", lambda config, plan_id: None)
     monkeypatch.setattr(
         metadata,
@@ -1360,8 +1366,8 @@ def test_choose_source_path_paginates_registered_yards(tmp_path: Path, monkeypat
             )
         yards = [store for store in cli.list_stores(connection, StoreKind.YARD) if store.name != "primary"]
     config = build_config(OrganizationMode.PROJECT, database_path=database)
-    monkeypatch.setattr(cli, "_load_or_exit", lambda: (tmp_path / "config.json", config))
-    monkeypatch.setattr(cli, "_known_stores", lambda store_kind: yards)
+    _use_picker_config(monkeypatch, tmp_path / "config.json", config)
+    monkeypatch.setattr(cli, "_noncleanup_known_stores", lambda store_kind: yards)
     monkeypatch.setattr(cli.Prompt, "ask", _answers("6", "1"))
 
     picked = cli._choose_source_path("Source")
@@ -1477,6 +1483,513 @@ def test_camera_identity_groups_ignore_date_suffixes(tmp_path: Path) -> None:
     groups = cli._camera_identity_groups([original, dated, timed, date_first])
 
     assert groups == {"LS7A0001.CR3": [original, dated, timed, date_first]}
+
+
+def _picker_alias_fixture(tmp_path, *, ancestor, broken):
+    target = tmp_path / "target" / "nested"
+    target.mkdir(parents=True)
+    payload = target / "keep.CR3"
+    payload.write_bytes(b"synthetic target")
+    alias = tmp_path / "selected"
+    live_target = target.parent if ancestor else target
+    alias.symlink_to(tmp_path / "missing-target" if broken else live_target, target_is_directory=True)
+    return alias, alias / "nested" if ancestor else alias, payload
+
+
+def _use_picker_config(monkeypatch, config_path, config):
+    config_path.write_text(json.dumps(model_to_json_data(config)), encoding="utf-8")
+    monkeypatch.setattr(cli, "default_config_path", lambda: config_path)
+
+
+@pytest.fixture
+def picker_repo_path(tmp_path):
+    repository = Path(__file__).absolute().parents[1]
+    assert tmp_path.is_relative_to(repository), "Use a qualified runner with --basetemp inside this repository."
+    return tmp_path
+
+
+def _picker_config_alias(monkeypatch, root, *, field, ancestor, broken):
+    config = build_config(OrganizationMode.PROJECT, database_path=root / "state.sqlite")
+    target = root / "target"
+    is_directory = field in {"working_root", "archive_root"}
+    if ancestor:
+        target.mkdir()
+        value = target / ("nested" if is_directory else "data.json" if field == "config" else "state.sqlite")
+    else:
+        value = target
+    if is_directory:
+        value.mkdir()
+        (value / "keep.CR3").write_bytes(b"synthetic target")
+    elif field == "database_path":
+        value.write_bytes(b"synthetic database")
+    alias = root / "selected"
+    alias.symlink_to(root / "missing-target" if broken else target,
+                     target_is_directory=ancestor or is_directory)
+    selected = alias / value.name if ancestor else alias
+    if field == "config":
+        _use_picker_config(monkeypatch, value, config)
+        monkeypatch.setattr(cli, "default_config_path", lambda: selected)
+    else:
+        _use_picker_config(monkeypatch, root / "config.json", replace(config, **{field: selected}))
+    return alias
+
+
+@pytest.mark.parametrize("field", ["config", "database_path", "working_root", "archive_root"])
+@pytest.mark.parametrize("ancestor", [False, True], ids=["leaf", "ancestor"])
+@pytest.mark.parametrize("broken", [False, True], ids=["live", "dangling"])
+def test_noncleanup_loader_refuses_configured_alias_before_initialize(
+    picker_repo_path, monkeypatch, field, ancestor, broken,
+):
+    alias = _picker_config_alias(monkeypatch, picker_repo_path, field=field, ancestor=ancestor, broken=broken)
+
+    def forbidden_initialize(*args, **kwargs):
+        raise AssertionError("database initialization began before all configured paths were validated")
+
+    monkeypatch.setattr(cli, "initialize", forbidden_initialize)
+    with _forbid_unsafe_picker_io(monkeypatch, alias):
+        with pytest.raises(SafetyError, match="symlink"):
+            cli._load_noncleanup_or_exit()
+
+
+@pytest.mark.parametrize("field", ["config", "database_path", "working_root", "archive_root"])
+@pytest.mark.parametrize("ancestor", [False, True], ids=["leaf", "ancestor"])
+@pytest.mark.parametrize("broken", [False, True], ids=["live", "dangling"])
+def test_home_menu_refuses_alias_before_reads_or_initialization(
+    picker_repo_path, monkeypatch, field, ancestor, broken,
+):
+    alias = _picker_config_alias(monkeypatch, picker_repo_path, field=field, ancestor=ancestor, broken=broken)
+
+    def forbidden_initialize(*args, **kwargs):
+        raise AssertionError("HOME initialized the database before configured alias refusal")
+
+    def forbidden_selection(*args, **kwargs):
+        raise AssertionError("HOME offered workflow selection before configured alias refusal")
+
+    monkeypatch.setattr(cli, "initialize", forbidden_initialize)
+    monkeypatch.setattr(cli, "_ask_home_choice", forbidden_selection)
+    with _forbid_unsafe_picker_io(monkeypatch, alias):
+        with pytest.raises(SafetyError, match="symlink"):
+            cli._show_home_menu()
+
+
+@pytest.mark.parametrize("configured", [False, True], ids=["first-run", "initialized"])
+def test_home_menu_keeps_first_run_and_initialized_defaults(picker_repo_path, monkeypatch, configured):
+    root = picker_repo_path
+    config_path, database = root / "config.json", root / "state.sqlite"
+    monkeypatch.setattr(cli, "default_database_path", lambda: database)
+    if configured:
+        config = build_config(OrganizationMode.PROJECT, database_path=database)
+        _use_picker_config(monkeypatch, config_path, config)
+    else:
+        monkeypatch.setattr(cli, "default_config_path", lambda: config_path)
+    initialized, defaults = [], []
+
+    def record_initialize(path):
+        initialized.append(path)
+        initialize(path)
+
+    def quit_menu(*, default):
+        defaults.append(default)
+        return "q"
+
+    monkeypatch.setattr(cli, "initialize", record_initialize)
+    monkeypatch.setattr(cli, "_ask_home_choice", quit_menu)
+    cli._show_home_menu()
+    assert defaults == ["f" if configured else "m"]
+    assert initialized == ([database] if configured else [])
+    assert database.exists() is configured
+
+
+def test_noncleanup_loader_initializes_valid_json_after_validation(picker_repo_path, monkeypatch):
+    root = picker_repo_path
+    database = root / "state.sqlite"
+    config_path = root / "config.json"
+    config = build_config(OrganizationMode.PROJECT, working_root=root / "future-yard", database_path=database)
+    _use_picker_config(monkeypatch, config_path, config)
+    initialized = []
+
+    def record_initialize(path):
+        initialized.append(path)
+        initialize(path)
+
+    monkeypatch.setattr(cli, "initialize", record_initialize)
+    loaded_path, loaded = cli._load_noncleanup_or_exit()
+    assert loaded_path == config_path
+    assert loaded == config
+    assert initialized == [database]
+    assert database.is_file()
+    assert not config.working_root.exists()
+
+
+@pytest.mark.parametrize("entry", [
+    "known-stores", "den-destination", "fetch", "den", "home-fetch", "home-import", "home-den",
+    "home-verify", "catalogue", "manual-catalogue", "post-fetch-catalogue", "sniff",
+    "den-organization", "den-reflow", "yard-reflow", "home-den-organization", "home-yard-reflow",
+])
+def test_noncleanup_entries_refuse_database_alias_through_real_loader(picker_repo_path, monkeypatch, entry):
+    root = picker_repo_path
+    source = root / "source"
+    source.mkdir()
+    alias = _picker_config_alias(monkeypatch, root, field="database_path", ancestor=True, broken=False)
+    monkeypatch.setattr(cli, "_noncleanup_standard_paths", lambda: [("Fixture", source)])
+    monkeypatch.setattr(cli, "_ask_with_help", _answers(str(source), "y", "fixture"))
+    monkeypatch.setattr(cli, "_yes_no", lambda *args, **kwargs: True)
+
+    def forbidden_initialize(*args, **kwargs):
+        raise AssertionError("entry initialized the database before alias refusal")
+
+    monkeypatch.setattr(cli, "initialize", forbidden_initialize)
+    calls = {
+        "known-stores": lambda: cli._noncleanup_known_stores(StoreKind.YARD),
+        "den-destination": lambda: cli._choose_den_destination_path("Destination"),
+        "fetch": lambda: cli.fetch(source=source, destination=source),
+        "den": lambda: cli.den(source=source, destination=source),
+        "home-fetch": cli._home_fetch_workflow,
+        "home-import": cli._home_yard_import,
+        "home-den": cli._home_den,
+        "home-verify": cli._home_verify,
+        "catalogue": lambda: cli._choose_registered_catalogue_store(StoreKind.YARD, "Catalogue"),
+        "manual-catalogue": lambda: cli._register_manual_catalogue_store("Catalogue"),
+        "post-fetch-catalogue": lambda: cli._run_post_fetch_quick_catalogue(source, source),
+        "sniff": lambda: cli.sniff(roots=[source]),
+        "den-organization": lambda: cli.den_organization(root=source),
+        "den-reflow": lambda: cli.den_reflow(root=source),
+        "yard-reflow": lambda: cli.yard_reflow(root=source),
+        "home-den-organization": cli._home_den_organization,
+        "home-yard-reflow": cli._home_yard_reflow,
+    }
+    with _forbid_unsafe_picker_io(monkeypatch, alias):
+        with pytest.raises(SafetyError, match="symlink"):
+            calls[entry]()
+
+
+@pytest.mark.parametrize("selection", ["1", "b1"], ids=["number", "browse-number"])
+@pytest.mark.parametrize("route", ["normal", "browse", "store", "den-destination"])
+def test_noncleanup_missing_suggestion_reprompts(picker_repo_path, monkeypatch, selection, route):
+    root = picker_repo_path
+    missing, available = root / "missing", root / "available"
+    available.mkdir()
+    config = build_config(OrganizationMode.PROJECT, database_path=root / "state.sqlite")
+    _use_picker_config(monkeypatch, root / "config.json", config)
+    monkeypatch.setattr(cli, "_noncleanup_known_stores", lambda kind: [])
+    monkeypatch.setattr(cli, "_noncleanup_standard_paths", lambda: [("Missing", missing), ("Available", available)])
+    prefix = ("3",) if route == "den-destination" else ()
+    suffix = () if route == "normal" else ("9",)
+    monkeypatch.setattr(cli, "_ask_with_help", _answers(*prefix, selection, "2", *suffix))
+    registered = []
+    monkeypatch.setattr(cli, "_register_or_mark_store_path", lambda path, *args: registered.append(path))
+
+    def forbidden_creation(*args, **kwargs):
+        raise AssertionError("an absent suggestion should reprompt, not offer to create it")
+
+    monkeypatch.setattr(cli, "_yes_no", forbidden_creation)
+    with _forbid_unsafe_picker_io(monkeypatch):
+        if route == "store":
+            selected = cli._choose_noncleanup_store_path("Store", StoreKind.YARD)
+        elif route == "den-destination":
+            selected = cli._choose_den_destination_path("Destination")
+        else:
+            selected = cli._choose_noncleanup_path("Path", browse_number_selection=route == "browse")
+    assert selected == available
+    assert not missing.exists()
+    assert registered == ([available] if route == "den-destination" else [])
+
+
+@pytest.mark.parametrize("selection", ["1", "b1"])
+@pytest.mark.parametrize("broken", [False, True], ids=["live", "dangling"])
+def test_noncleanup_suggested_alias_still_refuses(picker_repo_path, monkeypatch, selection, broken):
+    alias, selected, _ = _picker_alias_fixture(picker_repo_path, ancestor=True, broken=broken)
+    monkeypatch.setattr(cli, "_noncleanup_standard_paths", lambda: [("Alias", selected)])
+    monkeypatch.setattr(cli, "_ask_with_help", _answers(selection))
+    with _forbid_unsafe_picker_io(monkeypatch, alias):
+        with pytest.raises(SafetyError, match="symlink"):
+            cli._choose_noncleanup_path("Path", browse_number_selection=True)
+
+
+@contextmanager
+def _forbid_unsafe_picker_io(monkeypatch, alias=None):
+    real_stat, real_lstat = os.stat, os.lstat
+    real_resolve, real_open, real_iterdir, real_mkdir = Path.resolve, Path.open, Path.iterdir, Path.mkdir
+    target = alias.readlink() if alias is not None else None
+
+    def check(path, *, follow):
+        if alias is None or isinstance(path, int):
+            return
+        selected = Path(os.fsdecode(path))
+        if alias in selected.parents or (follow and selected == alias):
+            raise AssertionError(f"picker followed an alias before refusal: {selected}")
+        if selected == target or target in selected.parents:
+            raise AssertionError(f"picker inspected an alias target before refusal: {selected}")
+
+    def guarded_stat(path, *args, **kwargs):
+        check(path, follow=kwargs.get("follow_symlinks", True))
+        return real_stat(path, *args, **kwargs)
+
+    def guarded_lstat(path, *args, **kwargs):
+        check(path, follow=False)
+        return real_lstat(path, *args, **kwargs)
+
+    def guarded_resolve(path, *args, **kwargs):
+        check(path, follow=True)
+        return real_resolve(path, *args, **kwargs)
+
+    def guarded_open(path, *args, **kwargs):
+        check(path, follow=True)
+        return real_open(path, *args, **kwargs)
+
+    def guarded_iterdir(path, *args, **kwargs):
+        check(path, follow=True)
+        return real_iterdir(path, *args, **kwargs)
+
+    def guarded_mkdir(path, *args, **kwargs):
+        check(path, follow=True)
+        return real_mkdir(path, *args, **kwargs)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("noncleanup picker used a shared picker, volume probe, or recursive size walk")
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(os, "stat", guarded_stat)
+        scoped.setattr(os, "lstat", guarded_lstat)
+        scoped.setattr(Path, "resolve", guarded_resolve)
+        scoped.setattr(Path, "open", guarded_open)
+        scoped.setattr(Path, "iterdir", guarded_iterdir)
+        scoped.setattr(Path, "mkdir", guarded_mkdir)
+        scoped.setattr(os, "walk", forbidden)
+        scoped.setattr(Path, "rglob", forbidden)
+        for name in ("_browse_folder", "_manual_existing_directory", "_manual_destination_path",
+                     "_confirm_destination_path", "_sorted_child_folders", "_estimate_folder_size",
+                     "_standard_path_choices", "standard_path_choices", "_known_stores", "_choose_path",
+                     "_choose_store_path"):
+            scoped.setattr(cli, name, forbidden)
+        yield
+
+
+@pytest.mark.parametrize("entry", ["manual-source", "manual-destination", "browser-start", "confirmation",
+                                   "path-picker", "home-source", "home-destination"])
+@pytest.mark.parametrize("ancestor", [False, True], ids=["leaf", "ancestor"])
+@pytest.mark.parametrize("broken", [False, True], ids=["live", "dangling"])
+def test_noncleanup_picker_refuses_manual_alias_before_target_io(tmp_path, monkeypatch, entry, ancestor, broken):
+    alias, selected, payload = _picker_alias_fixture(tmp_path, ancestor=ancestor, broken=broken)
+    config = build_config(OrganizationMode.PROJECT, database_path=tmp_path / "state.sqlite")
+    _use_picker_config(monkeypatch, tmp_path / "config.json", config)
+    monkeypatch.setattr(cli, "_noncleanup_known_stores", lambda kind: [])
+    monkeypatch.setattr(cli, "_noncleanup_standard_paths", lambda: [("Fixture", tmp_path)])
+    answers = ("0", str(selected)) if entry.startswith("home-") else (str(selected),)
+    monkeypatch.setattr(cli, "_ask_with_help", _answers(*answers))
+    with _forbid_unsafe_picker_io(monkeypatch, alias):
+        with pytest.raises(SafetyError, match="symlink"):
+            if entry == "browser-start":
+                cli._noncleanup_browse_folder(selected)
+            elif entry == "confirmation":
+                cli._noncleanup_confirm_destination(selected)
+            elif entry == "path-picker":
+                cli._choose_noncleanup_path("Path")
+            elif entry == "home-source":
+                cli._choose_source_path("Source")
+            elif entry == "home-destination":
+                cli._choose_den_destination_path("Destination")
+            else:
+                cli._noncleanup_manual_path("Path", destination=entry == "manual-destination")
+    assert payload.read_bytes() == b"synthetic target"
+
+
+@pytest.mark.parametrize("directory", [False, True], ids=["file", "directory"])
+@pytest.mark.parametrize("broken", [False, True], ids=["live", "dangling"])
+def test_noncleanup_browser_refuses_child_alias_without_size_walk(tmp_path, monkeypatch, directory, broken):
+    browser = tmp_path / "browser"
+    browser.mkdir()
+    target = tmp_path / "target"
+    if directory:
+        target.mkdir()
+        payload = target / "keep.CR3"
+    else:
+        payload = target
+    payload.write_bytes(b"synthetic target")
+    alias = browser / "child"
+    alias.symlink_to(tmp_path / "missing-target" if broken else target, target_is_directory=directory)
+    with _forbid_unsafe_picker_io(monkeypatch, alias):
+        with pytest.raises(SafetyError, match="symlink"):
+            cli._noncleanup_browse_folder(browser)
+    assert payload.read_bytes() == b"synthetic target"
+
+
+def test_noncleanup_browser_sorts_by_name_without_size_reads(tmp_path, monkeypatch):
+    first, last = tmp_path / "alpha", tmp_path / "Zulu"
+    first.mkdir()
+    last.mkdir()
+    (last / "larger.CR3").write_bytes(b"synthetic payload")
+    displayed = []
+    monkeypatch.setattr(cli, "_print_folder_option", lambda index, name, size_bytes=None: displayed.append((name, size_bytes)))
+    monkeypatch.setattr(cli, "_ask_with_help", _answers("1", "9"))
+    with _forbid_unsafe_picker_io(monkeypatch):
+        selected = cli._noncleanup_browse_folder(tmp_path)
+    assert selected == first
+    assert displayed[:2] == [("alpha", None), ("Zulu", None)]
+
+
+def test_noncleanup_destination_creates_only_confirmed_leaf(tmp_path, monkeypatch):
+    destination = tmp_path / "new-yard"
+    monkeypatch.setattr(cli, "_yes_no", lambda *args, **kwargs: False)
+    with _forbid_unsafe_picker_io(monkeypatch):
+        assert cli._noncleanup_confirm_destination(destination) is None
+    assert not destination.exists()
+    monkeypatch.setattr(cli, "_yes_no", lambda *args, **kwargs: True)
+    with _forbid_unsafe_picker_io(monkeypatch):
+        assert cli._noncleanup_confirm_destination(destination) == destination
+    assert destination.is_dir()
+
+
+@pytest.mark.parametrize("registered", [False, True], ids=["configured", "registered"])
+@pytest.mark.parametrize("kind", [StoreKind.YARD, StoreKind.DEN])
+@pytest.mark.parametrize("ancestor", [False, True], ids=["leaf", "ancestor"])
+@pytest.mark.parametrize("broken", [False, True], ids=["live", "dangling"])
+def test_noncleanup_store_roots_are_gated_before_probing(tmp_path, monkeypatch, registered, kind, ancestor, broken):
+    alias, selected, payload = _picker_alias_fixture(tmp_path, ancestor=ancestor, broken=broken)
+    database = tmp_path / "state.sqlite"
+    initialize(database)
+    config = build_config(OrganizationMode.PROJECT, database_path=database)
+    if registered:
+        with session(database) as connection:
+            store = create_or_update_store(connection, StoreCreate(
+                name="primary", root_path=payload.parent, store_kind=kind,
+            ))
+            connection.execute("UPDATE stores SET root_path = ? WHERE store_id = ?", (str(selected), store.store_id))
+    else:
+        field = "working_root" if kind == StoreKind.YARD else "archive_root"
+        config = replace(config, **{field: selected})
+    _use_picker_config(monkeypatch, tmp_path / "config.json", config)
+
+    def forbidden_probe(*args, **kwargs):
+        raise AssertionError("configured store was probed before root validation")
+
+    monkeypatch.setattr(cli, "_ensure_configured_store_registered", forbidden_probe)
+    with _forbid_unsafe_picker_io(monkeypatch, alias):
+        with pytest.raises(SafetyError, match="symlink"):
+            cli._noncleanup_known_stores(kind)
+    assert payload.read_bytes() == b"synthetic target"
+
+
+@pytest.mark.parametrize("selector", ["source", "store", "destination", "catalogue"])
+def test_noncleanup_selected_registered_store_is_rechecked_before_return(tmp_path, monkeypatch, selector):
+    alias, selected, payload = _picker_alias_fixture(tmp_path, ancestor=True, broken=False)
+    database = tmp_path / "state.sqlite"
+    initialize(database)
+    with session(database) as connection:
+        store = create_or_update_store(connection, StoreCreate(
+            name="primary", root_path=payload.parent, store_kind=StoreKind.DEN,
+        ))
+    store = replace(store, root_path=selected)
+    config = build_config(OrganizationMode.PROJECT, database_path=database)
+    _use_picker_config(monkeypatch, tmp_path / "config.json", config)
+    monkeypatch.setattr(cli, "_noncleanup_known_stores", lambda kind: [store])
+    monkeypatch.setattr(cli, "_ask_with_help", _answers("1"))
+    with _forbid_unsafe_picker_io(monkeypatch, alias):
+        with pytest.raises(SafetyError, match="symlink"):
+            if selector == "source":
+                cli._choose_source_path("Source")
+            elif selector == "store":
+                cli._choose_noncleanup_store_path("Store", StoreKind.DEN)
+            elif selector == "destination":
+                cli._choose_den_destination_path("Destination")
+            else:
+                cli._choose_registered_catalogue_store(StoreKind.DEN, "Catalogue")
+
+
+@pytest.mark.parametrize("workflow", ["fetch", "import", "den", "verify"])
+@pytest.mark.parametrize("destination", [False, True], ids=["source", "destination"])
+def test_noncleanup_home_transfer_refuses_alias_before_operation(tmp_path, monkeypatch, workflow, destination):
+    alias, selected, payload = _picker_alias_fixture(tmp_path, ancestor=True, broken=False)
+    source = tmp_path / "source"
+    source.mkdir()
+    config = build_config(OrganizationMode.PROJECT, database_path=tmp_path / "state.sqlite")
+    _use_picker_config(monkeypatch, tmp_path / "config.json", config)
+    monkeypatch.setattr(cli, "_noncleanup_known_stores", lambda kind: [])
+    monkeypatch.setattr(cli, "_noncleanup_standard_paths", lambda: [("Fixture", tmp_path)])
+    monkeypatch.setattr(cli, "_yes_no", lambda *args, **kwargs: True)
+    if destination:
+        destination_answers = ("0", str(selected)) if workflow in {"den", "verify"} else (str(selected),)
+        answers = ("0", str(source), *destination_answers)
+    else:
+        answers = ("0", str(selected))
+    monkeypatch.setattr(cli, "_ask_with_help", _answers(*answers))
+
+    def forbidden_operation(*args, **kwargs):
+        raise AssertionError("operation started before picker rejected the alias")
+
+    for name in ("fetch", "den", "verify", "analyze_source_layout"):
+        monkeypatch.setattr(cli, name, forbidden_operation)
+    home = {"fetch": cli._home_fetch_workflow, "import": cli._home_yard_import,
+            "den": cli._home_den, "verify": cli._home_verify}[workflow]
+    with _forbid_unsafe_picker_io(monkeypatch, alias):
+        with pytest.raises(SafetyError, match="symlink"):
+            home()
+    assert payload.read_bytes() == b"synthetic target"
+
+
+@pytest.mark.parametrize("workflow, prefix", [
+    ("inspect", ("4", "0")),
+    ("score", ("5", "0")),
+    ("catalogue", ("1", "m")),
+    ("audit", ("6", "0")),
+    ("den-organization", ("7",)),
+    ("yard-reflow", ("8",)),
+    ("rebuild-yard", ()),
+    ("rebuild-den", ()),
+])
+def test_noncleanup_home_inspection_refuses_alias_before_scan(tmp_path, monkeypatch, workflow, prefix):
+    alias, selected, payload = _picker_alias_fixture(tmp_path, ancestor=True, broken=False)
+    monkeypatch.setattr(cli, "_noncleanup_known_stores", lambda kind: [])
+    monkeypatch.setattr(cli, "_noncleanup_standard_paths", lambda: [("Fixture", tmp_path)])
+    monkeypatch.setattr(cli, "_ask_with_help", _answers(*prefix, str(selected)))
+
+    def forbidden_operation(*args, **kwargs):
+        raise AssertionError("inspection started before picker rejected the alias")
+
+    for name in ("sniff", "score", "_run_quick_catalogue", "_run_hardcore_audit",
+                 "_run_den_organization_report", "_run_yard_reflow_plan", "_rebuild_store_catalog",
+                 "create_or_update_store", "_load_or_exit"):
+        monkeypatch.setattr(cli, name, forbidden_operation)
+    with _forbid_unsafe_picker_io(monkeypatch, alias):
+        with pytest.raises(SafetyError, match="symlink"):
+            if workflow.startswith("rebuild-"):
+                kind = StoreKind.YARD if workflow == "rebuild-yard" else StoreKind.DEN
+                cli._home_rebuild_store_catalog(kind)
+            else:
+                cli._home_inspect()
+    assert payload.read_bytes() == b"synthetic target"
+
+
+@pytest.mark.parametrize("fallback", ["source", "destination", "configured-destination"])
+def test_direct_fetch_fallback_refuses_alias_before_layout_scan(tmp_path, monkeypatch, fallback):
+    alias, selected, payload = _picker_alias_fixture(tmp_path, ancestor=True, broken=False)
+    source, destination = tmp_path / "source", tmp_path / "destination"
+    source.mkdir()
+    destination.mkdir()
+    database = tmp_path / "state.sqlite"
+    initialize(database)
+    config = build_config(OrganizationMode.PROJECT, database_path=database)
+    if fallback == "configured-destination":
+        config = replace(config, working_root=selected)
+    _use_picker_config(monkeypatch, tmp_path / "config.json", config)
+    monkeypatch.setattr(cli, "_ensure_database_write_space", lambda config: None)
+    monkeypatch.setattr(cli, "_noncleanup_standard_paths", lambda: [("Fixture", tmp_path)])
+    monkeypatch.setattr(cli, "_ask_with_help", _answers(str(selected)))
+
+    def forbidden_scan(*args, **kwargs):
+        raise AssertionError("fetch scanned media before picker rejected the alias")
+
+    monkeypatch.setattr(cli, "analyze_source_layout", forbidden_scan)
+    with _forbid_unsafe_picker_io(monkeypatch, alias):
+        with pytest.raises(SafetyError, match="symlink"):
+            cli.fetch(
+                source=None if fallback == "source" else source,
+                destination=destination if fallback == "source" else None,
+                profile=None, project_name=None, profile_name=None, naming=None,
+                filename_policy=None, collision_policy=None, verify_after_copy=None,
+                detect_sessions=False, action=cli.DenTransferAction.COPY, dry_run=True,
+            )
+    assert payload.read_bytes() == b"synthetic target"
 
 
 def _answers(*values: str):

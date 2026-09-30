@@ -387,6 +387,8 @@ class ExecutionPlanRowCreate:
     size_bytes: int
     transfer_action: DenTransferAction
     status: str
+    source_version: str | None = None
+    destination_version: str | None = None
 
 
 @dataclass(slots=True, kw_only=True)
@@ -402,6 +404,8 @@ class ExecutionPlanRow:
     executed_at: datetime | None = None
     audited_at: datetime | None = None
     error: str | None = None
+    source_version: str | None = None
+    destination_version: str | None = None
 
 
 @dataclass(slots=True, kw_only=True)

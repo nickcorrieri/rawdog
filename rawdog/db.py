@@ -158,7 +158,9 @@ def migrate(connection: sqlite3.Connection) -> None:
             audit_status TEXT,
             executed_at TEXT,
             audited_at TEXT,
-            error TEXT
+            error TEXT,
+            source_version TEXT,
+            destination_version TEXT
         );
 
         CREATE TABLE IF NOT EXISTS execution_plan_time_shift_rows (
@@ -360,6 +362,8 @@ def migrate(connection: sqlite3.Connection) -> None:
         column="use_count",
         definition="INTEGER NOT NULL DEFAULT 0",
     )
+    for column in ("source_version", "destination_version"):
+        _add_column_if_missing(connection, "execution_plan_rows", column, "TEXT")
     connection.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS projects_folder_slug_unique "
         "ON projects(folder_slug) WHERE folder_slug IS NOT NULL"
