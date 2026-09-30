@@ -1,13 +1,19 @@
 # Author: Nicholas Corrieri
 
+import hashlib
 import json
+import shutil
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+
+import rawdog.stores as stores_module
 from rawdog.db import initialize, session
 from rawdog.inventory import scan_raw_files
 from rawdog.models import StoreCreate, StoreKind
+from rawdog.safety import SafetyError
 from rawdog.stores import (
     StoreMediaCatalogEntry,
     create_or_update_store,
@@ -315,3 +321,203 @@ def test_store_migration_adds_usage_columns_to_existing_database(tmp_path: Path)
 
     assert "last_used_at" in columns
     assert "use_count" in columns
+
+
+@pytest.mark.parametrize("replacement", [b"new-data", b"different-length", b"old-data"],
+                         ids=["equal-size-replacement", "changed-size", "unchanged-observation"])
+def test_quick_catalog_clears_prior_full_evidence(tmp_path: Path, replacement: bytes) -> None:
+    database = tmp_path / "app.sqlite"
+    root = tmp_path / "yard"
+    root.mkdir()
+    media = root / "IMG_0001.CR3"
+    media.write_bytes(b"old-data")
+    initialize(database)
+    with session(database) as connection:
+        store = create_or_update_store(
+            connection, StoreCreate(name="primary", root_path=root, store_kind=StoreKind.YARD))
+    observed_date = datetime(2024, 5, 20, tzinfo=UTC)
+    full_entry = StoreMediaCatalogEntry(media, 8, observed_date, "media",
+                                         hashlib.sha256(b"old-data").hexdigest(), "old-id")
+    upsert_store_media_catalog(store, [full_entry], full=True)
+    media.write_bytes(replacement)
+    # Even a caller-supplied old digest/identifier cannot renew verification in quick mode.
+    quick_entry = StoreMediaCatalogEntry(media, len(replacement), observed_date, "filesystem",
+                                          full_entry.sha256, full_entry.media_identifier)
+    result = upsert_store_media_catalog(store, [quick_entry], full=False)
+    status = store_media_catalog_status(store, scan_raw_files(root))
+    with sqlite3.connect(store_db_path(root)) as connection:
+        row = connection.execute(
+            "SELECT size_bytes, sha256, media_identifier, full_cataloged_at, quick_cataloged_at "
+            "FROM media_catalog").fetchone()
+    assert row[:4] == (len(replacement), None, None, None)
+    assert row[4] is not None
+    assert result.quick_cataloged == 1
+    assert result.full_cataloged == 0
+    assert status.quick_cataloged_files == 1
+    assert status.full_cataloged_files == 0
+    assert media.read_bytes() == replacement
+
+
+def test_quick_catalog_insert_discards_supplied_hash_evidence(tmp_path: Path) -> None:
+    database = tmp_path / "app.sqlite"
+    root = tmp_path / "yard"
+    root.mkdir()
+    media = root / "IMG_0001.JPG"
+    media.write_bytes(b"synthetic")
+    initialize(database)
+    with session(database) as connection:
+        store = create_or_update_store(
+            connection, StoreCreate(name="primary", root_path=root, store_kind=StoreKind.YARD))
+    entry = StoreMediaCatalogEntry(media, 9, datetime(2024, 5, 20, tzinfo=UTC), "filesystem",
+                                  hashlib.sha256(b"synthetic").hexdigest(), "supplied-id")
+    result = upsert_store_media_catalog(store, [entry], full=False)
+    with sqlite3.connect(store_db_path(root)) as connection:
+        row = connection.execute(
+            "SELECT sha256, media_identifier, full_cataloged_at FROM media_catalog").fetchone()
+    assert row == (None, None, None)
+    assert result.full_cataloged == 0
+
+
+@pytest.mark.parametrize("digest", [None, ""])
+def test_full_catalog_without_hash_cannot_claim_full_verification(tmp_path: Path, digest: str | None) -> None:
+    database = tmp_path / "app.sqlite"
+    root = tmp_path / "yard"
+    root.mkdir()
+    media = root / "IMG_0001.JPG"
+    media.write_bytes(b"synthetic")
+    initialize(database)
+    with session(database) as connection:
+        store = create_or_update_store(
+            connection, StoreCreate(name="primary", root_path=root, store_kind=StoreKind.YARD))
+    entry = StoreMediaCatalogEntry(media, 9, datetime(2024, 5, 20, tzinfo=UTC), "filesystem", digest)
+    result = upsert_store_media_catalog(store, [entry], full=True)
+    status = store_media_catalog_status(store, scan_raw_files(root))
+    with sqlite3.connect(store_db_path(root)) as connection:
+        row = connection.execute("SELECT sha256, full_cataloged_at FROM media_catalog").fetchone()
+    assert row == (None, None)
+    assert result.full_cataloged == 0
+    assert status.full_cataloged_files == 0
+
+
+@pytest.mark.parametrize("original_available", [True, False], ids=["live-original", "offline-original"])
+def test_copied_portable_identity_preserves_original_and_clone(tmp_path: Path, original_available: bool) -> None:
+    database = tmp_path / "app.sqlite"
+    original_root = tmp_path / "original"
+    original_root.mkdir()
+    media = original_root / "IMG_0001.CR3"
+    media.write_bytes(b"synthetic-original")
+    initialize(database)
+    with session(database) as connection:
+        original = create_or_update_store(
+            connection, StoreCreate(name="primary", root_path=original_root, store_kind=StoreKind.DEN))
+        registrations_before = [tuple(row) for row in connection.execute("SELECT * FROM stores")]
+    clone = tmp_path / "backup"
+    shutil.copytree(original_root, clone)
+    clone_identity = store_json_path(clone).read_bytes()
+    clone_catalog = store_db_path(clone).read_bytes()
+    saved_original = original_root
+    if not original_available:
+        saved_original = tmp_path / "offline-original"
+        original_root.rename(saved_original)
+    original_identity = store_json_path(saved_original).read_bytes()
+    original_catalog = store_db_path(saved_original).read_bytes()
+
+    with session(database) as connection:
+        with pytest.raises(SafetyError, match="copied store or an unproven relocation"):
+            create_or_update_store(
+                connection, StoreCreate(name="backup", root_path=clone, store_kind=StoreKind.DEN))
+        registrations_after = [tuple(row) for row in connection.execute("SELECT * FROM stores")]
+        registered = list_stores(connection)
+    assert registrations_after == registrations_before
+    assert len(registered) == 1
+    assert registered[0].store_id == original.store_id
+    assert registered[0].root_path == original_root
+    assert store_json_path(saved_original).read_bytes() == original_identity
+    assert store_db_path(saved_original).read_bytes() == original_catalog
+    assert store_json_path(clone).read_bytes() == clone_identity
+    assert store_db_path(clone).read_bytes() == clone_catalog
+    assert (saved_original / media.name).read_bytes() == b"synthetic-original"
+    assert (clone / media.name).read_bytes() == b"synthetic-original"
+
+
+def test_portable_store_relinks_into_fresh_app_database(tmp_path: Path) -> None:
+    root = tmp_path / "original"
+    root.mkdir()
+    first_database, fresh_database = tmp_path / "first.sqlite", tmp_path / "fresh.sqlite"
+    initialize(first_database)
+    initialize(fresh_database)
+    with session(first_database) as connection:
+        original = create_or_update_store(
+            connection, StoreCreate(name="original", root_path=root, store_kind=StoreKind.YARD))
+    with session(fresh_database) as connection:
+        relinked = create_or_update_store(
+            connection, StoreCreate(name="primary", root_path=root, store_kind=StoreKind.YARD))
+    assert relinked.store_id == original.store_id
+    assert relinked.name == original.name
+    assert relinked.root_path == root
+
+
+def test_relocation_requires_explicit_forget_then_portable_relink(tmp_path: Path) -> None:
+    database = tmp_path / "app.sqlite"
+    old_root, moved_root = tmp_path / "old", tmp_path / "moved"
+    old_root.mkdir()
+    initialize(database)
+    with session(database) as connection:
+        original = create_or_update_store(
+            connection, StoreCreate(name="primary", root_path=old_root, store_kind=StoreKind.YARD))
+    old_root.rename(moved_root)
+    portable_before = store_json_path(moved_root).read_bytes()
+    with session(database) as connection:
+        with pytest.raises(SafetyError, match="unproven relocation"):
+            create_or_update_store(
+                connection, StoreCreate(name="primary", root_path=moved_root, store_kind=StoreKind.YARD))
+        assert store_json_path(moved_root).read_bytes() == portable_before
+        assert list_stores(connection)[0].root_path == old_root
+        removed = remove_store_registration(connection, original.store_id, StoreKind.YARD)
+        relinked = create_or_update_store(
+            connection, StoreCreate(name="primary", root_path=moved_root, store_kind=StoreKind.YARD))
+    assert removed is not None
+    assert relinked.store_id == original.store_id
+    assert relinked.root_path == moved_root
+
+
+def test_clone_registration_rechecks_identity_if_original_registered_after_lookup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_root, clone = tmp_path / "original", tmp_path / "clone"
+    original_root.mkdir()
+    initial_database, database = tmp_path / "initial.sqlite", tmp_path / "app.sqlite"
+    initialize(initial_database)
+    initialize(database)
+    with session(initial_database) as connection:
+        original = create_or_update_store(
+            connection, StoreCreate(name="primary", root_path=original_root, store_kind=StoreKind.DEN))
+    shutil.copytree(original_root, clone)
+    clone_identity = store_json_path(clone).read_bytes()
+    clone_catalog = store_db_path(clone).read_bytes()
+    available_name = stores_module._available_name
+    injected = False
+
+    def register_original_before_clone_write(connection, *arguments):
+        nonlocal injected
+        if not injected:
+            injected = True
+            # Force the real database interleaving after clone's identity lookup
+            # and before its write; do not fake the result of the guarded upsert.
+            create_or_update_store(
+                connection,
+                StoreCreate(name="primary", root_path=original_root, store_kind=StoreKind.DEN))
+        return available_name(connection, *arguments)
+
+    monkeypatch.setattr(stores_module, "_available_name", register_original_before_clone_write)
+    with session(database) as connection:
+        with pytest.raises(SafetyError, match="changed concurrently"):
+            create_or_update_store(
+                connection, StoreCreate(name="backup", root_path=clone, store_kind=StoreKind.DEN))
+        registered = list_stores(connection)
+    assert injected
+    assert len(registered) == 1
+    assert registered[0].store_id == original.store_id
+    assert registered[0].root_path == original_root
+    assert store_json_path(clone).read_bytes() == clone_identity
+    assert store_db_path(clone).read_bytes() == clone_catalog

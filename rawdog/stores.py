@@ -12,6 +12,7 @@ from pathlib import Path
 
 from rawdog.inventory import InventoryItem
 from rawdog.models import Store, StoreCreate, StoreFile, StoreFileStatus, StoreKind
+from rawdog.safety import SafetyError
 
 STORE_DIR = ".rawdog"
 STORE_JSON = "store.json"
@@ -87,14 +88,24 @@ def create_or_update_store(connection: sqlite3.Connection, payload: StoreCreate)
         if existing_row
         else portable_identity.get("store_id") or f"{payload.store_kind.value}_{uuid.uuid4().hex[:12]}"
     )
+    registered = connection.execute(
+        "SELECT root_path FROM stores WHERE store_id = ?", (store_id,)
+    ).fetchone()
+    if registered and registered["root_path"] != str(root_path):
+        previous_root = Path(registered["root_path"])
+        # Absence of the old path can also mean an offline original. Without a
+        # recorded storage-object identity, a new path cannot prove relocation.
+        raise SafetyError(
+            f"Store identity {store_id} is already registered at {previous_root}; "
+            f"{root_path} may be a copied store or an unproven relocation. "
+            "Registration was not changed. Review the original registration before relinking."
+        )
     name = payload.name
     if portable_identity.get("name") and payload.name.strip().lower() == "primary" and not existing_row:
         name = portable_identity["name"]
     name = _available_name(connection, payload.store_kind, name, store_id)
     now = _now()
-    _write_store_identity(root_path, store_id, name, payload.store_kind, now)
-    _initialize_store_db(root_path)
-    connection.execute(
+    cursor = connection.execute(
         """
         INSERT INTO stores (store_id, name, store_kind, root_path, created_at, updated_at, last_seen_at, notes)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -105,6 +116,7 @@ def create_or_update_store(connection: sqlite3.Connection, payload: StoreCreate)
             updated_at = excluded.updated_at,
             last_seen_at = excluded.last_seen_at,
             notes = excluded.notes
+        WHERE stores.root_path = ?
         """,
         (
             store_id,
@@ -115,8 +127,15 @@ def create_or_update_store(connection: sqlite3.Connection, payload: StoreCreate)
             now,
             now,
             payload.notes,
+            registered["root_path"] if registered else str(root_path),
         ),
     )
+    if cursor.rowcount != 1:
+        raise SafetyError(
+            f"Store identity {store_id} registration changed concurrently; registration was not changed."
+        )
+    _write_store_identity(root_path, store_id, name, payload.store_kind, now)
+    _initialize_store_db(root_path)
     row = connection.execute("SELECT * FROM stores WHERE store_id = ?", (store_id,)).fetchone()
     return row_to_store(row)
 
@@ -374,10 +393,10 @@ def upsert_store_media_catalog(
                 entry.size_bytes,
                 entry.date_created.isoformat(),
                 entry.date_type,
-                entry.sha256,
-                entry.media_identifier,
+                (entry.sha256 or None) if full else None,
+                entry.media_identifier if full else None,
                 now,
-                now if full else None,
+                now if full and entry.sha256 else None,
                 now,
                 now,
                 now,
@@ -426,6 +445,9 @@ def upsert_store_media_catalog(
                             size_bytes = excluded.size_bytes,
                             date_created = excluded.date_created,
                             date_type = excluded.date_type,
+                            sha256 = NULL,
+                            media_identifier = NULL,
+                            full_cataloged_at = NULL,
                             quick_cataloged_at = excluded.quick_cataloged_at,
                             updated_at = excluded.updated_at,
                             last_seen_at = excluded.last_seen_at
@@ -437,7 +459,7 @@ def upsert_store_media_catalog(
         scanned_files=len(entries),
         total_bytes=total_bytes,
         quick_cataloged=len(entries),
-        full_cataloged=len(entries) if full else 0,
+        full_cataloged=sum(bool(entry.sha256) for entry in entries) if full else 0,
         media_date_files=media_date_files,
         filesystem_date_files=filesystem_date_files,
     )
