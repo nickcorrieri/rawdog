@@ -1,5 +1,8 @@
 # Author: Nicholas Corrieri
 
+import errno
+import json
+import os
 from pathlib import Path
 
 import pytest
@@ -11,8 +14,10 @@ from rawdog.safety import (
     ensure_consolidation_roots,
     ensure_distinct_roots,
     ensure_import_roots,
+    open_directory,
     reject_dangerous_arguments,
 )
+from rawdog.verifier import capture_file_version, require_file_version
 
 
 def test_rejects_destructive_arguments() -> None:
@@ -80,3 +85,53 @@ def test_migration_helper_rejects_unsafe_identifiers(tmp_path: Path) -> None:
             _add_column_if_missing(connection, "projects;drop", "bad", "TEXT")
     finally:
         connection.close()
+
+
+def test_file_version_is_json_safe_and_detects_same_size_restored_mtime(tmp_path: Path) -> None:
+    source = tmp_path / "source.CR3"
+    source.write_bytes(b"original")
+    reviewed = capture_file_version(source)
+    assert json.loads(json.dumps(reviewed)) == reviewed
+    source.write_bytes(b"changed!")
+    os.utime(source, ns=(source.stat().st_atime_ns, reviewed["mtime_ns"]))
+    with pytest.raises(SafetyError, match="changed"):
+        require_file_version(source, reviewed)
+    assert source.read_bytes() == b"changed!"
+
+
+def test_file_version_rejects_parent_symlink_before_reading(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    source = outside / "source.CR3"
+    source.write_bytes(b"original")
+    alias = tmp_path / "alias"
+    alias.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(SafetyError, match="symlink"):
+        capture_file_version(alias / source.name)
+    assert source.read_bytes() == b"original"
+
+
+def test_native_directory_open_pins_selected_directory(tmp_path: Path) -> None:
+    selected = tmp_path / "selected"
+    selected.mkdir()
+    descriptor = open_directory(selected)
+    try:
+        pinned = os.fstat(descriptor)
+        observed = selected.stat()
+        assert (pinned.st_dev, pinned.st_ino) == (observed.st_dev, observed.st_ino)
+    finally:
+        os.close(descriptor)
+
+
+@pytest.mark.parametrize("alias_kind", ["selected", "ancestor"])
+def test_native_directory_open_rejects_symlinks_without_precheck(tmp_path: Path, alias_kind) -> None:
+    outside = tmp_path / "outside"
+    nested = outside / "nested"
+    nested.mkdir(parents=True)
+    alias = tmp_path / "alias"
+    alias.symlink_to(outside, target_is_directory=True)
+    selected = alias if alias_kind == "selected" else alias / "nested"
+    with pytest.raises(OSError) as caught:
+        open_directory(selected)
+    assert caught.value.errno in {errno.ELOOP, errno.ENOTDIR}
+    assert list(outside.iterdir()) == [nested]

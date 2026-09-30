@@ -19,6 +19,8 @@ from rawdog.planner import (
     default_project_destination,
     render_folder_template,
 )
+from rawdog.safety import ensure_no_symlink_components
+from rawdog.verifier import verify_same_bytes
 
 
 @dataclass(frozen=True)
@@ -92,10 +94,16 @@ def build_den_plan(
     preserve_dates_drop_parts: set[str] | None = None,
     filename_policy: DestinationFilenamePolicy = DestinationFilenamePolicy.ORIGINAL,
 ) -> DenPlan:
+    ensure_no_symlink_components(source_root)
+    ensure_no_symlink_components(destination_root)
+    for excluded in exclude_roots or []:
+        ensure_no_symlink_components(excluded)
     source_root = source_root.expanduser().resolve()
     destination_root = destination_root.expanduser().resolve()
     excluded_roots = [path.expanduser().resolve() for path in (exclude_roots or [])]
     items = scan_raw_files(source_root, exclude_roots=excluded_roots, limit=limit)
+    for item in items:
+        ensure_no_symlink_components(item.path)
     item_capture_times = capture_times([item.path for item in items])
     items = _filter_items_by_capture_date(
         items,
@@ -309,8 +317,10 @@ def _plan_row(
         size_bytes=item.size_bytes,
     )
     status = "plan_copy"
+    ensure_no_symlink_components(destination)
     if destination.exists():
-        if destination.name == item.path.name and destination.stat().st_size == item.size_bytes:
+        if (destination.name == item.path.name and destination.stat().st_size == item.size_bytes
+                and verify_same_bytes(item.path, destination)):
             status = "skip_existing_same_name_size"
         else:
             status = "collision"

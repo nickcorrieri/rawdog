@@ -62,3 +62,13 @@ def test_plan_append_only_copy_reports_size_mismatch(tmp_path) -> None:
 
     assert plan is not None
     assert plan.reason == "collision_size_mismatch"
+
+
+def test_plan_append_only_copy_rejects_equal_size_distinct_bytes(tmp_path) -> None:
+    source = tmp_path / "source.CR3"
+    destination = tmp_path / "destination.CR3"
+    source.write_bytes(b"original")
+    destination.write_bytes(b"changed!")
+    plan = plan_append_only_copy(source, destination)
+    assert plan is not None
+    assert plan.reason == "collision_content_mismatch"

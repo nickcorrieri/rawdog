@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 from rawdog.metadata import capture_times, is_camera_capture_file
+from rawdog.safety import ensure_no_symlink_components
 
 DEFAULT_SKIPPED_DIRS = {
     ".DocumentRevisions-V100",
@@ -37,6 +38,9 @@ def scan_raw_files(
     on_item: Callable[[InventoryItem], None] | None = None,
     on_progress: Callable[[Path, int, int], None] | None = None,
 ) -> list[InventoryItem]:
+    ensure_no_symlink_components(root)
+    for excluded in exclude_roots or []:
+        ensure_no_symlink_components(excluded)
     root = root.expanduser().resolve()
     resolved_excludes = tuple(path.expanduser().resolve() for path in (exclude_roots or []))
     items: list[InventoryItem] = []
@@ -45,6 +49,8 @@ def scan_raw_files(
         current_path = Path(current_root)
         if on_progress is not None:
             on_progress(current_path, scanned_entries, len(items))
+        for dirname in dirnames:
+            ensure_no_symlink_components(current_path / dirname)
         dirnames[:] = sorted(
             dirname
             for dirname in dirnames
@@ -55,6 +61,7 @@ def scan_raw_files(
             if filename.startswith("._"):
                 continue
             path = current_path / filename
+            ensure_no_symlink_components(path)
             scanned_entries += 1
             if on_progress is not None and scanned_entries % 100 == 0:
                 on_progress(path, scanned_entries, len(items))

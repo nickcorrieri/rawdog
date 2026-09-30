@@ -8,6 +8,8 @@ from datetime import datetime
 from pathlib import Path
 
 from rawdog.models import Project
+from rawdog.safety import ensure_no_symlink_components
+from rawdog.verifier import verify_same_bytes
 
 
 class TemplateError(ValueError):
@@ -65,6 +67,7 @@ def default_project_destination(
     earliest_capture_at: datetime,
     template: str = "YYYY/YYYYMMDD_PROJECT",
 ) -> Path:
+    ensure_no_symlink_components(destination_root)
     return destination_root / render_folder_template(
         template,
         earliest_capture_at,
@@ -77,18 +80,22 @@ def default_date_only_destination(
     captured_at: datetime,
     template: str = "YYYY/YYYY-MM",
 ) -> Path:
+    ensure_no_symlink_components(destination_root)
     return destination_root / render_folder_template(template, captured_at)
 
 
 def plan_append_only_copy(source_path: Path, destination_path: Path) -> PlannedCopy | None:
+    ensure_no_symlink_components(source_path)
+    ensure_no_symlink_components(destination_path)
     if destination_path.exists():
         source_stat = source_path.stat()
         destination_stat = destination_path.stat()
-        if source_stat.st_size == destination_stat.st_size:
+        if source_stat.st_size == destination_stat.st_size and verify_same_bytes(source_path, destination_path):
             return None
         return PlannedCopy(
             source_path=source_path,
             destination_path=destination_path,
-            reason="collision_size_mismatch",
+            reason=("collision_size_mismatch" if source_stat.st_size != destination_stat.st_size
+                    else "collision_content_mismatch"),
         )
     return PlannedCopy(source_path=source_path, destination_path=destination_path, reason="missing")

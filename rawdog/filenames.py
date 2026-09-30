@@ -11,6 +11,7 @@ from pathlib import Path
 
 from rawdog.models import DestinationFilenamePolicy
 from rawdog.planner import slug_folder_name
+from rawdog.safety import ensure_no_symlink_components
 
 CAPTURE_PREFIX_RE = re.compile(r"^(?:19|20)\d{6}-\d{6}-\d{1,9}__")
 IDENTITY_PREFIX_RE = re.compile(r"^(?:H[0-9a-fA-F]{8,16}|U[0-9a-fA-F]{8,32})__")
@@ -34,13 +35,17 @@ def destination_path_for_filename_policy(
     reserved_destinations: set[Path],
     size_bytes: int,
 ) -> Path:
+    ensure_no_symlink_components(destination_dir)
     if policy == DestinationFilenamePolicy.ORIGINAL:
-        return destination_dir / source_path.name
+        candidate = destination_dir / source_path.name
+        ensure_no_symlink_components(candidate)
+        return candidate
 
     candidates = _policy_candidates(source_path, captured_at, policy)
     last_candidate = destination_dir / candidates[-1]
     for candidate_name in candidates:
         candidate = destination_dir / candidate_name
+        ensure_no_symlink_components(candidate)
         if candidate in reserved_destinations:
             continue
         if not candidate.exists():
@@ -50,6 +55,7 @@ def destination_path_for_filename_policy(
 
     for index in range(2, 1000):
         candidate = last_candidate.with_name(f"{last_candidate.stem}__{index:02d}{last_candidate.suffix}")
+        ensure_no_symlink_components(candidate)
         if candidate not in reserved_destinations and not candidate.exists():
             return candidate
     return last_candidate

@@ -4,9 +4,12 @@ import os
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+
 from rawdog import metadata
 from rawdog.inventory import earliest_raw_capture_time, scan_raw_files
 from rawdog.metadata import is_camera_capture_file, is_raw_file
+from rawdog.safety import SafetyError
 
 
 def test_scan_raw_files_ignores_partial_artifacts(tmp_path: Path) -> None:
@@ -132,3 +135,27 @@ def test_earliest_raw_capture_time_prefers_media_capture_date_for_recovered_cr3(
     captured_at = earliest_raw_capture_time(tmp_path)
 
     assert captured_at == datetime(2026, 5, 28, 13, 40, tzinfo=UTC)
+
+
+@pytest.mark.parametrize("alias_kind", ["selected-root", "file", "directory"])
+def test_scan_refuses_symlinks_before_collecting_outside_media(tmp_path: Path, alias_kind) -> None:
+    selected = tmp_path / "selected"
+    outside = tmp_path / "outside"
+    selected.mkdir()
+    outside.mkdir()
+    original = outside / "IMG_0001.CR3"
+    original.write_bytes(b"outside synthetic original")
+    if alias_kind == "file":
+        (selected / original.name).symlink_to(original)
+        root = selected
+    elif alias_kind == "directory":
+        (selected / "alias").symlink_to(outside, target_is_directory=True)
+        root = selected
+    else:
+        root = tmp_path / "alias"
+        root.symlink_to(outside, target_is_directory=True)
+    collected = []
+    with pytest.raises(SafetyError, match="symlink"):
+        scan_raw_files(root, on_item=collected.append)
+    assert collected == []
+    assert original.read_bytes() == b"outside synthetic original"

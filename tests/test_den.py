@@ -4,11 +4,15 @@ import os
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+
+import rawdog.den as den_module
 from rawdog import metadata
 from rawdog.den import build_den_plan, score_items, summarize_by_year
 from rawdog.inventory import scan_raw_files
 from rawdog.metadata import capture_time_fallback
 from rawdog.models import DenLayoutMode, DenTransferAction
+from rawdog.safety import SafetyError
 
 
 def test_build_den_plan_for_date_destination(tmp_path: Path) -> None:
@@ -414,3 +418,75 @@ def test_score_items_counts_raw_files(tmp_path: Path) -> None:
 
     assert score.file_count == 1
     assert score.score == 100
+
+
+@pytest.mark.parametrize("aliased_role", ["source", "destination"])
+def test_den_rejects_selected_root_alias_before_resolution(tmp_path: Path, aliased_role) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "archive"
+    source.mkdir()
+    destination.mkdir()
+    original = source / "IMG_0001.CR3"
+    original.write_bytes(b"original")
+    alias = tmp_path / "alias"
+    alias.symlink_to(source if aliased_role == "source" else destination, target_is_directory=True)
+    with pytest.raises(SafetyError, match="symlink"):
+        build_den_plan(alias if aliased_role == "source" else source,
+                       alias if aliased_role == "destination" else destination)
+    assert original.read_bytes() == b"original"
+    assert list(destination.iterdir()) == []
+
+
+@pytest.mark.parametrize("alias_kind", ["leaf", "parent", "broken-leaf", "broken-parent"])
+def test_den_refuses_destination_alias_before_target_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, alias_kind: str,
+) -> None:
+    source_root = tmp_path / "source"
+    archive = tmp_path / "archive"
+    source = source_root / "nested" / "IMG_0001.CR3"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"original")
+    archive.mkdir()
+    destination = archive / "nested" / source.name
+    target_dir = tmp_path / "targets"
+    target = target_dir / source.name
+    broken = alias_kind.startswith("broken-")
+    if not broken:
+        target_dir.mkdir()
+        target.write_bytes(b"foreign!")
+    if alias_kind.endswith("parent"):
+        destination.parent.symlink_to(target_dir, target_is_directory=True)
+    else:
+        destination.parent.mkdir()
+        destination.symlink_to(target)
+
+    real_stat, real_open = os.stat, Path.open
+    guarded_paths = {destination, target}
+
+    def refuse_target_stat(path, *args, **kwargs):
+        if (not isinstance(path, int) and Path(path) in guarded_paths
+                and kwargs.get("follow_symlinks", True)):
+            raise AssertionError("planning followed the destination alias for metadata")
+        return real_stat(path, *args, **kwargs)
+
+    def refuse_target_open(path, *args, **kwargs):
+        if path in guarded_paths:
+            raise AssertionError("planning opened the destination alias or target")
+        return real_open(path, *args, **kwargs)
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(os, "stat", refuse_target_stat)
+        scoped.setattr(Path, "open", refuse_target_open)
+        scoped.setattr(den_module, "capture_times", lambda paths: {
+            path: datetime(2025, 4, 12, tzinfo=UTC) for path in paths
+        })
+        # Isolate den's final metadata gate from the filename chooser's own gate.
+        scoped.setattr(den_module, "destination_path_for_filename_policy", lambda *args, **kwargs: destination)
+        with pytest.raises(SafetyError, match="symlink"):
+            build_den_plan(source_root, archive)
+
+    assert source.read_bytes() == b"original"
+    if broken:
+        assert not target.exists()
+    else:
+        assert target.read_bytes() == b"foreign!"
