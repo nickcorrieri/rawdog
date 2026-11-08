@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import errno
+import hashlib
 import os
 import stat
 import sys
@@ -30,6 +31,10 @@ from rawdog.verifier import (
     require_file_version,
     set_ancillary_payloads,
 )
+
+_PARTIAL_PREFIX = ".rawdog-"
+_PARTIAL_SUFFIX = ".partial"
+_TOKEN_LENGTH = 16
 
 
 def append_only_copy(
@@ -58,7 +63,7 @@ def append_only_copy(
     if dry_run:
         return "planned"
 
-    if os.path.lexists(destination.with_name(destination.name + ".partial")):
+    if _has_existing_partial(destination):
         return "skipped_existing_partial"
     root_descriptor = open_directory(archive_root)
     parent_descriptor = None
@@ -72,7 +77,7 @@ def append_only_copy(
             require_directory_path(archive_root, root_descriptor)
             parent_descriptor = open_directory(destination.parent)
             date_directories = _open_created_date_dirs(created_dirs)
-            partial = destination.with_name(f".rawdog-{uuid.uuid4().hex}.partial")
+            partial = destination.with_name(_partial_name(destination))
             partial_descriptor = os.open(partial.name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                                          0o600, dir_fd=parent_descriptor)
             _copy2_with_progress(source, partial, progress_callback=progress_callback,
@@ -108,6 +113,52 @@ def append_only_copy(
             os.close(descriptor)
         os.close(root_descriptor)
     return "copied"
+
+
+def _destination_token(destination_name: str) -> str:
+    """Fixed-length stand-in for the destination name, so the partial name never exceeds NAME_MAX."""
+    return hashlib.sha256(destination_name.encode("utf-8", "surrogateescape")).hexdigest()[:_TOKEN_LENGTH]
+
+
+def _partial_name(destination: Path) -> str:
+    """Name the in-progress copy after its destination so a retained one stays attributable.
+
+    The result is always ``.rawdog-<16 hex>.<32 hex>.partial`` (65 characters), whatever the
+    destination name's length.
+    """
+    return f"{_PARTIAL_PREFIX}{_destination_token(destination.name)}.{uuid.uuid4().hex}{_PARTIAL_SUFFIX}"
+
+
+def _has_existing_partial(destination: Path) -> bool:
+    """Report a legacy ``<name>.partial`` or a retained ``.rawdog-<name>.<id>.partial`` beside the destination.
+
+    Failed copies deliberately leave their partial in place (see the ``finally`` block in
+    ``append_only_copy``), so this is the only point where such an orphan is noticed. Any
+    entry with a matching name counts, including a dangling symlink; a missing parent
+    directory means "no partial". The directory handles opened afterwards re-verify the
+    path without following links before anything is written.
+    """
+    if os.path.lexists(destination.with_name(destination.name + _PARTIAL_SUFFIX)):
+        return True
+    try:
+        with os.scandir(destination.parent) as entries:
+            return any(_is_owned_partial_for(entry.name, destination.name) for entry in entries)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+
+
+def _is_owned_partial_for(entry_name: str, destination_name: str) -> bool:
+    """Exact match for ``.rawdog-<token of destination_name>.<32 hex>.partial``."""
+    if not (entry_name.startswith(_PARTIAL_PREFIX) and entry_name.endswith(_PARTIAL_SUFFIX)):
+        return False
+    middle = entry_name[len(_PARTIAL_PREFIX):len(entry_name) - len(_PARTIAL_SUFFIX)]
+    stem, separator, token = middle.rpartition(".")
+    return (
+        bool(separator)
+        and stem == _destination_token(destination_name)
+        and len(token) == 32
+        and all(character in "0123456789abcdef" for character in token)
+    )
 
 
 def _copy2_with_progress(

@@ -10,7 +10,14 @@ import pytest
 import rawdog.copier as copier
 from rawdog.copier import append_only_copy, append_only_move
 from rawdog.safety import SafetyError
-from rawdog.verifier import capture_file_version, read_ancillary_payloads, set_ancillary_payloads
+from rawdog.verifier import (
+    capture_file_version,
+    compare_file_identity,
+    read_ancillary_payloads,
+    set_ancillary_payloads,
+    verify_same_bytes,
+    verify_same_payload,
+)
 
 
 def test_append_only_copy_dry_run_creates_no_files(tmp_path: Path) -> None:
@@ -182,6 +189,69 @@ def test_append_only_copy_preserves_unowned_matching_partial(tmp_path: Path) -> 
     assert destination.with_name(destination.name + ".partial").read_bytes() == b"video"
 
 
+def test_append_only_copy_reports_retained_owned_partial_for_same_destination(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.CR3"
+    destination = tmp_path / "archive" / "source.CR3"
+    source.write_bytes(b"raw")
+    destination.parent.mkdir()
+
+    def fail_copy(source_path: Path, partial_path: Path, **kwargs) -> None:
+        partial_path.write_bytes(b"part")
+        raise OSError("copy failed")
+
+    monkeypatch.setattr(copier, "_copy2_with_progress", fail_copy)
+    with pytest.raises(OSError):
+        append_only_copy(source, destination, tmp_path / "archive")
+    retained = list(destination.parent.glob(".rawdog-*.partial"))
+    assert len(retained) == 1
+    assert copier._is_owned_partial_for(retained[0].name, destination.name)
+    monkeypatch.undo()
+
+    # The retry must notice the orphan it left behind instead of silently creating another.
+    status = append_only_copy(source, destination, tmp_path / "archive")
+
+    assert status == "skipped_existing_partial"
+    assert not destination.exists()
+    assert list(destination.parent.glob(".rawdog-*.partial")) == retained
+    assert retained[0].read_bytes() == b"part"
+
+
+@pytest.mark.parametrize("other_name", ["other.CR3", "IMG_0001", "IMG_0001.CR3.bak"])
+def test_append_only_copy_ignores_retained_partial_of_other_destination(tmp_path: Path, other_name: str) -> None:
+    source = tmp_path / "IMG_0001.CR3"
+    destination = tmp_path / "archive" / "IMG_0001.CR3"
+    source.write_bytes(b"raw")
+    destination.parent.mkdir()
+    # A well-formed partial that RAWdog itself would have created for a neighbouring destination.
+    orphan = destination.parent / copier._partial_name(destination.with_name(other_name))
+    assert copier._is_owned_partial_for(orphan.name, other_name)
+    assert not copier._is_owned_partial_for(orphan.name, destination.name)
+    orphan.write_bytes(b"orphan")
+
+    status = append_only_copy(source, destination, tmp_path / "archive")
+
+    assert status == "copied"
+    assert destination.read_bytes() == b"raw"
+    assert orphan.read_bytes() == b"orphan"
+
+
+def test_partial_name_is_bounded_and_attributable() -> None:
+    short = Path("/archive/a")
+    long_name = Path("/archive/" + "x" * 250 + ".CR3")
+    for destination in (short, long_name):
+        name = copier._partial_name(destination)
+        assert len(name) == 65
+        assert copier._is_owned_partial_for(name, destination.name)
+    assert not copier._is_owned_partial_for(copier._partial_name(short), long_name.name)
+    # Legacy spelling and the old uuid-only spelling are not attributable through this matcher.
+    assert not copier._is_owned_partial_for("IMG_0001.CR3.partial", "IMG_0001.CR3")
+    assert not copier._is_owned_partial_for(f".rawdog-{'a' * 32}.partial", "IMG_0001.CR3")
+    assert not copier._is_owned_partial_for(f".rawdog-{copier._destination_token('a')}.0123abcd.partial", "a")
+
+
 def test_append_only_copy_verifies_bytes_before_final_rename(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -342,7 +412,32 @@ def test_copy_preserves_synthetic_extended_payload(tmp_path: Path) -> None:
         os.close(descriptor)
 
 
-def test_identical_primary_bytes_with_different_ancillary_are_collision(tmp_path: Path) -> None:
+def test_file_identity_separates_primary_bytes_from_ancillary_payload(tmp_path: Path) -> None:
+    left = tmp_path / "left.CR3"
+    right = tmp_path / "right.CR3"
+    left.write_bytes(b"original")
+    right.write_bytes(b"original")
+    assert compare_file_identity(left, right) == compare_file_identity(right, left)
+    assert verify_same_bytes(left, right) and verify_same_payload(left, right)
+
+    descriptor = os.open(left, os.O_RDONLY)
+    try:
+        set_ancillary_payloads(descriptor, {"user.rawdog.synthetic": b"left only"})
+    finally:
+        os.close(descriptor)
+    identity = compare_file_identity(left, right)
+    assert identity.same_bytes and not identity.same_ancillary and not identity.same_payload
+    assert verify_same_bytes(left, right) and not verify_same_payload(left, right)
+
+    right.write_bytes(b"distinct")
+    identity = compare_file_identity(left, right)
+    assert not identity.same_bytes and not identity.same_payload
+    assert not verify_same_bytes(left, right)
+
+
+def test_identical_primary_bytes_with_different_ancillary_skip_as_existing(tmp_path: Path) -> None:
+    # Extended attributes differ routinely between an exFAT card and an APFS archive.
+    # The image is already present, so this is a skip, not a collision. Nothing is written.
     source = tmp_path / "source.CR3"
     destination = tmp_path / "archive" / source.name
     source.write_bytes(b"original")
@@ -353,7 +448,9 @@ def test_identical_primary_bytes_with_different_ancillary_are_collision(tmp_path
         set_ancillary_payloads(descriptor, {"user.rawdog.synthetic": b"unique source payload"})
     finally:
         os.close(descriptor)
-    assert append_only_copy(source, destination, destination.parent) == "skipped_collision"
+    destination_before = capture_file_version(destination)
+    assert append_only_copy(source, destination, destination.parent) == "skipped_existing_same_name_size"
+    assert capture_file_version(destination) == destination_before
     descriptor = os.open(source, os.O_RDONLY)
     try:
         assert read_ancillary_payloads(descriptor)["user.rawdog.synthetic"] == b"unique source payload"

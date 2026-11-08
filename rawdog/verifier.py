@@ -7,7 +7,9 @@ import hashlib
 import os
 import stat
 import sys
+from collections.abc import Callable
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 from rawdog.safety import (
@@ -23,14 +25,49 @@ def sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
     return capture_file_version(path, chunk_size=chunk_size)["sha256"]
 
 
-def verify_same_bytes(source: Path, destination: Path) -> bool:
+@dataclass(frozen=True)
+class FileIdentity:
+    """Outcome of comparing two files' content identity.
+
+    ``same_bytes`` is the primary data-stream identity (size and SHA-256) and is what
+    "the same photo is already there" means. ``same_ancillary`` compares extended
+    attributes, which differ routinely between filesystems (an exFAT card and an APFS
+    archive, Finder tags, quarantine flags) without the image bytes differing.
+    """
+
+    same_bytes: bool
+    same_ancillary: bool
+
+    @property
+    def same_payload(self) -> bool:
+        return self.same_bytes and self.same_ancillary
+
+
+def compare_file_identity(source: Path, destination: Path) -> FileIdentity:
     left = capture_file_version(source)
     right = capture_file_version(destination)
     require_file_version(source, left)
     require_file_version(destination, right)
-    return (left["size"], left["sha256"], left["ancillary"]) == (
-        right["size"], right["sha256"], right["ancillary"],
+    return FileIdentity(
+        same_bytes=(left["size"], left["sha256"]) == (right["size"], right["sha256"]),
+        same_ancillary=left["ancillary"] == right["ancillary"],
     )
+
+
+def verify_same_bytes(source: Path, destination: Path) -> bool:
+    """True when both files hold the same primary bytes (size and SHA-256).
+
+    Extended attributes are deliberately not part of this test: planning, copy skips and
+    collision detection ask whether the image is already present, not whether every
+    filesystem-side annotation travelled with it. Deletion paths that must prove nothing
+    unique is lost use ``verify_same_payload`` instead.
+    """
+    return compare_file_identity(source, destination).same_bytes
+
+
+def verify_same_payload(source: Path, destination: Path) -> bool:
+    """True only when primary bytes and every extended attribute match."""
+    return compare_file_identity(source, destination).same_payload
 
 
 @contextmanager
@@ -125,7 +162,12 @@ def _ancillary_digests(descriptor: int) -> dict:
             for name, value in read_ancillary_payloads(descriptor).items()}
 
 
-def capture_open_file_version(descriptor: int, *, chunk_size: int = 1024 * 1024) -> dict:
+def capture_open_file_version(
+    descriptor: int,
+    *,
+    chunk_size: int = 1024 * 1024,
+    progress_callback: Callable[[int], None] | None = None,
+) -> dict:
     """Hash a held regular-file descriptor and detect mutation across the read."""
     before = _stat_version(os.fstat(descriptor))
     ancillary = _ancillary_digests(descriptor)
@@ -135,15 +177,22 @@ def capture_open_file_version(descriptor: int, *, chunk_size: int = 1024 * 1024)
         raise ValueError("hash chunk size must be positive")
     while chunk := os.read(descriptor, chunk_size):
         digest.update(chunk)
+        if progress_callback is not None:
+            progress_callback(len(chunk))
     after = _stat_version(os.fstat(descriptor))
     if before != after or ancillary != _ancillary_digests(descriptor):
         raise SafetyError("file changed while its content identity was being read")
     return {**after, "sha256": digest.hexdigest(), "ancillary": ancillary}
 
 
-def capture_file_version(path: Path, *, chunk_size: int = 1024 * 1024) -> dict:
+def capture_file_version(
+    path: Path,
+    *,
+    chunk_size: int = 1024 * 1024,
+    progress_callback: Callable[[int], None] | None = None,
+) -> dict:
     with open_regular_file(path) as descriptor:
-        return capture_open_file_version(descriptor, chunk_size=chunk_size)
+        return capture_open_file_version(descriptor, chunk_size=chunk_size, progress_callback=progress_callback)
 
 
 def require_file_version(path: Path, expected: dict) -> None:

@@ -454,9 +454,11 @@ operator can decide whether to run now or leave the plan queued.
 
 For same-drive consolidation, `--action move` uses an atomic filesystem rename
 and usually preserves Finder Created date because the original file record moves.
-For copy mode, RAWdog copies to `.partial`, renames into place, then immediately
-attempts to preserve macOS Finder Created date on that completed destination file
-before continuing to the next file. This is best-effort because creation time is
+For copy mode, RAWdog copies to a hidden `.rawdog-<destination token>.<id>.partial`
+file in the destination folder, copies extended attributes and the macOS Finder
+Created date onto that partial, verifies its bytes against the source, then
+renames it into place with an exclusive rename that can never replace an
+existing file. This is best-effort because creation time is
 filesystem-specific; RAWdog still preserves modified time and records the source,
 destination, and capture-date-derived plan in its database and manifest.
 
@@ -485,10 +487,10 @@ rawdog plans force-move-duplicates 33 --commit
 
 RAWdog does not shell out to hidden `cp`, `mv`, or `rm` commands for plan
 execution. It writes an operation manifest for each persisted plan showing the
-Python filesystem APIs it will use, such as `Path.mkdir`, Python file copy,
-`shutil.copystat`, `os.rename`, and macOS `setattrlist` best-effort metadata
-preservation, plus the source, destination, partial path, and safety rule for
-each row. Commit and resume prompts require `COMMIT PLAN <id>` after this review.
+Python filesystem APIs it will use, such as `Path.mkdir`, descriptor-based file
+copy, extended-attribute copy, exclusive no-replace rename (`renameatx_np`), and
+macOS `setattrlist` best-effort metadata preservation, plus the source,
+destination, partial path, and safety rule for each row. Commit and resume prompts require `COMMIT PLAN <id>` after this review.
 
 While a plan is executing, RAWdog writes an `active-run.json` marker beside the
 local SQLite database. `rawdog status` and `rawdog plans active` show that active
@@ -515,14 +517,28 @@ With no arguments, `rawdog wings` attaches to the current active RAWdog run if
 one exists. Locking the screen is fine; sleeping, logging out, unplugging drives,
 or disconnecting docks is not.
 
-`.partial` files are temporary transfer artifacts created only under the
-destination root during copy. They are not original RAW/camera video files, are ignored during
-source inventory, and are never merged into archive state. A stale `.partial`
-blocks that destination row unless it SHA-256 verifies as the exact source bytes;
-verified partials are promoted to the final destination path. RAWdog does not
-auto-delete non-matching pre-existing `.partial` files. If RAWdog creates a
-`.partial` during the current copy attempt and that copy fails, it removes that
-current-run artifact before raising the error.
+`.rawdog-<destination token>.<id>.partial` files are temporary transfer artifacts
+created only under the destination root during copy. The token is a fixed-length
+digest of the destination filename, so the partial name stays within filename
+limits whatever the destination is called. They are not original RAW/camera video
+files, are ignored during source inventory, and are never merged into archive
+state. If a copy fails after its partial was created, RAWdog deliberately leaves
+that partial in place rather than deleting by pathname, because the name could by
+then belong to another writer. The next attempt to copy to the same destination
+reports `skipped_existing_partial` (shown as "needs partial review") when a
+retained partial for that destination, or a legacy `<name>.partial`, is present.
+RAWdog never deletes or promotes pre-existing partials; review and remove them by
+hand.
+
+Duplicate detection compares size and SHA-256 of the file's primary bytes. Extended
+attributes (Finder tags, quarantine flags, metadata an exFAT card cannot store) are
+copied along with the file but do not make two otherwise identical files a
+collision. The exception is deletion, where equal bytes are not enough:
+`plans force-move-duplicates` rejects a source whose extended attributes differ
+from the destination and re-proves both files' reviewed versions immediately
+before removing anything, `junkyard-scrap --hash-check` refuses to remove a yard
+file whose extended attributes differ from its den copy, and `junkyard
+--hash-check` leaves such files out of the report and counts them separately.
 
 ## Development
 

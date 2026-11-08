@@ -11,6 +11,7 @@ import pytest
 from rawdog import cli
 from rawdog.config import build_config
 from rawdog.db import initialize, session
+from rawdog.den import build_den_plan
 from rawdog.execution import (
     add_execution_plan_rows,
     add_execution_plan_time_shift_rows,
@@ -305,7 +306,8 @@ def _synthetic_reflow(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("difference", ["bytes", "ancillary", "none"])
-def test_reflow_preview_requires_matching_payload_not_just_size(tmp_path, monkeypatch, difference):
+def test_reflow_preview_requires_matching_bytes_not_just_size(tmp_path, monkeypatch, difference):
+    # Only the primary bytes decide identity; an ancillary-only difference is still "already there".
     root, source, destination = _synthetic_reflow(tmp_path, monkeypatch)
     if difference == "bytes":
         destination.write_bytes(b"distinct")
@@ -319,7 +321,7 @@ def test_reflow_preview_requires_matching_payload_not_just_size(tmp_path, monkey
     plan = cli._build_den_reflow_plan(root, group_by=DateGroupMode.MONTH, keep_context=False, drop_context=set())
     assert len(plan.rows) == 1
     assert plan.rows[0].destination_path == destination
-    assert plan.rows[0].status == ("skip_existing_same_name_size" if difference == "none" else "collision")
+    assert plan.rows[0].status == ("collision" if difference == "bytes" else "skip_existing_same_name_size")
     assert capture_file_version(source) == source_before
     assert capture_file_version(destination) == destination_before
 
@@ -850,6 +852,104 @@ def test_force_move_duplicates_removes_only_sha_verified_sources(tmp_path: Path,
         rows = list_execution_plan_rows(connection, plan.plan_id)
     assert rows[0].status == "source_removed_verified_duplicate"
     assert rows[0].audit_status == "source_removed_after_sha256_match"
+
+
+def test_force_move_duplicates_rejects_source_with_unique_ancillary_payload(tmp_path: Path, monkeypatch) -> None:
+    # Equal image bytes are not enough to delete: the source carries an extended attribute
+    # (think resource fork or Finder tag) that the den copy lacks. The MOVE plan is built by
+    # the real planner, which now classifies this pair as an existing duplicate.
+    database = tmp_path / "rawdog.sqlite"
+    source_root = tmp_path / "source"
+    destination_root = tmp_path / "den"
+    source = source_root / "IMG_0001.CR3"
+    destination = destination_root / "IMG_0001.CR3"
+    source.parent.mkdir(parents=True)
+    destination.parent.mkdir(parents=True)
+    source.write_bytes(b"same bytes")
+    destination.write_bytes(b"same bytes")
+    descriptor = os.open(source, os.O_RDONLY)
+    try:
+        set_ancillary_payloads(descriptor, {"user.rawdog.synthetic": b"source-only payload"})
+    finally:
+        os.close(descriptor)
+    source_before, destination_before = capture_file_version(source), capture_file_version(destination)
+    initialize(database)
+    config = build_config(OrganizationMode.PROJECT, database_path=database)
+    monkeypatch.setattr(cli, "_ensure_database_write_space", lambda *args, **kwargs: None)
+    den_plan = build_den_plan(source_root, destination_root, transfer_action=DenTransferAction.MOVE)
+    assert [row.status for row in den_plan.rows] == ["skip_existing_same_name_size"]
+    assert den_plan.rows[0].destination_path == destination
+    plan = cli._persist_den_execution_plan(config, den_plan)
+    monkeypatch.setattr(cli, "_load_or_exit", lambda: (tmp_path / "config.json", config))
+    monkeypatch.setattr(cli.Prompt, "ask", lambda *args, **kwargs: f"FORCE MOVE DUPLICATES PLAN {plan.plan_id}")
+
+    cli.plans_force_move_duplicates(plan.plan_id, limit=10, dry_run=False, confirm_each=False)
+
+    assert capture_file_version(source) == source_before
+    assert capture_file_version(destination) == destination_before
+    with session(database) as connection:
+        rows = list_execution_plan_rows(connection, plan.plan_id)
+    assert rows[0].status == "skip_existing_same_name_size"
+
+
+def test_force_move_duplicates_refuses_source_replaced_after_review(tmp_path: Path, monkeypatch) -> None:
+    database = tmp_path / "rawdog.sqlite"
+    source_root = tmp_path / "source"
+    destination_root = tmp_path / "den"
+    source = source_root / "IMG_0001.CR3"
+    destination = destination_root / "IMG_0001.CR3"
+    source.parent.mkdir(parents=True)
+    destination.parent.mkdir(parents=True)
+    source.write_bytes(b"same bytes")
+    destination.write_bytes(b"same bytes")
+    initialize(database)
+    config = build_config(OrganizationMode.PROJECT, database_path=database)
+    with session(database) as connection:
+        plan = create_execution_plan(
+            connection,
+            ExecutionPlanCreate(
+                plan_kind="den",
+                what="move RAW files",
+                subject=f"{source_root} -> {destination_root}",
+                expected_result="a source replaced after review is not removed",
+                source_root=source_root,
+                destination_root=destination_root,
+            ),
+        )
+        add_execution_plan_rows(
+            connection,
+            plan.plan_id,
+            [
+                ExecutionPlanRowCreate(
+                    source_path=source,
+                    destination_path=destination,
+                    size_bytes=len(b"same bytes"),
+                    transfer_action=DenTransferAction.MOVE,
+                    status="skipped_existing_same_name_size",
+                )
+            ],
+        )
+    monkeypatch.setattr(cli, "_load_or_exit", lambda: (tmp_path / "config.json", config))
+    monkeypatch.setattr(cli.Prompt, "ask", lambda *args, **kwargs: f"FORCE MOVE DUPLICATES PLAN {plan.plan_id}")
+    original_review = cli._hash_review_move_duplicate_rows
+
+    def review_then_replace_source(rows):
+        verified, rejected = original_review(rows)
+        # Same size and same bytes, but a different inode: the reviewed file is gone.
+        replacement = source.with_name("replacement.tmp")
+        replacement.write_bytes(b"same bytes")
+        os.replace(replacement, source)
+        return verified, rejected
+
+    monkeypatch.setattr(cli, "_hash_review_move_duplicate_rows", review_then_replace_source)
+
+    cli.plans_force_move_duplicates(plan.plan_id, limit=10, dry_run=False, confirm_each=False)
+
+    assert source.read_bytes() == b"same bytes"
+    assert destination.read_bytes() == b"same bytes"
+    with session(database) as connection:
+        rows = list_execution_plan_rows(connection, plan.plan_id)
+    assert rows[0].status == "skipped_existing_same_name_size"
 
 
 def test_force_move_duplicates_rejects_hash_mismatch(tmp_path: Path, monkeypatch) -> None:

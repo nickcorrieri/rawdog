@@ -190,6 +190,7 @@ from rawdog.stores import (
 )
 from rawdog.verifier import (
     capture_file_version,
+    compare_file_identity,
     require_file_version,
     sha256_file,
     verify_same_bytes,
@@ -324,6 +325,10 @@ class VerifiedMoveDuplicate:
     destination_path: Path
     size_bytes: int
     sha256: str
+    # Full reviewed versions (bytes, extended attributes, inode) so removal can prove
+    # nothing changed between review and unlink.
+    source_version: dict
+    destination_version: dict
 
 
 def _load_or_exit() -> tuple[Path, RawdogConfig]:
@@ -8047,6 +8052,7 @@ def _run_junkyard(
     candidates = 0
     missing_or_changed = 0
     hash_mismatches = 0
+    ancillary_differences = 0
     total_bytes = 0
     candidate_rows: list[JunkyardCandidate] = []
     total_hash_bytes = sum(candidate.size_bytes * 2 for candidate in matches)
@@ -8076,7 +8082,7 @@ def _run_junkyard(
                 continue
             if hash_check:
                 try:
-                    matched = verify_same_bytes(candidate.source_path, candidate.den_path)
+                    identity = compare_file_identity(candidate.source_path, candidate.den_path)
                 except OSError:
                     missing_or_changed += 1
                     continue
@@ -8084,8 +8090,13 @@ def _run_junkyard(
                     hashed_bytes += candidate.size_bytes * 2
                     if progress and hash_task is not None:
                         progress.update(hash_task, completed=hashed_bytes, status=_format_bytes(hashed_bytes))
-                if not matched:
+                if not identity.same_bytes:
                     hash_mismatches += 1
+                    continue
+                if not identity.same_ancillary:
+                    # Same image bytes, but the yard copy carries extended attributes the den
+                    # copy lacks (or vice versa). Scrap refuses these, so do not list them.
+                    ancillary_differences += 1
                     continue
             candidates += 1
             total_bytes += candidate.size_bytes
@@ -8116,7 +8127,8 @@ def _run_junkyard(
             f"Report only: {candidates} working files ({total_bytes / 1_000_000_000:.2f} GB) "
             "appear den-recorded, exist on disk, and matched by SHA-256. "
             f"{missing_or_changed} catalog matches were missing or size-changed on disk; "
-            f"{hash_mismatches} had hash mismatches. RAWDOG did not delete or move anything.",
+            f"{hash_mismatches} had hash mismatches; {ancillary_differences} matched bytes but differ in "
+            "extended attributes and were left out. RAWDOG did not delete or move anything.",
             style=STYLE_ROW_SELECTED,
         )
     else:
@@ -8260,9 +8272,14 @@ def _run_junkyard_scrap(
         if den_resolved.is_symlink():
             skipped.append((source_resolved, "matched den path is a symlink"))
             continue
-        if hash_check and not verify_same_bytes(source_resolved, den_resolved):
-            skipped.append((source_resolved, "source and den hashes differ"))
-            continue
+        if hash_check:
+            identity = compare_file_identity(source_resolved, den_resolved)
+            if not identity.same_bytes:
+                skipped.append((source_resolved, "source and den hashes differ"))
+                continue
+            if not identity.same_ancillary:
+                skipped.append((source_resolved, "same bytes, but extended attributes differ; review before removal"))
+                continue
         allowed.append(
             JunkyardScrapCandidate(
                 source_path=source_resolved,
@@ -8983,7 +9000,8 @@ def _print_force_move_duplicate_guidance(plan_id: int, rows: list[ExecutionPlanR
                     "Commit only verified duplicates after review:",
                     f"rawdog plans force-move-duplicates {plan_id} --commit",
                     "",
-                    "This never overwrites the destination. It removes a source file only after SHA-256 matches.",
+                    "This never overwrites the destination. It removes a source file only after SHA-256 and "
+                    "extended attributes match.",
                 ]
             ),
             title="FORCE-MOVE-OF-DUPLICATES Review",
@@ -9332,13 +9350,21 @@ def _hash_review_move_duplicate_rows(
                 progress.update(task, completed=hashed_bytes, status=_format_bytes(hashed_bytes))
 
             try:
-                source_hash = _sha256_file_with_progress(source, advance)
-                destination_hash = _sha256_file_with_progress(destination, advance)
-            except OSError as exc:
+                source_version = capture_file_version(source, progress_callback=advance)
+                destination_version = capture_file_version(destination, progress_callback=advance)
+            except (OSError, SafetyError) as exc:
                 rejected.append((row, str(exc)))
                 continue
-            if source_hash != destination_hash:
+            if (source_version["size"], source_version["sha256"]) != (
+                destination_version["size"], destination_version["sha256"]
+            ):
                 rejected.append((row, "SHA-256 mismatch"))
+                continue
+            if source_version["ancillary"] != destination_version["ancillary"]:
+                # Removing the source would discard extended attributes (resource fork,
+                # Finder tags, ...) that the destination does not carry. Cleanup needs
+                # ancillary preservation, not just equal image bytes.
+                rejected.append((row, "same bytes, but extended attributes differ; review before removal"))
                 continue
             verified.append(
                 VerifiedMoveDuplicate(
@@ -9346,7 +9372,9 @@ def _hash_review_move_duplicate_rows(
                     source_path=source,
                     destination_path=destination,
                     size_bytes=row.size_bytes,
-                    sha256=source_hash,
+                    sha256=source_version["sha256"],
+                    source_version=source_version,
+                    destination_version=destination_version,
                 )
             )
     finally:
@@ -9366,18 +9394,6 @@ def _move_duplicate_precheck(row: ExecutionPlanRow, source: Path, destination: P
     if not _file_matches_expected_size(destination, row.size_bytes):
         return "destination missing or size changed"
     return None
-
-
-def _sha256_file_with_progress(path: Path, progress_callback) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        while True:
-            chunk = handle.read(1024 * 1024)
-            if not chunk:
-                break
-            digest.update(chunk)
-            progress_callback(len(chunk))
-    return digest.hexdigest()
 
 
 def _print_move_duplicate_review(
@@ -9458,13 +9474,19 @@ def _remove_verified_move_duplicates(
     with session(config.database_path) as connection:
         stores = list_stores(connection)
     for candidate in candidates:
-        if not _file_matches_expected_size(candidate.source_path, candidate.size_bytes):
+        # Re-prove the reviewed versions (bytes, extended attributes, inode) right before
+        # the irreversible step; a size check alone cannot see a replaced file.
+        try:
+            require_file_version(candidate.source_path, candidate.source_version)
+        except (OSError, SafetyError) as exc:
             failed += 1
-            _print_error(f"Source changed before removal: {candidate.source_path}")
+            _print_error(f"Source changed before removal: {candidate.source_path} ({exc})")
             continue
-        if not _file_matches_expected_size(candidate.destination_path, candidate.size_bytes):
+        try:
+            require_file_version(candidate.destination_path, candidate.destination_version)
+        except (OSError, SafetyError) as exc:
             failed += 1
-            _print_error(f"Destination changed before removal: {candidate.destination_path}")
+            _print_error(f"Destination changed before removal: {candidate.destination_path} ({exc})")
             continue
         try:
             candidate.source_path.unlink()
